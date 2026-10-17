@@ -1,0 +1,347 @@
+// Shapes of the Branvil HTTP API v1 (docs/api.md). Only the fields the GUI
+// reads are typed; the service may send more.
+
+export interface Page<T> {
+  items: T[];
+  next_cursor: string | null;
+}
+
+export type MemberKind = "owner" | "agent" | "runner";
+
+/** A member: the owner, an agent, or a runner; its kind decides what it may do. */
+export interface Member {
+  name: string;
+  display_name: string;
+  kind: MemberKind;
+  /** Accounts on upstream hosts, one per provider (tokens are never returned). */
+  accounts: Account[];
+  /** Where the member's picture is (the address changes with it); null for none. */
+  avatar_url?: string | null;
+}
+
+/** A member's account on an upstream host: a token of its own, or an app's identity. */
+export interface Account {
+  provider: string;
+  login: string;
+  kind: "token" | "app";
+  set_at: string;
+}
+
+/** What an account is set with; sent once and never returned. */
+export type AccountCredential = { token: string } | { app: { app_id: string; installation_id: string; private_key: string } };
+
+/** The upstream hosts this build knows, by provider name. */
+export const PROVIDERS = [{ name: "github", label: "GitHub" }] as const;
+
+export interface Session {
+  me: Member;
+  csrf: string;
+}
+
+export interface TokenInfo {
+  id: string;
+  label: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface IssuedToken {
+  id: string;
+  label: string;
+  token: string;
+  created_at: string;
+}
+
+export interface Repository {
+  path: string;
+  default_branch: string;
+  clone_url: string;
+  url: string;
+  protected_branches: string[];
+  required_checks: string[];
+  ci_network?: boolean;
+  /** The labels its tickets may carry. */
+  labels: string[];
+  /** The upstream host it follows and publishes to. */
+  upstream: Upstream | null;
+  revision: number;
+}
+
+export interface Upstream {
+  provider: string;
+  /** The provider's name for people ("GitHub"). */
+  host: string;
+  repository: string;
+  url: string;
+  /** Whose account reads it; `member` is "" when no member has an account there. */
+  reader: { member: string; chosen: boolean };
+  following: {
+    tip: string | null;
+    checked_at: string | null;
+    followed_at: string | null;
+    error: string | null;
+    stopped: string | null;
+  };
+}
+
+export interface Commit {
+  sha: string;
+  message: string;
+  author: string;
+  authored_at: string;
+  parents: string[];
+}
+
+export const LANES = ["new", "ready", "in_progress", "done"] as const;
+export type Lane = (typeof LANES)[number];
+
+export type Reaction = "ack" | "agree" | "celebrate" | "support";
+export const REACTIONS: Reaction[] = ["ack", "agree", "celebrate", "support"];
+
+export interface ReactionEntry {
+  author: string;
+  reaction: Reaction;
+}
+
+export interface Comment {
+  id: string;
+  author: string;
+  body: string;
+  meta: Record<string, unknown> | null;
+  created_at: string;
+  reactions: ReactionEntry[];
+  url: string;
+}
+
+export interface ThreadComment extends Comment {
+  reply_to_id?: string | null;
+}
+
+export interface Assignee {
+  name: string;
+  assigned_at: string;
+}
+
+export interface Ticket {
+  url: string;
+  repository: string;
+  /** The ticket's number in its repository, as a string ("1"). */
+  key: string;
+  title: string;
+  body: string;
+  state: "open" | "closed";
+  state_reason: "completed" | "not_planned" | null;
+  author: string;
+  assignee: Assignee | null;
+  labels: string[];
+  /** The issue it stands for on its repository's upstream host. */
+  upstream_issue: string | null;
+  /** The lane on its workspace's board; null when it is not on the board. */
+  lane: Lane | null;
+  rank: string;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  revision: number;
+}
+
+/**
+ * How a ticket is named where tickets of several repositories meet
+ * (`acme/demo#1`): numbers repeat across repositories. It is also the card
+ * name `PUT .../board` takes in `before`/`after`.
+ */
+export const ticketRef = (t: Pick<Ticket, "repository" | "key">) => `${t.repository}#${t.key}`;
+
+export interface PullSummary {
+  url: string;
+  label: string;
+  title: string;
+  state: "open" | "closed";
+  merged: boolean;
+  updated_at: string;
+  closes?: boolean;
+}
+
+export interface Card extends Ticket {
+  comments: Comment[];
+  pull_requests: PullSummary[];
+}
+
+/** A workspace: its repositories are `<name>/<repository>`, and it has one board. */
+export interface Workspace {
+  name: string;
+  /** The lanes of its board. */
+  lanes: Lane[];
+}
+
+export interface TicketLink {
+  url: string;
+  closes: boolean;
+}
+
+export interface PullRequest {
+  url: string;
+  repository: string;
+  number: number;
+  label: string;
+  title: string;
+  body: string;
+  state: "open" | "closed";
+  merged: boolean;
+  draft: boolean;
+  author: string;
+  head: string;
+  head_repository: string;
+  head_sha: string;
+  base: string;
+  base_sha: string;
+  reviewers: string[];
+  tickets: TicketLink[];
+  labels: string[];
+  changed_files: number;
+  ready_at: string | null;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  merged_at: string | null;
+  merge_sha: string | null;
+  /** Set once published to the repository's upstream host. */
+  upstream: Published | null;
+  revision: number;
+}
+
+/** A pull request published to the upstream host. */
+export interface Published {
+  /** Where it was published; it stays there if the repository's upstream changes. */
+  provider: string;
+  repository: string;
+  /** The member whose account posts it there (the author). */
+  account: string;
+  number: number | null;
+  url: string | null;
+  /** The host's state; `none` until a pull request is open there. */
+  state: "none" | "open" | "closed" | "merged";
+  pushed: string | null;
+  published_at: string;
+  error: string | null;
+  /** Why sending the branch stopped; publishing again replaces what the host has. */
+  stopped: string | null;
+}
+
+/** What publishing would post. */
+export interface PublishPreview {
+  host: string;
+  repository: string;
+  head: string;
+  base: string;
+  title: string;
+  body: string;
+  account: string;
+  login: string | null;
+}
+
+export type Verdict = "approve" | "request_changes" | "comment";
+
+export interface Review {
+  id: string;
+  author: string;
+  verdict: Verdict;
+  body: string;
+  commit: string;
+  submitted_at: string;
+  reply_only?: boolean;
+  reactions: ReactionEntry[];
+}
+
+export interface Thread {
+  id: string;
+  resolved: boolean;
+  outdated: boolean;
+  path: string;
+  line: number;
+  side: "LEFT" | "RIGHT";
+  start_line?: number | null;
+  start_side?: "LEFT" | "RIGHT" | null;
+  commit?: string;
+  comments: ThreadComment[];
+}
+
+export interface Activity {
+  comments: Comment[];
+  reviews: Review[];
+  threads: Thread[];
+}
+
+export interface FileChange {
+  path: string;
+  previous_path: string | null;
+  status: "added" | "removed" | "modified" | "renamed";
+  additions: number;
+  deletions: number;
+  patch: string | null;
+  patch_complete: boolean;
+}
+
+export type CheckStatus = "queued" | "in_progress" | "completed";
+export type CheckConclusion =
+  | "success"
+  | "failure"
+  | "cancelled"
+  | "timed_out"
+  | "skipped"
+  | "startup_failure"
+  | null;
+
+export interface Check {
+  name: string;
+  status: CheckStatus;
+  conclusion: CheckConclusion;
+  attempt_id?: string;
+  attempt?: number;
+  details_url?: string;
+  details?: string;
+  artifact_names?: string[];
+}
+
+export interface Checks {
+  head_sha: string;
+  base_sha: string;
+  /** null when a branch is gone. */
+  behind_by: number | null;
+  checks: Check[];
+  checks_expected: boolean;
+  base_checks: number;
+}
+
+export interface Job {
+  id: string;
+  job: string;
+  attempt: number;
+  sha: string;
+  status: CheckStatus;
+  conclusion: CheckConclusion;
+  started_at: string | null;
+  finished_at: string | null;
+  details: string | null;
+  artifact_names: string[];
+}
+
+export interface JobLog {
+  log: string;
+  log_bytes: number;
+  truncated: boolean;
+}
+
+/** What `/admin/diagnostics` says that the warnings use; the rest is for people reading the API. */
+export interface Diagnostics {
+  runner?: { state: "ready" | "no_runner" | "executor_unavailable" | string; detail: string; mode: string };
+  upstream?: { state: string; problems?: { repository: string; problem: string }[] };
+}
+
+export type ChangeKind = "ticket" | "pull" | "board" | "check" | "upstream" | "repo";
+
+export interface ChangeEvent {
+  kind: ChangeKind;
+  path?: string;
+  id?: string;
+}

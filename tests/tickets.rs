@@ -1,0 +1,934 @@
+//! Workspaces, tickets, labels, the board and its cards, comments, cursors,
+//! and permissions against a real service.
+
+mod common;
+
+use common::*;
+use serde_json::{Value, json};
+
+fn tickets_path() -> String {
+    format!("/repos/{}/tickets", encode(REPO))
+}
+
+#[tokio::test]
+async fn ticket_lifecycle_and_board() {
+    let w = World::new().await;
+    let s = &w.server;
+    let t = w.ticket("Fix login").await;
+    assert_eq!(t["key"], "1");
+    assert_eq!(t["url"], format!("{}/{REPO}/-/tickets/1", s.url));
+    assert_eq!(t["repository"], REPO);
+    assert_eq!(t["lane"], Value::Null);
+    assert_eq!(t["state"], "open");
+
+    // Undefined labels are refused with the defined ones listed.
+    let (st, v) = s
+        .post(
+            &tickets_path(),
+            &w.aiko,
+            json!({"title": "x", "labels": ["nope"]}),
+        )
+        .await;
+    assert_eq!(st, 400);
+    assert_eq!(v["error"]["code"], "label_undefined");
+    assert!(v["error"]["message"].as_str().unwrap().contains("bug"));
+
+    // Created straight onto a lane of the workspace's board.
+    let (st, t2) = s
+        .post(
+            &tickets_path(),
+            &w.aiko,
+            json!({"title": "Second", "lane": "ready"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{t2}");
+    assert_eq!(t2["lane"], "ready");
+
+    // Assign, move to ready (placed after #2), comment, react.
+    let one = format!("{}/1", tickets_path());
+    let (st, v) = s
+        .put(&format!("{one}/assignee"), &w.ken, json!({"name": "aiko"}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["assignee"]["name"], "aiko");
+    let (st, v) = s
+        .put(
+            &format!("{one}/board"),
+            &w.ken,
+            json!({"lane": "ready", "after": format!("{REPO}#2")}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    let (st, c) = s
+        .post(
+            &format!("{one}/comments"),
+            &w.aiko,
+            json!({"body": "Looking", "meta": {"kind": "workflow_error", "routing": "suppress"}}),
+        )
+        .await;
+    assert_eq!(st, 201, "{c}");
+    assert!(
+        c["url"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/-/tickets/1#{}", c["id"].as_str().unwrap()))
+    );
+    let (st, r) = s
+        .post(
+            &format!("{one}/reactions"),
+            &w.ken,
+            json!({"target_id": c["id"], "reaction": "ack"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{r}");
+    let (st, _) = s
+        .post(
+            &format!("{one}/reactions"),
+            &w.ken,
+            json!({"target_id": c["id"], "reaction": "heart"}),
+        )
+        .await;
+    assert_eq!(st, 400);
+    // A reaction is taken back by its author only, and taking back twice is no error.
+    let (st, r) = s
+        .post(
+            &format!("{one}/reactions"),
+            &w.aiko,
+            json!({"target_id": c["id"], "reaction": "agree"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{r}");
+    for _ in 0..2 {
+        let (st, v) = s
+            .delete_with(
+                &format!("{one}/reactions"),
+                &w.aiko,
+                json!({"target_id": c["id"], "reaction": "agree"}),
+            )
+            .await;
+        assert_eq!(st, 204, "{v}");
+    }
+    let (st, v) = s
+        .delete_with(
+            &format!("{one}/reactions"),
+            &w.aiko,
+            json!({"target_id": c["id"], "reaction": "ack"}),
+        )
+        .await;
+    assert_eq!(st, 204, "{v}");
+    let comments = s.ok(&format!("{one}/comments"), &w.aiko).await;
+    assert_eq!(
+        comments["items"][0]["reactions"],
+        json!([{"author": "ken", "reaction": "ack"}])
+    );
+
+    // Cards: ready lane, ordered by rank, with comments; assignee=me filters.
+    let cards = s
+        .ok(&format!("/workspaces/{WS}/board/cards?lane=ready"), &w.aiko)
+        .await;
+    let keys: Vec<&str> = cards["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["2", "1"]);
+    assert_eq!(
+        cards["items"][1]["comments"][0]["meta"]["routing"],
+        "suppress"
+    );
+    assert_eq!(
+        cards["items"][1]["comments"][0]["reactions"][0]["reaction"],
+        "ack"
+    );
+    let mine = s
+        .ok(
+            &format!("/workspaces/{WS}/board/cards?assignee=me&comments=none"),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(mine["items"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["items"][0]["comments"], json!([]));
+    // Move #1 before #2.
+    s.put(
+        &format!("{one}/board"),
+        &w.ken,
+        json!({"lane": "ready", "before": format!("{REPO}#2")}),
+    )
+    .await;
+    let cards = s
+        .ok(&format!("/workspaces/{WS}/board/cards?lane=ready"), &w.aiko)
+        .await;
+    assert_eq!(cards["items"][0]["key"], "1");
+
+    // Close: state_changed, closed window lists it; reopen clears closed_at.
+    let since = s.ok(&one, &w.aiko).await["updated_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, v) = s
+        .patch(
+            &one,
+            &w.aiko,
+            json!({"state": "closed", "state_reason": "not_planned"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["state_changed"], true);
+    assert_eq!(v["ticket"]["state_reason"], "not_planned");
+    let closed = s
+        .ok(
+            &format!("/workspaces/{WS}/board/closed?since={since}"),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(closed["items"][0]["label"], "#1");
+    assert_eq!(closed["items"][0]["kind"], "ticket");
+    let (_, v) = s.patch(&one, &w.aiko, json!({"state": "closed"})).await;
+    assert_eq!(v["state_changed"], false);
+    let (_, v) = s.patch(&one, &w.aiko, json!({"state": "open"})).await;
+    assert_eq!(v["ticket"]["closed_at"], Value::Null);
+    assert_eq!(v["ticket"]["state_reason"], Value::Null);
+
+    // Conditional update with a stale revision.
+    let (st, v) = s
+        .patch(&one, &w.aiko, json!({"title": "New", "revision": 1}))
+        .await;
+    assert_eq!(st, 409, "{v}");
+    assert_eq!(v["error"]["code"], "conflict");
+
+    // Lists filter by state and label.
+    s.patch(&one, &w.aiko, json!({"add_labels": ["bug"]})).await;
+    let bugs = s
+        .ok(&format!("{}?label=bug", tickets_path()), &w.aiko)
+        .await;
+    assert_eq!(bugs["items"].as_array().unwrap().len(), 1);
+    let all = s
+        .ok(&format!("{}?state=all", tickets_path()), &w.aiko)
+        .await;
+    assert_eq!(all["items"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn tickets_are_numbered_and_labelled_per_repository() {
+    let w = World::new().await;
+    let s = &w.server;
+    let (st, v) = s
+        .post(
+            "/repos",
+            &w.owner,
+            json!({"path": "acme/other", "labels": ["infra"]}),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["labels"], json!(["infra"]));
+    let other = format!("/repos/{}/tickets", encode("acme/other"));
+    // Pull requests are numbered on their own: the first ticket is still #1.
+    w.push_change("feature", "f.txt", "one\n");
+    assert_eq!(w.open_pull("feature", json!([])).await["number"], 1);
+    assert_eq!(w.ticket("First here").await["key"], "1");
+    let (st, t) = s
+        .post(
+            &other,
+            &w.aiko,
+            json!({"title": "First there", "labels": ["infra"]}),
+        )
+        .await;
+    assert_eq!(st, 201, "{t}");
+    assert_eq!(t["key"], "1");
+    assert_eq!(t["repository"], "acme/other");
+    assert_eq!(t["url"], format!("{}/acme/other/-/tickets/1", s.url));
+    assert_eq!(w.ticket("Second here").await["key"], "2");
+    for key in ["01", "0", "x", "1x"] {
+        assert_eq!(
+            s.get(&format!("{other}/{key}"), &w.aiko).await.0,
+            404,
+            "{key}"
+        );
+    }
+
+    // A ticket carries only labels of its own repository.
+    let (st, v) = s
+        .post(&other, &w.aiko, json!({"title": "x", "labels": ["bug"]}))
+        .await;
+    assert_eq!(st, 400, "{v}");
+    assert_eq!(v["error"]["code"], "label_undefined");
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("infra"),
+        "{v}"
+    );
+    let (st, v) = s
+        .patch(
+            &format!("{other}/1"),
+            &w.aiko,
+            json!({"add_labels": ["bug"]}),
+        )
+        .await;
+    assert_eq!(st, 400, "{v}");
+    assert_eq!(v["error"]["code"], "label_undefined");
+    // The repository's labels are the owner's setting.
+    let repo = s.ok("/repos/acme%2Fother", &w.aiko).await;
+    let change = json!({"revision": repo["revision"], "labels": ["infra", "bug"]});
+    let (st, _) = s
+        .patch("/repos/acme%2Fother", &w.aiko, change.clone())
+        .await;
+    assert_eq!(st, 403);
+    let (st, v) = s.patch("/repos/acme%2Fother", &w.owner, change).await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = s
+        .patch(
+            &format!("{other}/1"),
+            &w.aiko,
+            json!({"add_labels": ["bug"]}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+
+    // Cards of both repositories of the workspace share its board; a card is
+    // named by its repository and number.
+    for path in [format!("{}/1", tickets_path()), format!("{other}/1")] {
+        let (st, v) = s
+            .put(&format!("{path}/board"), &w.aiko, json!({"lane": "ready"}))
+            .await;
+        assert_eq!(st, 200, "{v}");
+    }
+    let (st, v) = s
+        .put(
+            &format!("{}/2/board", tickets_path()),
+            &w.aiko,
+            json!({"lane": "ready", "before": "acme/other#1"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    let cards = s
+        .ok(&format!("/workspaces/{WS}/board/cards?lane=ready"), &w.aiko)
+        .await;
+    let refs: Vec<String> = cards["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            format!(
+                "{}#{}",
+                c["repository"].as_str().unwrap(),
+                c["key"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(refs, ["acme/demo#1", "acme/demo#2", "acme/other#1"]);
+}
+
+#[tokio::test]
+async fn workspaces_hold_repositories_and_one_board_each() {
+    let w = World::new().await;
+    let s = &w.server;
+    // Only the owner creates workspaces and repositories.
+    let (st, _) = s
+        .post("/workspaces", &w.aiko, json!({"name": "beta"}))
+        .await;
+    assert_eq!(st, 403);
+    let (st, v) = s
+        .post("/workspaces", &w.owner, json!({"name": "beta"}))
+        .await;
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["lanes"], json!(["new", "ready", "in_progress", "done"]));
+    let (st, _) = s
+        .post("/workspaces", &w.owner, json!({"name": "BETA"}))
+        .await;
+    assert_eq!(st, 409);
+    let (st, _) = s
+        .post("/workspaces", &w.owner, json!({"name": "a/b"}))
+        .await;
+    assert_eq!(st, 400);
+    let names: Vec<Value> = s.ok("/workspaces", &w.aiko).await["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].clone())
+        .collect();
+    assert_eq!(names, ["acme", "beta"]);
+    assert_eq!(s.ok("/workspaces/beta", &w.aiko).await["name"], "beta");
+    assert_eq!(s.get("/workspaces/nope", &w.aiko).await.0, 404);
+    // A repository is `<workspace>/<name>` of an existing workspace, spelled
+    // as the workspace is.
+    let (st, _) = s.post("/repos", &w.aiko, json!({"path": "beta/x"})).await;
+    assert_eq!(st, 403);
+    let (st, v) = s.post("/repos", &w.owner, json!({"path": "nope/x"})).await;
+    assert_eq!(st, 404, "{v}");
+    let (st, v) = s
+        .post("/repos", &w.owner, json!({"path": "beta/team/x"}))
+        .await;
+    assert_eq!(st, 400, "{v}");
+    let (st, v) = s.post("/repos", &w.owner, json!({"path": "BETA/x"})).await;
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["path"], "beta/x");
+
+    // A ticket goes on its own workspace's board only.
+    let beta = format!("/repos/{}/tickets", encode("beta/x"));
+    let (st, v) = s
+        .post(&beta, &w.aiko, json!({"title": "There", "lane": "ready"}))
+        .await;
+    assert_eq!(st, 201, "{v}");
+    w.ticket("Here").await;
+    let one = format!("{}/1", tickets_path());
+    let (st, v) = s
+        .put(
+            &format!("{one}/board"),
+            &w.aiko,
+            json!({"lane": "ready", "before": "beta/x#1"}),
+        )
+        .await;
+    assert_eq!(st, 404, "{v}");
+    let (st, v) = s
+        .put(&format!("{one}/board"), &w.aiko, json!({"lane": "ready"}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    let aiko = w.aiko.as_str();
+    let cards = |ws: &'static str| async move {
+        let v = s.ok(&format!("/workspaces/{ws}/board/cards"), aiko).await;
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}#{}",
+                    c["repository"].as_str().unwrap(),
+                    c["key"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(cards("acme").await, ["acme/demo#1"]);
+    assert_eq!(cards("beta").await, ["beta/x#1"]);
+    // Off the board again.
+    let (st, v) = s
+        .put(&format!("{one}/board"), &w.aiko, json!({"lane": null}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["lane"], Value::Null);
+    assert!(cards("acme").await.is_empty());
+}
+
+#[tokio::test]
+async fn the_board_lists_the_closed_items_of_its_workspace() {
+    let w = World::new().await;
+    let s = &w.server;
+    // A closed pull request and a closed ticket that is on no board.
+    w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let (st, v) = s
+        .post(
+            &format!("{}/pulls/{}/close", w.repo_path(), p["number"]),
+            &w.aiko,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    w.ticket("Off the board").await;
+    let (st, v) = s
+        .patch(
+            &format!("{}/1", tickets_path()),
+            &w.aiko,
+            json!({"state": "closed"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    // The same in a repository of another workspace.
+    s.post("/workspaces", &w.owner, json!({"name": "beta"}))
+        .await;
+    s.post("/repos", &w.owner, json!({"path": "beta/x"})).await;
+    let remote = s.remote("beta/x");
+    git_as_ok(&w.work, "alice", &w.owner, &["push", "-q", &remote, "main"]);
+    git_as_ok(
+        &w.work,
+        "aiko",
+        &w.aiko,
+        &["push", "-q", &remote, "feature"],
+    );
+    let (st, v) = s
+        .post(
+            &format!("/repos/{}/pulls", encode("beta/x")),
+            &w.aiko,
+            json!({"head": "feature", "title": "There"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    s.post(
+        &format!("/repos/{}/pulls/1/close", encode("beta/x")),
+        &w.aiko,
+        json!({}),
+    )
+    .await;
+    let beta = format!("/repos/{}/tickets", encode("beta/x"));
+    s.post(&beta, &w.aiko, json!({"title": "There"})).await;
+    s.patch(&format!("{beta}/1"), &w.aiko, json!({"state": "closed"}))
+        .await;
+    let aiko = w.aiko.as_str();
+    let closed = |ws: &'static str| async move {
+        let v = s.ok(&format!("/workspaces/{ws}/board/closed"), aiko).await;
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                i["url"]
+                    .as_str()
+                    .unwrap()
+                    .replace(&format!("{}/", s.url), "")
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut acme = closed("acme").await;
+    acme.sort();
+    assert_eq!(acme, ["acme/demo/-/pulls/1", "acme/demo/-/tickets/1"]);
+    let mut beta = closed("beta").await;
+    beta.sort();
+    assert_eq!(beta, ["beta/x/-/pulls/1", "beta/x/-/tickets/1"]);
+}
+
+/// How many open tickets `assignee=<name>` lists.
+#[tokio::test]
+async fn the_owner_closes_by_moving_to_done_and_closing_moves_to_done() {
+    let w = World::new().await;
+    let s = &w.server;
+    let one = format!(
+        "{}/{}",
+        tickets_path(),
+        w.ticket("Owner's moves").await["key"].as_str().unwrap()
+    );
+    let two = format!(
+        "{}/{}",
+        tickets_path(),
+        w.ticket("Agent's moves").await["key"].as_str().unwrap()
+    );
+    let put = |path: String, token: String, lane: &'static str| async move {
+        let (st, v) = s
+            .put(&format!("{path}/board"), &token, json!({"lane": lane}))
+            .await;
+        assert_eq!(st, 200, "{v}");
+        v
+    };
+    let state = |v: &Value| {
+        (
+            v["lane"].clone(),
+            v["state"].clone(),
+            v["state_reason"].clone(),
+        )
+    };
+
+    // The owner's move into done closes as completed; into another lane reopens.
+    put(one.clone(), w.owner.clone(), "ready").await;
+    let v = put(one.clone(), w.owner.clone(), "done").await;
+    assert_eq!(
+        state(&v),
+        (json!("done"), json!("closed"), json!("completed"))
+    );
+    let v = put(one.clone(), w.owner.clone(), "in_progress").await;
+    assert_eq!(
+        state(&v),
+        (json!("in_progress"), json!("open"), Value::Null)
+    );
+
+    // An agent's moves leave the state alone, both ways.
+    let v = put(two.clone(), w.aiko.clone(), "done").await;
+    assert_eq!(state(&v), (json!("done"), json!("open"), Value::Null));
+    put(two.clone(), w.owner.clone(), "done").await;
+    let v = put(two.clone(), w.aiko.clone(), "ready").await;
+    assert_eq!(
+        state(&v),
+        (json!("ready"), json!("closed"), json!("completed"))
+    );
+
+    // Closing from any lane moves the ticket to done, keeping its reason;
+    // reopening leaves it there, and the owner's move within done keeps the reason.
+    let (st, v) = s
+        .patch(
+            &one,
+            &w.aiko,
+            json!({"state": "closed", "state_reason": "not_planned"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        state(&v["ticket"]),
+        (json!("done"), json!("closed"), json!("not_planned"))
+    );
+    let v = put(one.clone(), w.owner.clone(), "done").await;
+    assert_eq!(
+        state(&v),
+        (json!("done"), json!("closed"), json!("not_planned"))
+    );
+    let (st, v) = s.patch(&one, &w.owner, json!({"state": "open"})).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        state(&v["ticket"]),
+        (json!("done"), json!("open"), Value::Null)
+    );
+    // A ticket off the board stays off it when closed.
+    let (st, v) = s
+        .put(&format!("{one}/board"), &w.owner, json!({"lane": null}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = s.patch(&one, &w.owner, json!({"state": "closed"})).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        state(&v["ticket"]),
+        (Value::Null, json!("closed"), json!("completed"))
+    );
+}
+
+async fn assigned(s: &Server, token: &str, name: &str) -> usize {
+    let found = s
+        .ok(&format!("{}?assignee={name}", tickets_path()), token)
+        .await;
+    found["items"].as_array().unwrap().len()
+}
+
+#[tokio::test]
+async fn a_ticket_has_at_most_one_assignee() {
+    let w = World::new().await;
+    let s = &w.server;
+    let t = w.ticket("One agent").await;
+    assert_eq!(t["assignee"], Value::Null);
+    let path = format!("{}/{}/assignee", tickets_path(), t["key"].as_str().unwrap());
+    // Set.
+    let (st, v) = s.put(&path, &w.ken, json!({"name": "aiko"})).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["assignee"]["name"], "aiko");
+    let first = v["assignee"]["assigned_at"].as_str().unwrap().to_string();
+    assert!(first.ends_with('Z'), "{first}");
+    assert_eq!(assigned(s, &w.aiko, "aiko").await, 1);
+    assert_eq!(assigned(s, &w.aiko, "me").await, 1);
+
+    // The same assignee again keeps assigned_at and the revision.
+    let (st, again) = s.put(&path, &w.ken, json!({"name": "AIKO"})).await;
+    assert_eq!(st, 200, "{again}");
+    assert_eq!(again["assignee"]["assigned_at"], first.as_str());
+    assert_eq!(again["revision"], v["revision"]);
+
+    // Another name replaces it with a new assigned_at.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (st, v) = s.put(&path, &w.ken, json!({"name": "ken"})).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["assignee"]["name"], "ken");
+    assert!(v["assignee"]["assigned_at"].as_str().unwrap() > first.as_str());
+    assert!(v["revision"].as_u64() > again["revision"].as_u64(), "{v}");
+    assert_eq!(assigned(s, &w.aiko, "aiko").await, 0);
+    assert_eq!(assigned(s, &w.aiko, "ken").await, 1);
+
+    // Unknown members, unknown fields, and runners are refused.
+    let (st, _) = s.put(&path, &w.ken, json!({"name": "nobody"})).await;
+    assert_eq!(st, 404);
+    let (st, _) = s.put(&path, &w.ken, json!({"names": ["aiko"]})).await;
+    assert_eq!(st, 400);
+    let runner = s.member(&w.owner, "runner1", "runner").await;
+    let (st, _) = s.put(&path, &runner, json!({"name": "aiko"})).await;
+    assert_eq!(st, 403);
+
+    // Clear; clearing again is still 200 with the ticket.
+    for _ in 0..2 {
+        let (st, v) = s.delete(&path, &w.ken).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["assignee"], Value::Null);
+    }
+    assert_eq!(assigned(s, &w.aiko, "ken").await, 0);
+
+    // Concurrent assignments end with exactly one assignee, and the
+    // filters agree with the record.
+    let names = ["aiko", "ken", "alice"];
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        for name in names {
+            let (http, url, token, path) =
+                (s.http.clone(), s.url.clone(), w.ken.clone(), path.clone());
+            handles.push(tokio::spawn(async move {
+                http.put(format!("{url}/api/v1{path}"))
+                    .bearer_auth(token)
+                    .json(&json!({"name": name}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }));
+        }
+    }
+    for h in handles {
+        assert_eq!(h.await.unwrap(), 200);
+    }
+    let ticket = s.ok(&path.replace("/assignee", ""), &w.aiko).await;
+    let winner = ticket["assignee"]["name"].as_str().unwrap();
+    for name in names {
+        assert_eq!(
+            assigned(s, &w.aiko, name).await,
+            usize::from(name == winner),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn concurrent_label_changes_are_all_kept_and_indexes_match() {
+    let w = World::new().await;
+    let t = w.ticket("Labels").await;
+    let path = format!("{}/{}", tickets_path(), t["key"].as_str().unwrap());
+    let s = &w.server;
+    // Start with docs and ui; four writers race: two add, two remove.
+    s.patch(&path, &w.aiko, json!({"add_labels": ["docs", "ui"]}))
+        .await;
+    let ops = [
+        json!({"add_labels": ["bug"]}),
+        json!({"add_labels": ["feature"]}),
+        json!({"remove_labels": ["docs"]}),
+        json!({"remove_labels": ["ui"]}),
+    ];
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        for op in &ops {
+            let (http, url, token, path, op) = (
+                s.http.clone(),
+                s.url.clone(),
+                w.aiko.clone(),
+                path.clone(),
+                op.clone(),
+            );
+            handles.push(tokio::spawn(async move {
+                http.patch(format!("{url}/api/v1{path}"))
+                    .bearer_auth(token)
+                    .json(&op)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }));
+        }
+    }
+    for h in handles {
+        assert_eq!(h.await.unwrap(), 200);
+    }
+    let v = s.ok(&path, &w.aiko).await;
+    let mut labels: Vec<String> = v["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap().to_string())
+        .collect();
+    labels.sort();
+    assert_eq!(labels, ["bug", "feature"]);
+    // The label index agrees with the record.
+    for (label, n) in [("bug", 1), ("feature", 1), ("docs", 0), ("ui", 0)] {
+        let found = s
+            .ok(&format!("{}?label={label}", tickets_path()), &w.aiko)
+            .await;
+        assert_eq!(found["items"].as_array().unwrap().len(), n, "label {label}");
+    }
+
+    // And the offline consistency check finds nothing to repair.
+    let mut server = w.server;
+    server.stop();
+    let out = std::process::Command::new(BIN)
+        .args(["admin", "check", "--data-dir"])
+        .arg(&server.data)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("indexes: ok"), "{text}");
+}
+
+#[tokio::test]
+async fn cursors_ids_and_member_kinds_are_checked() {
+    let w = World::new().await;
+    let s = &w.server;
+    for i in 0..5 {
+        w.ticket(&format!("T{i}")).await;
+    }
+    let first = s.ok(&format!("{}?limit=2", tickets_path()), &w.aiko).await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    let second = s
+        .ok(
+            &format!("{}?limit=2&cursor={cursor}", tickets_path()),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(second["items"][0]["key"], "3");
+    // Follow to the end.
+    let mut keys = Vec::new();
+    let mut next: Option<String> = None;
+    loop {
+        let q = next
+            .as_ref()
+            .map(|c| format!("&cursor={c}"))
+            .unwrap_or_default();
+        let page = s
+            .ok(&format!("{}?limit=2{q}", tickets_path()), &w.aiko)
+            .await;
+        keys.extend(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["key"].as_str().unwrap().to_string()),
+        );
+        match page["next_cursor"].as_str() {
+            Some(c) => next = Some(c.to_string()),
+            None => break,
+        }
+    }
+    assert_eq!(keys, ["1", "2", "3", "4", "5"]);
+
+    // A tampered cursor, a cursor of other conditions, and another member's
+    // cursor are refused.
+    let mut tampered = cursor.clone();
+    tampered.replace_range(0..1, if cursor.starts_with('A') { "B" } else { "A" });
+    for (q, token) in [
+        (format!("limit=2&cursor={tampered}"), &w.aiko),
+        (format!("limit=2&state=all&cursor={cursor}"), &w.aiko),
+        (format!("limit=2&cursor={cursor}"), &w.ken),
+        ("limit=2&cursor=garbage".to_string(), &w.aiko),
+    ] {
+        let (st, v) = s.get(&format!("{}?{q}", tickets_path()), token).await;
+        assert_eq!(st, 400, "{q}: {v}");
+        assert_eq!(v["error"]["code"], "invalid_cursor");
+    }
+    let (st, _) = s.get(&format!("{}?limit=0", tickets_path()), &w.aiko).await;
+    assert_eq!(st, 400);
+
+    // A comment id of another ticket is not this ticket's.
+    let one = format!("{}/1", tickets_path());
+    let two = format!("{}/2", tickets_path());
+    let (_, c) = s
+        .post(&format!("{one}/comments"), &w.aiko, json!({"body": "hi"}))
+        .await;
+    let (st, v) = s
+        .post(
+            &format!("{two}/reactions"),
+            &w.aiko,
+            json!({"target_id": c["id"], "reaction": "ack"}),
+        )
+        .await;
+    assert_eq!(st, 404, "{v}");
+
+    // A runner neither reads nor writes tickets; a bad token is 401.
+    let runner = s.member(&w.owner, "runner1", "runner").await;
+    let (st, _) = s
+        .post(&tickets_path(), &runner, json!({"title": "x"}))
+        .await;
+    assert_eq!(st, 403);
+    let (st, _) = s.get(&one, &runner).await;
+    assert_eq!(st, 403);
+    let (st, v) = s.get(&one, "bvt_bad_token").await;
+    assert_eq!(st, 401);
+    assert_eq!(v["error"]["code"], "unauthorized");
+    // Members list: the owner's, with every member's kind.
+    assert_eq!(s.get("/members", &w.aiko).await.0, 403);
+    let members = s.ok("/members", &w.owner).await;
+    assert_eq!(
+        members["items"],
+        json!([
+            {"name": "aiko", "display_name": "aiko", "kind": "agent", "accounts": [], "avatar_url": null},
+            {"name": "alice", "display_name": "alice", "kind": "owner", "accounts": [], "avatar_url": null},
+            {"name": "ken", "display_name": "ken", "kind": "agent", "accounts": [], "avatar_url": null},
+            {"name": "runner1", "display_name": "runner1", "kind": "runner", "accounts": [], "avatar_url": null},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn idempotency_keys_replay_and_conflict() {
+    let w = World::new().await;
+    let s = &w.server;
+    let send = |body: Value| {
+        s.http
+            .post(format!("{}/api/v1{}", s.url, tickets_path()))
+            .bearer_auth(&w.aiko)
+            .header("Idempotency-Key", "create-1")
+            .json(&body)
+            .send()
+    };
+    let a = send(json!({"title": "Once"})).await.unwrap();
+    assert_eq!(a.status(), 201);
+    let a: Value = a.json().await.unwrap();
+    let b = send(json!({"title": "Once"})).await.unwrap();
+    assert_eq!(b.status(), 201);
+    let b: Value = b.json().await.unwrap();
+    assert_eq!(a["key"], b["key"]);
+    let c = send(json!({"title": "Other"})).await.unwrap();
+    assert_eq!(c.status(), 409);
+    let all = s
+        .ok(&format!("{}?state=all", tickets_path()), &w.aiko)
+        .await;
+    assert_eq!(all["items"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn sessions_need_csrf_and_hosts_are_checked() {
+    let w = World::new().await;
+    let s = &w.server;
+    let http = reqwest::Client::new();
+    let resp = s.enter(&s.entry_code(&w.owner).await).await;
+    assert_eq!(resp.status(), 200);
+    let cookie = resp.headers()["set-cookie"].to_str().unwrap().to_string();
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+    let cookie = cookie.split(';').next().unwrap().to_string();
+    let body: Value = resp.json().await.unwrap();
+    let csrf = body["csrf"].as_str().unwrap();
+    // GET with the cookie works; a write without the CSRF header does not.
+    let me = http
+        .get(format!("{}/api/v1/me", s.url))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 200);
+    let url = format!("{}/api/v1{}", s.url, tickets_path());
+    let no_csrf = http
+        .post(&url)
+        .header("cookie", &cookie)
+        .json(&json!({"title": "x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), 403);
+    let with_csrf = http
+        .post(&url)
+        .header("cookie", &cookie)
+        .header("x-branvil-csrf", csrf)
+        .json(&json!({"title": "x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(with_csrf.status(), 201);
+    // DNS rebinding: another Host is misdirected; another Origin is refused.
+    let wrong_host = http
+        .get(format!("{}/api/v1/health", s.url))
+        .header("host", "evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_host.status(), 421);
+    let wrong_origin = http
+        .get(format!("{}/api/v1/me", s.url))
+        .bearer_auth(&w.ken)
+        .header("origin", "http://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_origin.status(), 403);
+    // Responses carry the security headers; the SPA serves web URLs.
+    let page = http
+        .get(format!("{}/{REPO}/-/tickets/1", s.url))
+        .send()
+        .await
+        .unwrap();
+    // Scripts only from the GUI's own files; inline styles are allowed for its components.
+    let csp = page.headers()["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains("script-src 'self';"), "{csp}");
+    assert!(csp.contains("style-src 'self' 'unsafe-inline';"), "{csp}");
+    assert_eq!(page.headers()["x-content-type-options"], "nosniff");
+}

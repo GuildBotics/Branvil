@@ -1,0 +1,1268 @@
+//! The upstream host against a real service and a GitHub stand-in
+//! (`common::github`): accounts, following the default branch, publishing a
+//! pull request as its author, carrying changes both ways, the host's checks
+//! and logs, the merge on the host, and conditional requests.
+
+mod common;
+
+use common::github::{AppKey, FakeGitHub};
+use common::*;
+use reqwest::StatusCode;
+use serde_json::{Value, json};
+
+const GH: &str = "octo/demo";
+const OWNER_TOKEN: &str = "gh-owner-4c1d";
+const AIKO_TOKEN: &str = "gh-aiko-9e2b";
+
+/// A world whose `acme/demo` follows `octo/demo` on the stand-in, with the
+/// owner's account set.
+async fn followed() -> (World, FakeGitHub) {
+    let mut w = World::new().await;
+    let gh = FakeGitHub::start(&w.dir.path().join("github")).await;
+    gh.repository(GH, &w.work);
+    gh.account(OWNER_TOKEN, "alice-gh");
+    gh.account(AIKO_TOKEN, "aiko-bot");
+    gh.configure(&w.server.data);
+    w.restart(&[]);
+    let s = &w.server;
+    let (st, v) = s
+        .put(
+            "/members/alice/accounts/github",
+            &w.owner,
+            json!({"token": OWNER_TOKEN}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = s
+        .put(
+            &format!("{}/upstream", w.repo_path()),
+            &w.owner,
+            json!({"provider": "github", "repository": GH}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    (w, gh)
+}
+
+async fn refresh(w: &World) -> Value {
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/upstream/refresh", w.repo_path()),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    v
+}
+
+async fn publish(w: &World, number: u64) -> (StatusCode, Value) {
+    let pull = format!("{}/pulls/{number}", w.repo_path());
+    let p = w.server.ok(&pull, &w.owner).await;
+    w.server
+        .post(
+            &format!("{pull}/publish"),
+            &w.owner,
+            json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
+        )
+        .await
+}
+
+fn branvil_tip(w: &World, branch: &str) -> String {
+    let dir = w.server.data.join("repos/acme/demo.git");
+    git_ok(
+        &dir,
+        &[
+            "--git-dir",
+            dir.to_str().unwrap(),
+            "rev-parse",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+}
+
+/// Adds a commit to `branch` of the stand-in's repository (someone working on
+/// GitHub directly).
+fn commit_on_github(gh: &FakeGitHub, branch: &str, message: &str) -> String {
+    let dir = gh.dir(GH);
+    let d = dir.to_str().unwrap();
+    let parent = gh.tip(GH, branch).unwrap();
+    let tree = git_ok(
+        &dir,
+        &["--git-dir", d, "rev-parse", &format!("{parent}^{{tree}}")],
+    );
+    let sha = git_ok(
+        &dir,
+        &[
+            "--git-dir",
+            d,
+            "-c",
+            "user.name=x",
+            "-c",
+            "user.email=x@x",
+            "commit-tree",
+            &tree,
+            "-p",
+            &parent,
+            "-m",
+            message,
+        ],
+    );
+    git_ok(
+        &dir,
+        &[
+            "--git-dir",
+            d,
+            "update-ref",
+            &format!("refs/heads/{branch}"),
+            &sha,
+        ],
+    );
+    sha
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accounts_are_checked_with_the_host_and_their_tokens_never_returned() {
+    let (w, _gh) = followed().await;
+    let s = &w.server;
+    let account = "/members/aiko/accounts/github";
+    // The host refuses the token: nothing is kept.
+    let (st, v) = s.put(account, &w.owner, json!({"token": "wrong"})).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    // Only the owner sets accounts.
+    let (st, _) = s.put(account, &w.aiko, json!({"token": AIKO_TOKEN})).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, v) = s.put(account, &w.owner, json!({"token": AIKO_TOKEN})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["accounts"][0]["provider"], "github");
+    assert_eq!(v["accounts"][0]["login"], "aiko-bot");
+    assert_eq!(v["accounts"][0]["kind"], "token");
+    let members = s.ok("/members?limit=100", &w.owner).await.to_string();
+    assert!(!members.contains(AIKO_TOKEN) && !members.contains(OWNER_TOKEN));
+    let file = s.data.join("secrets/accounts/aiko.github.json");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap(),
+        json!({"token": AIKO_TOKEN})
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let (st, _) = s.delete("/members/aiko/accounts/../x", &w.owner).await;
+    assert_ne!(st, StatusCode::OK);
+    let (st, v) = s.delete("/members/aiko/accounts/gitlab", &w.owner).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let (st, v) = s.delete(account, &w.owner).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["accounts"].as_array().unwrap().is_empty());
+    assert!(!file.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repository_follows_its_upstream_and_its_default_branch_changes_only_there() {
+    let mut w = World::new().await;
+    let gh = FakeGitHub::start(&w.dir.path().join("github")).await;
+    gh.repository(GH, &w.work);
+    gh.account(OWNER_TOKEN, "alice-gh");
+    gh.configure(&w.server.data);
+    w.restart(&[]);
+    let s = &w.server;
+    let upstream = format!("{}/upstream", w.repo_path());
+    let setting = json!({"provider": "github", "repository": GH});
+    // The owner's account reads the upstream, so it comes first.
+    let (st, v) = s.put(&upstream, &w.owner, setting.clone()).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "no_account");
+    let (st, _) = s
+        .put(
+            "/members/alice/accounts/github",
+            &w.owner,
+            json!({"token": OWNER_TOKEN}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = s
+        .put(
+            &upstream,
+            &w.owner,
+            json!({"provider": "github", "repository": "octo/x/y"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let (st, v) = s.put(&upstream, &w.owner, setting).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["upstream"]["host"], "GitHub");
+    assert_eq!(v["upstream"]["url"], "https://github.test/octo/demo");
+    assert_eq!(
+        v["upstream"]["following"]["tip"],
+        branvil_tip(&w, "main").as_str()
+    );
+
+    // Nobody pushes main any more, not even the owner; merges go upstream.
+    std::fs::write(w.work.join("README.md"), "direct\n").unwrap();
+    git_ok(&w.work, &["commit", "-qam", "direct"]);
+    let out = git_as(&w.work, "alice", &w.owner, &["push", "origin", "main"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("follows the upstream"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    git_ok(&w.work, &["reset", "-q", "--hard", "HEAD~1"]);
+    let repo = s.ok(&w.repo_path(), &w.owner).await;
+    let (st, v) = s
+        .patch(
+            &w.repo_path(),
+            &w.owner,
+            json!({"revision": repo["revision"], "default_branch": "trunk"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    w.push_change("feature", "f.txt", "x\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let pull = format!("{}/pulls/{}", w.repo_path(), p["number"]);
+    let (st, v) = s
+        .post(
+            &format!("{pull}/merge"),
+            &w.owner,
+            json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("publish"),
+        "{v}"
+    );
+
+    // GitHub's main moves (another person's merge): Branvil follows.
+    let theirs = commit_on_github(&gh, "main", "merged elsewhere");
+    // Polls of one repository take turns ("Check now" beside the poller).
+    let polls: Vec<_> = (0..4)
+        .map(|_| {
+            let (http, url, token) = (
+                s.http.clone(),
+                format!("{}/api/v1{}/upstream/refresh", s.url, w.repo_path()),
+                w.owner.clone(),
+            );
+            tokio::spawn(async move {
+                let r = http.post(url).bearer_auth(token).send().await.unwrap();
+                (r.status(), r.json::<Value>().await.unwrap())
+            })
+        })
+        .collect();
+    for poll in polls {
+        let (st, v) = poll.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["upstream"]["following"]["error"], Value::Null, "{v}");
+    }
+    let v = refresh(&w).await;
+    assert_eq!(v["upstream"]["following"]["tip"], theirs.as_str());
+    assert_eq!(branvil_tip(&w, "main"), theirs);
+    assert!(v["upstream"]["following"]["followed_at"].is_string());
+
+    // GitHub's main is rewritten: following stops, nothing is overwritten.
+    let dir = gh.dir(GH);
+    let d = dir.to_str().unwrap();
+    let tree = git_ok(&dir, &["--git-dir", d, "rev-parse", "main^{tree}"]);
+    let unrelated = git_ok(
+        &dir,
+        &[
+            "--git-dir",
+            d,
+            "-c",
+            "user.name=x",
+            "-c",
+            "user.email=x@x",
+            "commit-tree",
+            &tree,
+            "-m",
+            "rewritten",
+        ],
+    );
+    git_ok(
+        &dir,
+        &["--git-dir", d, "update-ref", "refs/heads/main", &unrelated],
+    );
+    let v = refresh(&w).await;
+    assert!(
+        v["upstream"]["following"]["stopped"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("following stopped"),
+        "{v}"
+    );
+    assert_eq!(branvil_tip(&w, "main"), theirs);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_request_is_published_as_its_author_and_follows_the_host_to_the_merge() {
+    let (w, gh) = followed().await;
+    let s = &w.server;
+    // A ticket that stands for a GitHub issue, closed by the pull request.
+    let (st, t) = s
+        .post(
+            &format!("{}/tickets", w.repo_path()),
+            &w.aiko,
+            json!({"title": "From GitHub", "upstream_issue": "https://github.test/octo/demo/issues/7"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{t}");
+    assert_eq!(
+        t["upstream_issue"],
+        "https://github.test/octo/demo/issues/7"
+    );
+    let (st, v) = s
+        .post(
+            &format!("{}/tickets", w.repo_path()),
+            &w.aiko,
+            json!({"title": "x", "upstream_issue": "https://example.test/octo/demo/issues/7"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let local = w.ticket("Only here").await;
+    let head = w.push_change("ticket/1", "f.txt", "one\n");
+    let p = w
+        .open_pull(
+            "ticket/1",
+            json!([{"url": t["url"], "closes": true}, {"url": local["url"], "closes": false}]),
+        )
+        .await;
+    let n = p["number"].as_u64().unwrap();
+    let pull = format!("{}/pulls/{n}", w.repo_path());
+
+    // The preview shows exactly what will be posted, and as whom.
+    let preview = s.ok(&format!("{pull}/publish"), &w.owner).await;
+    assert_eq!(preview["host"], "GitHub");
+    assert_eq!(preview["title"], "PR ticket/1");
+    assert_eq!(preview["body"], "body\n\nCloses #7");
+    assert_eq!(preview["account"], "aiko");
+    assert_eq!(preview["login"], Value::Null);
+    // The author has no GitHub account yet.
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "no_account");
+    assert_eq!(gh.tip(GH, "ticket/1"), None);
+    let (st, _) = s
+        .put(
+            "/members/aiko/accounts/github",
+            &w.owner,
+            json!({"token": AIKO_TOKEN}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    // Only the owner publishes.
+    let (st, _) = s
+        .post(
+            &format!("{pull}/publish"),
+            &w.aiko,
+            json!({"expected_head": head, "expected_base": p["base_sha"]}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let number = v["upstream"]["number"].as_u64().unwrap();
+    assert_eq!(v["upstream"]["account"], "aiko");
+    assert_eq!(v["upstream"]["state"], "open");
+    assert_eq!(gh.tip(GH, "ticket/1").as_deref(), Some(head.as_str()));
+    let hp = gh.pull(number);
+    assert_eq!((hp.author.as_str(), hp.base.as_str()), ("aiko-bot", "main"));
+    assert_eq!(
+        (hp.title.as_str(), hp.body.as_str()),
+        ("PR ticket/1", "body\n\nCloses #7")
+    );
+    // Publishing again changes nothing.
+    let (st, _) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(gh.requests("POST", "/pulls").len(), 1);
+
+    // GitHub's checks of the head appear among Branvil's, with their logs.
+    gh.check(
+        &head,
+        41,
+        "test-windows (remainder)",
+        "failure",
+        "line 1\nboom on Windows\n",
+    );
+    refresh(&w).await;
+    let checks = s.ok(&format!("{pull}/checks"), &w.aiko).await;
+    let windows = checks["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "github/test-windows (remainder)")
+        .cloned()
+        .unwrap_or_else(|| panic!("{checks}"));
+    assert_eq!(windows["conclusion"], "failure");
+    assert_eq!(windows["attempt_id"], "github-41");
+    assert_eq!(windows["details_url"], "https://github.test/runs/41");
+    let log = s
+        .ok(
+            &format!("{}/jobs/github-41/log?tail_bytes=16", w.repo_path()),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(log["log"], "boom on Windows\n");
+    assert_eq!(log["truncated"], true);
+    assert_eq!(log["log_bytes"], "line 1\nboom on Windows\n".len());
+
+    // A fix pushed in Branvil and an edited body reach GitHub as aiko.
+    let fixed = w.push_change("ticket/1", "f.txt", "fixed\n");
+    let (st, _) = s
+        .patch(&pull, &w.aiko, json!({"body": "body, fixed"}))
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    refresh(&w).await;
+    assert_eq!(gh.tip(GH, "ticket/1").as_deref(), Some(fixed.as_str()));
+    assert_eq!(gh.pull(number).body, "body, fixed\n\nCloses #7");
+    assert!(
+        gh.requests("PATCH", &format!("/pulls/{number}"))
+            .iter()
+            .all(|(_, login)| login == "aiko-bot")
+    );
+    let checks = s.ok(&format!("{pull}/checks"), &w.aiko).await;
+    assert!(
+        !checks.to_string().contains("github/test-windows"),
+        "the old head's checks are not the new head's: {checks}"
+    );
+
+    // Closed on GitHub → closed here; reopened here → reopened on GitHub
+    // (closed on both sides, it is no longer polled: Branvil reopens it).
+    gh.set_open(number, false);
+    refresh(&w).await;
+    assert_eq!(s.ok(&pull, &w.aiko).await["state"], "closed");
+    let (st, _) = s.post(&format!("{pull}/reopen"), &w.owner, json!({})).await;
+    assert_eq!(st, StatusCode::OK);
+    refresh(&w).await;
+    assert!(gh.pull(number).open);
+    // Closed here → closed on GitHub, and back.
+    let (st, _) = s.post(&format!("{pull}/close"), &w.owner, json!({})).await;
+    assert_eq!(st, StatusCode::OK);
+    refresh(&w).await;
+    assert!(!gh.pull(number).open);
+    let (st, _) = s.post(&format!("{pull}/reopen"), &w.owner, json!({})).await;
+    assert_eq!(st, StatusCode::OK);
+    refresh(&w).await;
+    assert!(gh.pull(number).open);
+
+    // Someone else's change lands on GitHub's main first.
+    git_ok(&w.work, &["checkout", "-q", "main"]);
+    std::fs::write(w.work.join("other.txt"), "other\n").unwrap();
+    git_ok(&w.work, &["add", "other.txt"]);
+    git_ok(&w.work, &["commit", "-qm", "other"]);
+    git_ok(
+        &w.work,
+        &["push", "-q", gh.dir(GH).to_str().unwrap(), "main"],
+    );
+
+    // A person merges on GitHub: Branvil's main follows, the pull request is
+    // merged with GitHub's commit, and the ticket it closes is closed.
+    let merged = gh.squash_merge(GH, number);
+    refresh(&w).await;
+    assert_eq!(branvil_tip(&w, "main"), merged);
+    let got = s.ok(&pull, &w.aiko).await;
+    assert_eq!(got["merged"], true, "{got}");
+    assert_eq!(got["merge_sha"], merged.as_str());
+    assert_eq!(got["upstream"]["state"], "merged");
+    // Its diff is its own change, not the other one merged meanwhile.
+    let files = s.ok(&format!("{pull}/files"), &w.aiko).await;
+    let paths: Vec<&str> = files["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["f.txt"]);
+    let ticket = s.ok(&format!("{}/tickets/1", w.repo_path()), &w.aiko).await;
+    assert_eq!(ticket["state"], "closed");
+    let other = s.ok(&format!("{}/tickets/2", w.repo_path()), &w.aiko).await;
+    assert_eq!(other["state"], "open");
+
+    // The tokens are only in their own files: not in the database, not in the
+    // service's log (which the scan reads: the login kept beside them is there).
+    let db = std::fs::read(s.data.join("branvil.redb")).unwrap();
+    assert!(db.windows(8).any(|x| x == b"aiko-bot"));
+    for file in [s.data.join("branvil.redb"), w.dir.path().join("serve.log")] {
+        let bytes = std::fs::read(&file).unwrap();
+        for token in [OWNER_TOKEN, AIKO_TOKEN] {
+            assert!(
+                !bytes.windows(token.len()).any(|x| x == token.as_bytes()),
+                "{} contains a token",
+                file.display()
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commit_added_on_the_host_stops_sending_until_published_again() {
+    let (w, gh) = followed().await;
+    let s = &w.server;
+    s.put(
+        "/members/aiko/accounts/github",
+        &w.owner,
+        json!({"token": AIKO_TOKEN}),
+    )
+    .await;
+    w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let pull = format!("{}/pulls/{n}", w.repo_path());
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let theirs = commit_on_github(&gh, "feature", "a suggestion applied on GitHub");
+    let ours = w.push_change("feature", "f.txt", "two\n");
+    refresh(&w).await;
+    let got = s.ok(&pull, &w.owner).await;
+    assert!(
+        got["upstream"]["stopped"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("refused"),
+        "{got}"
+    );
+    assert_eq!(gh.tip(GH, "feature").as_deref(), Some(theirs.as_str()));
+    // The owner decides: publishing again replaces what GitHub has.
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["upstream"]["stopped"], Value::Null);
+    assert_eq!(gh.tip(GH, "feature").as_deref(), Some(ours.as_str()));
+    assert_eq!(gh.requests("POST", "/pulls").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unchanged_resources_are_read_with_conditional_requests() {
+    let (w, gh) = followed().await;
+    w.server
+        .put(
+            "/members/aiko/accounts/github",
+            &w.owner,
+            json!({"token": AIKO_TOKEN}),
+        )
+        .await;
+    w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let (st, v) = publish(&w, p["number"].as_u64().unwrap()).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    refresh(&w).await;
+    let before = gh.not_modified();
+    let reads = gh.requests("GET", "/repos/").len();
+    refresh(&w).await;
+    let polled = gh.requests("GET", "/repos/").len() - reads;
+    assert!(polled >= 3, "main, the pull request, its checks: {polled}");
+    assert_eq!(
+        gh.not_modified() - before,
+        polled,
+        "every read of an unchanged resource was a 304"
+    );
+    // The poll reads with the owner's account.
+    assert!(
+        gh.requests("GET", "/repos/")[reads..]
+            .iter()
+            .all(|(_, login)| login == "alice-gh")
+    );
+}
+
+async fn with_aiko_account(w: &World) {
+    let (st, v) = w
+        .server
+        .put(
+            "/members/aiko/accounts/github",
+            &w.owner,
+            json!({"token": AIKO_TOKEN}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+/// Sets the stand-in's `branch` of `octo/demo` to `sha` (a branch made there
+/// directly).
+fn branch_on_github(gh: &FakeGitHub, branch: &str, sha: &str) {
+    let dir = gh.dir(GH);
+    let d = dir.to_str().unwrap();
+    git_ok(
+        &dir,
+        &[
+            "--git-dir",
+            d,
+            "update-ref",
+            &format!("refs/heads/{branch}"),
+            sha,
+        ],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_publish_replaces_only_what_branvil_pushed_and_survives_a_lost_answer() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    let s = &w.server;
+    let main = gh.tip(GH, "main").unwrap();
+
+    // GitHub already has a branch of that name that Branvil did not push (a
+    // person's, or an older pull request's): nothing is overwritten.
+    let ours = w.push_change("feat", "f.txt", "one\n");
+    let p = w.open_pull("feat", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let theirs = commit_on_github(&gh, "main", "someone's work");
+    branch_on_github(&gh, "feat", &theirs);
+    branch_on_github(&gh, "main", &main);
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "upstream_refused");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already has a branch feat"),
+        "{v}"
+    );
+    assert_eq!(gh.tip(GH, "feat").as_deref(), Some(theirs.as_str()));
+    let got = s
+        .ok(&format!("{}/pulls/{n}", w.repo_path()), &w.owner)
+        .await;
+    assert!(got["upstream"]["stopped"].is_string(), "{got}");
+    refresh(&w).await;
+    assert!(gh.pulls(GH).is_empty(), "nothing is opened while stopped");
+    // Someone's own open pull request of that branch is never taken as ours.
+    gh.set(|st| {
+        st.pulls.push(common::github::FakePull {
+            repo: GH.into(),
+            number: 7,
+            head: "feat".into(),
+            base: "main".into(),
+            title: "Someone's".into(),
+            body: String::new(),
+            open: true,
+            merge_sha: None,
+            author: "someone".into(),
+        })
+    });
+    // Publishing again is the owner's decision to replace the branch.
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(gh.tip(GH, "feat").as_deref(), Some(ours.as_str()));
+    assert_ne!(v["upstream"]["number"], 7);
+    assert_eq!(gh.pulls(GH).len(), 2);
+    assert_eq!(gh.pull(7).title, "Someone's");
+
+    // The push landed but its answer was lost: GitHub has exactly the head,
+    // so publishing goes on.
+    let head = w.push_change("landed", "l.txt", "l\n");
+    let p = w.open_pull("landed", json!([])).await;
+    let dir = gh.dir(GH);
+    let branvil = s.data.join("repos/acme/demo.git");
+    git_ok(
+        &dir,
+        &[
+            "--git-dir",
+            dir.to_str().unwrap(),
+            "fetch",
+            "-q",
+            branvil.to_str().unwrap(),
+            "refs/heads/landed:refs/heads/landed",
+        ],
+    );
+    assert_eq!(gh.tip(GH, "landed").as_deref(), Some(head.as_str()));
+    let (st, v) = publish(&w, p["number"].as_u64().unwrap()).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["upstream"]["number"].is_u64(), "{v}");
+
+    // The pull request was opened but the answer was lost; a branch name that
+    // needs encoding in URLs. The next poll adopts it instead of opening a
+    // second one.
+    let branch = "fix/c++#2";
+    w.push_change(branch, "c.txt", "c\n");
+    let p = w.open_pull(branch, json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    gh.set(|st| st.lose_next_create = true);
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    refresh(&w).await;
+    let opened: Vec<_> = gh
+        .pulls(GH)
+        .into_iter()
+        .filter(|p| p.head == branch)
+        .collect();
+    assert_eq!(opened.len(), 1);
+    let got = s
+        .ok(&format!("{}/pulls/{n}", w.repo_path()), &w.owner)
+        .await;
+    assert_eq!(got["upstream"]["number"], opened[0].number, "{got}");
+    assert_eq!(got["upstream"]["error"], Value::Null, "{got}");
+    // Ours: the next poll sent our title and body.
+    refresh(&w).await;
+    assert_eq!(gh.pull(opened[0].number).title, format!("PR {branch}"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_request_stays_with_the_repository_it_was_published_to() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    let s = &w.server;
+    gh.repository("octo/other", &w.work);
+    w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let pull = format!("{}/pulls/{n}", w.repo_path());
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let number = v["upstream"]["number"].as_u64().unwrap();
+
+    // The upstream changes while it is published: allowed, and the pull
+    // request keeps talking to octo/demo.
+    let (st, v) = s
+        .put(
+            &format!("{}/upstream", w.repo_path()),
+            &w.owner,
+            json!({"provider": "github", "repository": "octo/other"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, _) = s.patch(&pull, &w.aiko, json!({"body": "edited"})).await;
+    assert_eq!(st, StatusCode::OK);
+    refresh(&w).await;
+    assert_eq!(gh.pull_of(GH, number).body, "edited");
+    assert!(gh.pulls("octo/other").is_empty());
+    assert!(gh.requests("PATCH", "/repos/octo/other/").is_empty());
+    let got = s.ok(&pull, &w.owner).await;
+    assert_eq!(got["upstream"]["repository"], GH);
+
+    // Publishing it to the new upstream makes a new record there.
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["upstream"]["repository"], "octo/other");
+    assert_eq!(gh.pulls("octo/other").len(), 1);
+
+    // Removing the upstream is allowed too.
+    let (st, v) = s
+        .delete(&format!("{}/upstream", w.repo_path()), &w.owner)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["upstream"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_request_the_host_never_opened_is_left_alone_once_closed() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    let s = &w.server;
+    w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    gh.set(|st| st.refuse_create = true);
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    refresh(&w).await;
+    let tries = gh.requests("POST", "/pulls").len();
+    assert!(tries >= 2, "retried while open: {tries}");
+    let (st, _) = s
+        .post(
+            &format!("{}/pulls/{n}/close", w.repo_path()),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    refresh(&w).await;
+    refresh(&w).await;
+    assert_eq!(gh.requests("POST", "/pulls").len(), tries);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_is_taken_only_once_it_is_on_branvils_default_branch() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    let s = &w.server;
+    let t = w.ticket("t").await;
+    w.push_change("feature", "f.txt", "one\n");
+    let p = w
+        .open_pull("feature", json!([{"url": t["url"], "closes": true}]))
+        .await;
+    let n = p["number"].as_u64().unwrap();
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let number = v["upstream"]["number"].as_u64().unwrap();
+    // GitHub's main is rewritten (following stops), then the merge lands on it.
+    let dir = gh.dir(GH);
+    let d = dir.to_str().unwrap();
+    let tree = git_ok(&dir, &["--git-dir", d, "rev-parse", "main^{tree}"]);
+    let unrelated = git_ok(
+        &dir,
+        &[
+            "--git-dir",
+            d,
+            "-c",
+            "user.name=x",
+            "-c",
+            "user.email=x@x",
+            "commit-tree",
+            &tree,
+            "-m",
+            "rewritten",
+        ],
+    );
+    git_ok(
+        &dir,
+        &["--git-dir", d, "update-ref", "refs/heads/main", &unrelated],
+    );
+    gh.squash_merge(GH, number);
+    let v = refresh(&w).await;
+    assert!(v["upstream"]["following"]["stopped"].is_string(), "{v}");
+    let got = s
+        .ok(&format!("{}/pulls/{n}", w.repo_path()), &w.owner)
+        .await;
+    assert_eq!(got["merged"], false, "{got}");
+    assert_eq!(got["upstream"]["state"], "merged");
+    let ticket = s.ok(&format!("{}/tickets/1", w.repo_path()), &w.aiko).await;
+    assert_eq!(ticket["state"], "open");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebase_merge_on_the_host_keeps_the_whole_change() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    let s = &w.server;
+    w.push_change("feature", "f.txt", "one\n");
+    w.push_change("feature", "g.txt", "two\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let merged = gh.rebase_merge(GH, v["upstream"]["number"].as_u64().unwrap());
+    refresh(&w).await;
+    let pull = format!("{}/pulls/{n}", w.repo_path());
+    let got = s.ok(&pull, &w.owner).await;
+    assert_eq!(
+        (got["merged"].clone(), got["merge_sha"].clone()),
+        (json!(true), json!(merged))
+    );
+    let files = s.ok(&format!("{pull}/files"), &w.owner).await;
+    let paths: Vec<&str> = files["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["f.txt", "g.txt"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_request_is_published_only_once_its_required_checks_succeed() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    w.push_change("feat", "f.txt", "one\n");
+    let p = w.open_pull("feat", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    // `test` never ran (no pipeline), so it did not succeed: nothing goes out.
+    set_required_checks(&w, json!(["test"])).await;
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "not_mergeable");
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("test"),
+        "{v}"
+    );
+    assert_eq!(gh.tip(GH, "feat"), None);
+    assert!(gh.pulls(GH).is_empty());
+
+    // Without the requirement the same head is published.
+    set_required_checks(&w, json!([])).await;
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(gh.tip(GH, "feat").is_some());
+    assert_eq!(gh.pulls(GH).len(), 1);
+}
+
+async fn set_required_checks(w: &World, checks: Value) {
+    let (_, repo) = w.server.get(&w.repo_path(), &w.owner).await;
+    let (st, v) = w
+        .server
+        .patch(
+            &w.repo_path(),
+            &w.owner,
+            json!({"revision": repo["revision"], "required_checks": checks}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+async fn set_account(w: &World, name: &str, token: &str) {
+    let (st, v) = w
+        .server
+        .put(
+            &format!("/members/{name}/accounts/github"),
+            &w.owner,
+            json!({"token": token}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+/// Sets the upstream and returns its reader.
+async fn put_upstream(w: &World, body: Value) -> Value {
+    let (st, v) = w
+        .server
+        .put(&format!("{}/upstream", w.repo_path()), &w.owner, body)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    v["upstream"]["reader"].clone()
+}
+
+async fn reader_now(w: &World) -> Value {
+    w.server.ok(&w.repo_path(), &w.owner).await["upstream"]["reader"].clone()
+}
+
+/// The logins of the GitHub reads since the `since`-th one.
+fn reads_since(gh: &FakeGitHub, since: usize) -> Vec<String> {
+    gh.requests("GET", "/repos/")[since..]
+        .iter()
+        .map(|(_, login)| login.clone())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_reader_is_picked_once_and_changes_only_when_the_owner_or_a_removal_says_so() {
+    let mut w = World::new().await;
+    let gh = FakeGitHub::start(&w.dir.path().join("github")).await;
+    gh.repository(GH, &w.work);
+    for (token, login) in [
+        (OWNER_TOKEN, "alice-gh"),
+        (AIKO_TOKEN, "aiko-bot"),
+        ("gh-ken", "ken-bot"),
+        ("gh-abe", "abe-bot"),
+    ] {
+        gh.account(token, login);
+    }
+    gh.configure(&w.server.data);
+    w.restart(&[]);
+    let s = &w.server;
+    let same = json!({"provider": "github", "repository": GH});
+
+    // The owner's token is used only when no agent has an account, even
+    // when the owner comes first by name (alice before ken).
+    set_account(&w, "alice", OWNER_TOKEN).await;
+    set_account(&w, "ken", "gh-ken").await;
+    assert_eq!(
+        put_upstream(&w, same.clone()).await,
+        json!({"member": "ken", "chosen": false})
+    );
+
+    // A new account, even one that comes first by name, changes nothing.
+    let (st, _) = s
+        .post(
+            "/members",
+            &w.owner,
+            json!({"name": "abe", "kind": "agent"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED);
+    set_account(&w, "abe", "gh-abe").await;
+    let since = gh.requests("GET", "/repos/").len();
+    let v = refresh(&w).await;
+    assert_eq!(
+        v["upstream"]["reader"],
+        json!({"member": "ken", "chosen": false})
+    );
+    assert!(reads_since(&gh, since).iter().all(|l| l == "ken-bot"));
+    // Saving the upstream again keeps it too.
+    assert_eq!(
+        put_upstream(&w, same.clone()).await,
+        json!({"member": "ken", "chosen": false})
+    );
+
+    // The owner names one; one without an account is refused.
+    let mut named = same.clone();
+    named["reader"] = json!("aiko");
+    let (st, v) = s
+        .put(
+            &format!("{}/upstream", w.repo_path()),
+            &w.owner,
+            named.clone(),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "no_account");
+    set_account(&w, "aiko", AIKO_TOKEN).await;
+    assert_eq!(
+        put_upstream(&w, named).await,
+        json!({"member": "aiko", "chosen": true})
+    );
+    let since = gh.requests("GET", "/repos/").len();
+    refresh(&w).await;
+    assert!(reads_since(&gh, since).iter().all(|l| l == "aiko-bot"));
+    // `null` picks again.
+    let mut again = same.clone();
+    again["reader"] = Value::Null;
+    assert_eq!(
+        put_upstream(&w, again).await,
+        json!({"member": "abe", "chosen": false})
+    );
+
+    // Removing the reader's account picks another one at once.
+    s.delete("/members/abe/accounts/github", &w.owner).await;
+    assert_eq!(
+        reader_now(&w).await,
+        json!({"member": "aiko", "chosen": false})
+    );
+    for name in ["aiko", "ken"] {
+        s.delete(&format!("/members/{name}/accounts/github"), &w.owner)
+            .await;
+    }
+    assert_eq!(
+        reader_now(&w).await,
+        json!({"member": "alice", "chosen": false})
+    );
+    s.delete("/members/alice/accounts/github", &w.owner).await;
+    let v = refresh(&w).await;
+    assert_eq!(v["upstream"]["reader"]["member"], "");
+    assert!(
+        v["upstream"]["following"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("No member has a GitHub account"),
+        "{v}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn branvils_references_are_written_for_the_host_when_published() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    let s = &w.server;
+    let tickets = format!("{}/tickets", w.repo_path());
+    let issue = "https://github.test/octo/demo/issues/7";
+    let (st, _) = s
+        .post(
+            &tickets,
+            &w.aiko,
+            json!({"title": "on GitHub", "upstream_issue": issue}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED);
+    w.ticket("only here").await; // #2
+    // !9 does not exist.
+    // A pull request published first: !1 is #100 there.
+    w.push_change("first", "a.txt", "a\n");
+    let first = w.open_pull("first", json!([])).await;
+    let (st, v) = publish(&w, first["number"].as_u64().unwrap()).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    let base = &s.url;
+    let body = format!(
+        "Fixes #1 and #2, after !1 (not !9), like acme/demo#1 and octo/other#5.\n\n\
+         `#1` in code, [#2](https://example.test) as a link.\n\n\
+         ```\n#1 in a block\n```\n\n\
+         See {base}/acme/demo/-/tickets/1, {base}/acme/demo/-/tickets/2 and {base}/acme/demo/-/pulls/1."
+    );
+    w.push_change("second", "b.txt", "b\n");
+    let (st, v) = s
+        .post(
+            &format!("{}/pulls", w.repo_path()),
+            &w.aiko,
+            json!({"head": "second", "title": "Follow-up to #1", "body": body}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let n = v["pull"]["number"].as_u64().unwrap();
+    let expected = format!(
+        "Fixes #7 and `acme/demo#2`, after #100 (not !9), like #7 and octo/other#5.\n\n\
+         `#1` in code, [#2](https://example.test) as a link.\n\n\
+         ```\n#1 in a block\n```\n\n\
+         See {issue}, `acme/demo#2` and {pr}.",
+        pr = "https://github.test/octo/demo/pull/100",
+    );
+    // The preview shows exactly that, and it is what GitHub gets.
+    let preview = s
+        .ok(&format!("{}/pulls/{n}/publish", w.repo_path()), &w.owner)
+        .await;
+    assert_eq!(preview["title"], "Follow-up to #7");
+    assert_eq!(preview["body"], expected.as_str());
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let hp = gh.pull(v["upstream"]["number"].as_u64().unwrap());
+    assert_eq!(
+        (hp.title.as_str(), hp.body.as_str()),
+        ("Follow-up to #7", expected.as_str())
+    );
+}
+
+const APP_ID: &str = "4242";
+const INSTALLATION: &str = "777";
+
+/// A GitHub App (`octo-app`, installed as `INSTALLATION`) on the stand-in.
+fn with_app(gh: &FakeGitHub) -> AppKey {
+    let key = AppKey::generate();
+    gh.app(APP_ID, INSTALLATION, "octo-app", &key);
+    key
+}
+
+fn app_body(key: &str, installation: &str) -> Value {
+    json!({"app": {"app_id": APP_ID, "installation_id": installation, "private_key": key}})
+}
+
+/// A line from the middle of a PEM: what must never show anywhere.
+fn key_line(key: &AppKey) -> String {
+    key.pem.lines().nth(5).unwrap().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_account_is_checked_with_an_installation_token_and_replaces_a_token_account() {
+    let (w, gh) = followed().await;
+    let key = with_app(&gh);
+    let s = &w.server;
+    let account = "/members/aiko/accounts/github";
+    let file = s.data.join("secrets/accounts/aiko.github.json");
+    let (st, v) = s.put(account, &w.owner, json!({"token": AIKO_TOKEN})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    // Refused by the host or malformed: 400, and the token account stays.
+    let other = AppKey::generate();
+    for body in [
+        app_body(&other.pem, INSTALLATION),
+        app_body(&key.pem, "778"),
+        app_body(
+            "-----BEGIN RSA PRIVATE KEY-----\nnot a key\n-----END RSA PRIVATE KEY-----",
+            INSTALLATION,
+        ),
+        json!({"app": {"app_id": "octo", "installation_id": INSTALLATION, "private_key": key.pem}}),
+        json!({"app": key.pem}),
+        json!({"token": AIKO_TOKEN, "app": {"app_id": APP_ID, "installation_id": INSTALLATION, "private_key": key.pem}}),
+    ] {
+        let (st, v) = s.put(account, &w.owner, body.clone()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}: {v}");
+        assert_eq!(v["error"]["code"], "invalid");
+        assert!(!v.to_string().contains(&key_line(&key)), "{v}");
+    }
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap(),
+        json!({"token": AIKO_TOKEN})
+    );
+
+    // Accepted: JWT → GET /app → an installation token; the login is the app's bot.
+    let (st, v) = s
+        .put(account, &w.owner, app_body(&key.pem, INSTALLATION))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let a = &v["accounts"][0];
+    assert_eq!(
+        (&a["provider"], &a["login"], &a["kind"]),
+        (&json!("github"), &json!("octo-app[bot]"), &json!("app"))
+    );
+    // The wrong key and the unknown installation were refused by GitHub
+    // (the stand-in verifies the JWT); the malformed bodies never left.
+    assert_eq!(gh.requests("GET", "/app").len(), 3);
+    assert_eq!(gh.installation_tokens().len(), 1);
+    // The file now holds the app (the token is gone), owner-only.
+    let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(kept, app_body(&key.pem, INSTALLATION));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    // Never in an answer: neither the key nor an installation token.
+    let me = s.ok("/me", &w.aiko).await.to_string();
+    let members = s.ok("/members?limit=100", &w.owner).await.to_string();
+    for text in [me, members, v.to_string()] {
+        assert!(!text.contains(&key_line(&key)), "{text}");
+        for token in gh.installation_tokens() {
+            assert!(!text.contains(&token), "{text}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_account_reads_and_publishes_with_installation_tokens_renewed_before_they_expire() {
+    let (w, gh) = followed().await;
+    let key = with_app(&gh);
+    let s = &w.server;
+    let (st, v) = s
+        .put(
+            "/members/aiko/accounts/github",
+            &w.owner,
+            app_body(&key.pem, INSTALLATION),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let mut named = json!({"provider": "github", "repository": GH});
+    named["reader"] = json!("aiko");
+    assert_eq!(
+        put_upstream(&w, named).await,
+        json!({"member": "aiko", "chosen": true})
+    );
+
+    // aiko's pull request is pushed and opened with the installation token,
+    // and the app reads the upstream.
+    let head = w.push_change("ticket/1", "f.txt", "one\n");
+    let p = w.open_pull("ticket/1", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let reads = gh.requests("GET", "/repos/").len();
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(gh.tip(GH, "ticket/1").as_deref(), Some(head.as_str()));
+    let number = v["upstream"]["number"].as_u64().unwrap();
+    assert_eq!(gh.pull(number).author, "octo-app[bot]");
+    let v = refresh(&w).await;
+    assert_eq!(v["upstream"]["following"]["error"], Value::Null, "{v}");
+    assert!(reads_since(&gh, reads).iter().all(|l| l == "octo-app[bot]"));
+    // The installation token made when the account was set is still used.
+    assert_eq!(gh.requests("POST", "/access_tokens").len(), 1);
+
+    // Tokens that expire soon: setting the account again makes one (valid
+    // 301 s; Branvil makes a new one when less than 300 s are left). Once it
+    // and every earlier one stopped working, reads, the push of a fix, and
+    // API calls still succeed with a token made in time.
+    gh.set(|st| st.token_lifetime = 301);
+    let (st, v) = s
+        .put(
+            "/members/aiko/accounts/github",
+            &w.owner,
+            app_body(&key.pem, INSTALLATION),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(gh.requests("POST", "/access_tokens").len(), 2);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    gh.expire_installation_tokens();
+    let fixed = w.push_change("ticket/1", "f.txt", "fixed\n");
+    let (st, _) = s
+        .patch(
+            &format!("{}/pulls/{n}", w.repo_path()),
+            &w.aiko,
+            json!({"body": "renewed"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    let since = gh.requests("GET", "/repos/").len();
+    let v = refresh(&w).await;
+    assert_eq!(v["upstream"]["following"]["error"], Value::Null, "{v}");
+    let got = s.ok(&format!("{}/pulls/{n}", w.repo_path()), &w.aiko).await;
+    assert_eq!(got["upstream"]["error"], Value::Null, "{got}");
+    assert_eq!(gh.tip(GH, "ticket/1").as_deref(), Some(fixed.as_str()));
+    assert_eq!(gh.pull(number).body, "renewed");
+    assert!(gh.requests("POST", "/access_tokens").len() >= 3);
+    assert!(reads_since(&gh, since).iter().all(|l| l == "octo-app[bot]"));
+
+    // The key and the tokens are only in the account's file.
+    let mut secrets = gh.installation_tokens();
+    secrets.push(key_line(&key));
+    for file in [s.data.join("branvil.redb"), w.dir.path().join("serve.log")] {
+        let bytes = std::fs::read(&file).unwrap();
+        for secret in &secrets {
+            assert!(
+                !bytes.windows(secret.len()).any(|x| x == secret.as_bytes()),
+                "{} contains a secret",
+                file.display()
+            );
+        }
+    }
+}

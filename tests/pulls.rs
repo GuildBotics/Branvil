@@ -1,0 +1,709 @@
+//! Pull requests against a real service and real Git: concurrent creation,
+//! head checks for reviews and inline comments, entry ids, patrol, diffs,
+//! checks, and the fast-forward merge.
+
+mod common;
+
+use common::*;
+use serde_json::{Value, json};
+
+fn pulls(w: &World) -> String {
+    format!("{}/pulls", w.repo_path())
+}
+
+#[tokio::test]
+async fn concurrent_creates_of_one_head_and_base_make_one_pull_request() {
+    let w = World::new().await;
+    w.push_change("feature", "f.txt", "one");
+    let s = &w.server;
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let (http, url, token) = (
+            s.http.clone(),
+            format!("{}/api/v1{}", s.url, pulls(&w)),
+            w.aiko.clone(),
+        );
+        handles.push(tokio::spawn(async move {
+            let resp = http
+                .post(url)
+                .bearer_auth(token)
+                .json(&json!({"head": "feature", "title": format!("try {i}")}))
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status().as_u16();
+            (status, resp.json::<Value>().await.unwrap())
+        }));
+    }
+    let mut created = 0;
+    let mut numbers = Vec::new();
+    for h in handles {
+        let (status, v) = h.await.unwrap();
+        match status {
+            201 => {
+                created += 1;
+                assert_eq!(v["created"], true);
+            }
+            200 => assert_eq!(v["created"], false),
+            other => panic!("unexpected {other}: {v}"),
+        }
+        numbers.push(v["pull"]["number"].as_u64().unwrap());
+    }
+    assert_eq!(created, 1);
+    assert!(numbers.iter().all(|n| *n == numbers[0]));
+    let open = s
+        .ok(&format!("{}?state=open&head=feature", pulls(&w)), &w.aiko)
+        .await;
+    assert_eq!(open["items"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn reviews_and_inline_comments_on_a_moved_head_write_nothing() {
+    let w = World::new().await;
+    let old = w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    assert_eq!(p["head_sha"], old.as_str());
+    let n = p["number"].as_u64().unwrap();
+    let new = w.push_change("feature", "f.txt", "one\ntwo\n");
+    assert_ne!(old, new);
+    let s = &w.server;
+    let base = format!("{}/{n}", pulls(&w));
+
+    let (st, v) = s
+        .post(
+            &format!("{base}/reviews"),
+            &w.ken,
+            json!({"verdict": "approve", "body": "ok", "commit": old}),
+        )
+        .await;
+    assert_eq!(st, 409, "{v}");
+    assert_eq!(v["error"]["code"], "head_moved");
+    let (st, v) = s
+        .post(
+            &format!("{base}/inline-comments"),
+            &w.ken,
+            json!({"body": "here", "commit": old, "path": "f.txt", "line": 1, "side": "RIGHT"}),
+        )
+        .await;
+    assert_eq!(st, 409, "{v}");
+    assert_eq!(v["error"]["code"], "head_moved");
+    let activity = s.ok(&format!("{base}/activity"), &w.ken).await;
+    assert_eq!(activity["reviews"], json!([]));
+    assert_eq!(activity["threads"], json!([]));
+
+    // On the current head both are recorded.
+    let (st, v) = s
+        .post(
+            &format!("{base}/reviews"),
+            &w.ken,
+            json!({"verdict": "approve", "body": "ok", "commit": new}),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    let (st, root) = s
+        .post(
+            &format!("{base}/inline-comments"),
+            &w.ken,
+            json!({"body": "here", "commit": new, "path": "f.txt", "line": 2, "side": "RIGHT"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{root}");
+    assert_eq!(root["reply_to_id"], Value::Null);
+    // The author's own approval is recorded.
+    let (st, own) = s
+        .post(
+            &format!("{base}/reviews"),
+            &w.aiko,
+            json!({"verdict": "approve", "commit": new}),
+        )
+        .await;
+    assert_eq!(st, 201, "{own}");
+    // A path the pull request does not change is refused.
+    let (st, _) = s
+        .post(
+            &format!("{base}/inline-comments"),
+            &w.ken,
+            json!({"body": "x", "commit": new, "path": "README.md", "line": 1, "side": "RIGHT"}),
+        )
+        .await;
+    assert_eq!(st, 400);
+
+    // Replies and resolution; a later push makes the thread outdated.
+    let root_id = root["id"].as_str().unwrap();
+    let (st, reply) = s
+        .post(
+            &format!("{base}/threads/{root_id}/replies"),
+            &w.aiko,
+            json!({"body": "fixed"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{reply}");
+    assert_eq!(reply["reply_to_id"], root_id);
+    // A reply id does not root a thread.
+    let (st, _) = s
+        .post(
+            &format!("{base}/threads/{}/replies", reply["id"].as_str().unwrap()),
+            &w.aiko,
+            json!({"body": "x"}),
+        )
+        .await;
+    assert_eq!(st, 404);
+    let (st, t) = s
+        .put(
+            &format!("{base}/threads/{root_id}/resolved"),
+            &w.ken,
+            json!({"resolved": true}),
+        )
+        .await;
+    assert_eq!(st, 200, "{t}");
+    assert_eq!(t["resolved"], true);
+    w.push_change("feature", "f.txt", "one\ntwo\nthree\n");
+    let threads = s.ok(&format!("{base}/threads"), &w.ken).await;
+    assert_eq!(threads["items"][0]["outdated"], true);
+    assert_eq!(threads["items"][0]["comments"].as_array().unwrap().len(), 2);
+    let tc = s
+        .ok(&format!("{base}/threads/{root_id}/comments"), &w.ken)
+        .await;
+    assert_eq!(tc["items"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn entry_ids_belong_to_their_pull_request() {
+    let w = World::new().await;
+    w.push_change("one", "a.txt", "a");
+    git_ok(&w.work, &["checkout", "-q", "main"]);
+    w.push_change("two", "b.txt", "b");
+    let p1 = w.open_pull("one", json!([])).await;
+    let p2 = w.open_pull("two", json!([])).await;
+    let s = &w.server;
+    let b1 = format!("{}/{}", pulls(&w), p1["number"]);
+    let b2 = format!("{}/{}", pulls(&w), p2["number"]);
+    let (_, c) = s
+        .post(&format!("{b1}/comments"), &w.ken, json!({"body": "c"}))
+        .await;
+    let (_, r) = s
+        .post(
+            &format!("{b1}/reviews"),
+            &w.ken,
+            json!({"verdict": "comment", "body": "r", "commit": p1["head_sha"]}),
+        )
+        .await;
+    let (_, i) = s
+        .post(
+            &format!("{b1}/inline-comments"),
+            &w.ken,
+            json!({"body": "i", "commit": p1["head_sha"], "path": "a.txt", "line": 1, "side": "RIGHT"}),
+        )
+        .await;
+    for id in [&c["id"], &r["id"], &i["id"]] {
+        let (st, v) = s
+            .post(
+                &format!("{b2}/reactions"),
+                &w.aiko,
+                json!({"target_id": id, "reaction": "ack"}),
+            )
+            .await;
+        assert_eq!(st, 404, "{v}");
+        let (st, v) = s
+            .post(
+                &format!("{b1}/reactions"),
+                &w.aiko,
+                json!({"target_id": id, "reaction": "agree"}),
+            )
+            .await;
+        assert_eq!(st, 200, "{v}");
+    }
+    let (st, _) = s
+        .post(
+            &format!("{b2}/threads/{}/replies", i["id"].as_str().unwrap()),
+            &w.aiko,
+            json!({"body": "x"}),
+        )
+        .await;
+    assert_eq!(st, 404);
+    // Taking a reaction back works on every kind of entry, and only on this pull request's.
+    for id in [&c["id"], &i["id"]] {
+        let (st, v) = s
+            .delete_with(
+                &format!("{b2}/reactions"),
+                &w.aiko,
+                json!({"target_id": id, "reaction": "agree"}),
+            )
+            .await;
+        assert_eq!(st, 404, "{v}");
+    }
+    let (st, v) = s
+        .delete_with(
+            &format!("{b1}/reactions"),
+            &w.aiko,
+            json!({"target_id": r["id"], "reaction": "agree"}),
+        )
+        .await;
+    assert_eq!(st, 204, "{v}");
+    let activity = s.ok(&format!("{b1}/activity"), &w.aiko).await;
+    assert_eq!(activity["reviews"][0]["reactions"], json!([]));
+    for id in [&c["id"], &i["id"]] {
+        let (st, v) = s
+            .delete_with(
+                &format!("{b1}/reactions"),
+                &w.aiko,
+                json!({"target_id": id, "reaction": "agree"}),
+            )
+            .await;
+        assert_eq!(st, 204, "{v}");
+    }
+    let activity = s.ok(&format!("{b1}/activity"), &w.aiko).await;
+    assert_eq!(activity["comments"][0]["reactions"], json!([]));
+    assert_eq!(
+        activity["threads"][0]["comments"][0]["reactions"],
+        json!([])
+    );
+    for id in [&c["id"], &r["id"], &i["id"]] {
+        let (st, v) = s
+            .post(
+                &format!("{b1}/reactions"),
+                &w.aiko,
+                json!({"target_id": id, "reaction": "agree"}),
+            )
+            .await;
+        assert_eq!(st, 200, "{v}");
+    }
+    let activity = s.ok(&format!("{b1}/activity"), &w.aiko).await;
+    assert_eq!(activity["comments"][0]["reactions"][0]["reaction"], "agree");
+    assert_eq!(activity["reviews"][0]["reactions"][0]["reaction"], "agree");
+    assert_eq!(
+        activity["threads"][0]["comments"][0]["reactions"][0]["reaction"],
+        "agree"
+    );
+    // A runner sees no pull request.
+    let runner = s.member(&w.owner, "runner1", "runner").await;
+    let (st, _) = s.get(&b1, &runner).await;
+    assert_eq!(st, 403);
+}
+
+#[tokio::test]
+async fn patrol_files_links_and_draft_rules() {
+    let w = World::new().await;
+    let mia = w.server.member(&w.owner, "mia", "agent").await;
+    let t = w.ticket("Link me").await;
+    w.push_change("feature", "f.txt", "one\n");
+    std::fs::write(w.work.join("bin.dat"), [0u8, 159, 146, 150, 0, 1]).unwrap();
+    git_ok(&w.work, &["add", "bin.dat"]);
+    git_ok(&w.work, &["commit", "-qm", "binary"]);
+    git_as_ok(
+        &w.work,
+        "aiko",
+        &w.aiko,
+        &["push", "-q", "origin", "HEAD:refs/heads/feature"],
+    );
+    let s = &w.server;
+    // A foreign ticket cannot be closed; a missing ticket of ours is 404.
+    let (st, _) = s
+        .post(&pulls(&w), &w.aiko, json!({"head": "feature", "title": "x", "tickets": [{"url": "https://example.com/t/1", "closes": true}]}))
+        .await;
+    assert_eq!(st, 422);
+    for key in ["99", "01"] {
+        let (st, _) = s
+            .post(&pulls(&w), &w.aiko, json!({"head": "feature", "title": "x", "tickets": [{"url": format!("{}/{REPO}/-/tickets/{key}", s.url), "closes": false}]}))
+            .await;
+        assert_eq!(st, 404, "{key}");
+    }
+    // A ticket of another repository is a reference: it cannot be closed.
+    let (st, _) = s
+        .post("/repos", &w.owner, json!({"path": "acme/other"}))
+        .await;
+    assert_eq!(st, 201);
+    let (st, other) = s
+        .post(
+            &format!("/repos/{}/tickets", encode("acme/other")),
+            &w.aiko,
+            json!({"title": "There"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{other}");
+    let (st, v) = s
+        .post(&pulls(&w), &w.aiko, json!({"head": "feature", "title": "x", "tickets": [{"url": other["url"], "closes": true}]}))
+        .await;
+    assert_eq!(st, 422, "{v}");
+    assert_eq!(v["error"]["code"], "unsupported");
+    let p = w
+        .open_pull("feature", json!([{"url": t["url"], "closes": true}, {"url": "https://example.com/t/1", "closes": false}]))
+        .await;
+    let n = p["number"].as_u64().unwrap();
+    assert_eq!(p["label"], format!("!{n}"));
+    assert_eq!(p["changed_files"], 2);
+    assert!(p["ready_at"].is_string());
+    let base = format!("{}/{n}", pulls(&w));
+
+    // A body change keeps the links; the ticket lists the pull request.
+    let (st, v) = s.patch(&base, &w.aiko, json!({"body": "new body"})).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["tickets"].as_array().unwrap().len(), 2);
+    let tp = s
+        .ok(&format!("/repos/{}/tickets/1/pulls", encode(REPO)), &w.aiko)
+        .await;
+    assert_eq!(tp["items"][0]["closes"], true);
+    assert_eq!(tp["items"][0]["label"], format!("!{n}"));
+
+    // Draft: an agent may set draft, only the owner may mark ready.
+    let (st, _) = s.patch(&base, &w.aiko, json!({"draft": true})).await;
+    assert_eq!(st, 200);
+    let (st, _) = s.patch(&base, &w.ken, json!({"draft": false})).await;
+    assert_eq!(st, 403);
+    let (st, v) = s.patch(&base, &w.owner, json!({"draft": false})).await;
+    assert_eq!(st, 200);
+    assert_ne!(v["ready_at"], p["ready_at"]);
+
+    // Files: text has a patch from the first @@, binary has null.
+    let files = s.ok(&format!("{base}/files"), &w.aiko).await;
+    let items = files["items"].as_array().unwrap();
+    let text = items.iter().find(|f| f["path"] == "f.txt").unwrap();
+    assert_eq!(text["status"], "added");
+    assert_eq!(text["additions"], 1);
+    assert!(text["patch"].as_str().unwrap().starts_with("@@"));
+    let bin = items.iter().find(|f| f["path"] == "bin.dat").unwrap();
+    assert_eq!(bin["patch"], Value::Null);
+
+    // Patrol: author and requested reviewer see it; a review answers the request.
+    let (st, v) = s
+        .put(&format!("{base}/reviewers/ken"), &w.aiko, json!({}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["reviewers"], json!(["ken"]));
+    for token in [&w.aiko, &w.ken] {
+        let patrol = s
+            .ok("/pulls?involves=me&state=open&draft=false", token)
+            .await;
+        assert_eq!(patrol["items"].as_array().unwrap().len(), 1);
+        assert!(patrol["items"][0]["activity"]["comments"].is_array());
+    }
+    let patrol = s.ok("/pulls?involves=me", &mia).await;
+    assert_eq!(patrol["items"], json!([]));
+    let (st, _) = s
+        .post(
+            &format!("{base}/reviews"),
+            &w.ken,
+            json!({"verdict": "request_changes", "body": "no", "commit": v["head_sha"]}),
+        )
+        .await;
+    assert_eq!(st, 201);
+    let after = s.ok(&base, &w.ken).await;
+    assert_eq!(after["reviewers"], json!([]));
+    let patrol = s.ok("/pulls?involves=me", &w.ken).await;
+    assert_eq!(
+        patrol["items"].as_array().unwrap().len(),
+        1,
+        "a reviewer stays involved"
+    );
+
+    // A thread reply involves its author without answering a review request.
+    let (st, root) = s
+        .post(
+            &format!("{base}/inline-comments"),
+            &w.ken,
+            json!({"body": "here", "commit": after["head_sha"], "path": "f.txt", "line": 1, "side": "RIGHT"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{root}");
+    let (st, _) = s
+        .put(&format!("{base}/reviewers/mia"), &w.aiko, json!({}))
+        .await;
+    assert_eq!(st, 200);
+    let (st, _) = s
+        .post(
+            &format!("{base}/threads/{}/replies", root["id"].as_str().unwrap()),
+            &mia,
+            json!({"body": "agreed"}),
+        )
+        .await;
+    assert_eq!(st, 201);
+    assert_eq!(s.ok(&base, &mia).await["reviewers"], json!(["mia"]));
+    let (st, _) = s.delete(&format!("{base}/reviewers/mia"), &w.aiko).await;
+    assert_eq!(st, 200);
+    let patrol = s.ok("/pulls?involves=me", &mia).await;
+    assert_eq!(patrol["items"].as_array().unwrap().len(), 1, "{patrol}");
+
+    // Commit details.
+    let c = s
+        .ok(
+            &format!(
+                "{}/commits/{}",
+                w.repo_path(),
+                after["head_sha"].as_str().unwrap()
+            ),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(c["message"], "binary");
+    assert_eq!(c["parents"].as_array().unwrap().len(), 1);
+
+    // Close and reopen.
+    let (st, v) = s.post(&format!("{base}/close"), &w.aiko, json!({})).await;
+    assert_eq!(st, 200);
+    assert_eq!(v["state"], "closed");
+    let (st, v) = s.post(&format!("{base}/reopen"), &w.aiko, json!({})).await;
+    assert_eq!(st, 200);
+    assert_eq!(v["state"], "open");
+}
+
+#[tokio::test]
+async fn the_owner_is_involved_in_every_open_pull_request() {
+    let w = World::new().await;
+    let s = &w.server;
+    let mia = s.member(&w.owner, "mia", "agent").await;
+    // A second repository with an agent's pull request in it.
+    let (st, v) = s
+        .post("/repos", &w.owner, json!({"path": "acme/other"}))
+        .await;
+    assert_eq!(st, 201, "{v}");
+    let other = s.remote("acme/other");
+    git_as_ok(&w.work, "alice", &w.owner, &["push", "-q", &other, "main"]);
+    w.push_change("elsewhere", "e.txt", "e\n");
+    git_as_ok(
+        &w.work,
+        "aiko",
+        &w.aiko,
+        &["push", "-q", &other, "+HEAD:refs/heads/elsewhere"],
+    );
+    let (st, v) = s
+        .post(
+            "/repos/acme%2Fother/pulls",
+            &w.aiko,
+            json!({"head": "elsewhere", "title": "Elsewhere", "body": "", "tickets": []}),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    // In acme/demo: one open pull request with ken as reviewer, one draft,
+    // and one closed.
+    w.push_change("one", "1.txt", "1\n");
+    let one = w.open_pull("one", json!([])).await;
+    s.put(
+        &format!("{}/{}/reviewers/ken", pulls(&w), one["number"]),
+        &w.aiko,
+        json!({}),
+    )
+    .await;
+    w.push_change("two", "2.txt", "2\n");
+    let two = w.open_pull("two", json!([])).await;
+    s.patch(
+        &format!("{}/{}", pulls(&w), two["number"]),
+        &w.aiko,
+        json!({"draft": true}),
+    )
+    .await;
+    w.push_change("three", "3.txt", "3\n");
+    let three = w.open_pull("three", json!([])).await;
+    s.post(
+        &format!("{}/{}/close", pulls(&w), three["number"]),
+        &w.aiko,
+        json!({}),
+    )
+    .await;
+
+    let labels = |v: Value| -> Vec<String> {
+        let mut all: Vec<String> = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                format!(
+                    "{} {}",
+                    p["repository"].as_str().unwrap(),
+                    p["label"].as_str().unwrap()
+                )
+            })
+            .collect();
+        all.sort();
+        all
+    };
+    // The owner wrote, reviewed, and was asked about none of them, and sees
+    // every open one, with the same entries an agent's patrol gets.
+    let owner = s.ok("/pulls?involves=me&state=open", &w.owner).await;
+    assert!(
+        owner["items"][0]["activity"]["comments"].is_array(),
+        "{owner}"
+    );
+    assert_eq!(
+        labels(owner),
+        ["acme/demo !1", "acme/demo !2", "acme/other !1"]
+    );
+    let ready = s.ok("/pulls?involves=me&draft=false", &w.owner).await;
+    assert_eq!(labels(ready), ["acme/demo !1", "acme/other !1"]);
+    // Page by page across both repositories: each once, none lost.
+    let mut walked = Vec::new();
+    let mut cursor = String::new();
+    loop {
+        let page = s
+            .ok(
+                &format!("/pulls?involves=me&state=open&limit=1{cursor}"),
+                &w.owner,
+            )
+            .await;
+        assert!(page["items"].as_array().unwrap().len() <= 1, "{page}");
+        let next = page["next_cursor"].as_str().map(str::to_string);
+        walked.extend(labels(page));
+        match next {
+            Some(c) => cursor = format!("&cursor={c}"),
+            None => break,
+        }
+    }
+    walked.sort();
+    assert_eq!(walked, ["acme/demo !1", "acme/demo !2", "acme/other !1"]);
+    // Agents still see only what involves them.
+    assert_eq!(
+        labels(s.ok("/pulls?involves=me", &w.ken).await),
+        ["acme/demo !1"]
+    );
+    assert_eq!(
+        labels(s.ok("/pulls?involves=me", &mia).await),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        labels(s.ok("/pulls?involves=me", &w.aiko).await),
+        ["acme/demo !1", "acme/demo !2", "acme/other !1"]
+    );
+}
+
+#[tokio::test]
+async fn the_owner_merges_the_current_head_and_closes_tickets() {
+    let w = World::new().await;
+    let s = &w.server;
+    let t = w.ticket("Ship it").await;
+    let one = format!("/repos/{}/tickets/1", encode(REPO));
+    s.put(
+        &format!("{one}/board"),
+        &w.aiko,
+        json!({"lane": "in_progress"}),
+    )
+    .await;
+    // A ticket of another repository is linked as a reference.
+    s.post("/repos", &w.owner, json!({"path": "acme/other"}))
+        .await;
+    let (_, other) = s
+        .post(
+            &format!("/repos/{}/tickets", encode("acme/other")),
+            &w.aiko,
+            json!({"title": "There"}),
+        )
+        .await;
+    let head = w.push_change("feature", "f.txt", "one\n");
+    let p = w
+        .open_pull(
+            "feature",
+            json!([{"url": t["url"], "closes": true}, {"url": other["url"], "closes": false}]),
+        )
+        .await;
+    let n = p["number"].as_u64().unwrap();
+    let base = format!("{}/{n}", pulls(&w));
+    let main = p["base_sha"].as_str().unwrap().to_string();
+    let merge = json!({"expected_head": head, "expected_base": main});
+
+    // Only the owner merges.
+    for agent in [&w.aiko, &w.ken] {
+        let (st, _) = s.post(&format!("{base}/merge"), agent, merge.clone()).await;
+        assert_eq!(st, 403);
+    }
+
+    // A head that moved is refused.
+    let head2 = w.push_change("feature", "f.txt", "one\ntwo\n");
+    let (st, v) = s
+        .post(&format!("{base}/merge"), &w.owner, merge.clone())
+        .await;
+    assert_eq!(st, 409);
+    assert_eq!(v["error"]["code"], "head_moved");
+    let merge2 = json!({"expected_head": head2, "expected_base": main});
+    // A stale base is refused.
+    let (st, v) = s
+        .post(
+            &format!("{base}/merge"),
+            &w.owner,
+            json!({"expected_head": head2, "expected_base": head}),
+        )
+        .await;
+    assert_eq!(v["error"]["code"], "base_moved", "{st} {v}");
+
+    // Required checks without a pipeline on the base: a failing check that
+    // says why, never success; merge refused.
+    let (_, repo) = s.get(&w.repo_path(), &w.owner).await;
+    s.patch(
+        &w.repo_path(),
+        &w.owner,
+        json!({"revision": repo["revision"], "required_checks": ["test"]}),
+    )
+    .await;
+    let checks = s.ok(&format!("{base}/checks"), &w.aiko).await;
+    assert_eq!(checks["checks_expected"], true);
+    assert_eq!(checks["checks"][0]["name"], "test");
+    assert_eq!(checks["checks"][0]["status"], "completed");
+    assert_eq!(checks["checks"][0]["conclusion"], "failure");
+    assert!(
+        checks["checks"][0]["details"]
+            .as_str()
+            .unwrap()
+            .contains(".branvil/ci.toml"),
+        "{checks}"
+    );
+    assert!(checks["checks"][0].get("attempt_id").is_none());
+    let (st, v) = s
+        .post(&format!("{base}/merge"), &w.owner, merge2.clone())
+        .await;
+    assert_eq!(st, 409);
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("test"),
+        "{v}"
+    );
+    let (_, repo) = s.get(&w.repo_path(), &w.owner).await;
+    s.patch(
+        &w.repo_path(),
+        &w.owner,
+        json!({"revision": repo["revision"], "required_checks": []}),
+    )
+    .await;
+    let checks = s.ok(&format!("{base}/checks"), &w.aiko).await;
+    assert_eq!(checks["checks"], json!([]));
+    assert_eq!(checks["checks_expected"], false);
+
+    // Now it merges: main moves to the head, the ticket is closed and done.
+    let (st, v) = s.post(&format!("{base}/merge"), &w.owner, merge2).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["merged"], true);
+    assert_eq!(v["state"], "closed");
+    assert_eq!(v["merge_sha"], head2.as_str());
+    let (_, main_now) = s
+        .get(&format!("{}/branches/main", w.repo_path()), &w.aiko)
+        .await;
+    assert_eq!(main_now["sha"], head2.as_str());
+    let ticket = s.ok(&one, &w.aiko).await;
+    assert_eq!(ticket["state"], "closed");
+    assert_eq!(ticket["state_reason"], "completed");
+    assert_eq!(ticket["lane"], "done");
+    let other = s
+        .ok(
+            &format!("/repos/{}/tickets/1", encode("acme/other")),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(other["state"], "open");
+    let closed = s
+        .ok(&format!("/workspaces/{WS}/board/closed"), &w.aiko)
+        .await;
+    let kinds: Vec<&str> = closed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert!(
+        kinds.contains(&"ticket") && kinds.contains(&"pull_request"),
+        "{closed}"
+    );
+    let pr = closed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "pull_request")
+        .unwrap();
+    assert_eq!(pr["merged"], true);
+    // A merged pull request keeps its diff.
+    assert_eq!(s.ok(&base, &w.aiko).await["changed_files"], 1);
+}

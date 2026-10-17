@@ -1,0 +1,536 @@
+//! The operations of the upstream (`docs/api.md`, "Upstream"): a
+//! repository's upstream, members' accounts, publishing a pull request, and
+//! the host's check logs.
+
+use serde::{Deserialize, Serialize};
+
+use super::host::{As, Credential};
+use super::{Place, Pushed, follow_once, open_on_host, push_branch, token_of};
+use crate::app::App;
+use crate::auth::Caller;
+use crate::domain::members::{MemberView, member_view};
+use crate::domain::pulls::{self, MergeInput, PullView, check_landable, load_pull};
+use crate::domain::repos::{self, RepoView, repo_view};
+use crate::domain::{member_by_name, repo_by_id};
+use crate::error::{AppError, AppResult};
+use crate::model::{Account, Member, MemberKind, Published, Reader, Repo, Upstream as Setting};
+use crate::store::{self, Key, Rd};
+use crate::util;
+
+/// The member who reads a repository's upstream.
+async fn reader_of(app: &App, setting: &Setting) -> AppResult<Member> {
+    let name = setting.reader.member.clone();
+    app.store
+        .read(move |r| member_by_name(r, &name))
+        .await
+        .map_err(|_| no_reader())
+}
+
+fn no_reader() -> AppError {
+    AppError::conflict_code(
+        "no_account",
+        "No member has an account on that host in Branvil to read it with; set one first (an agent's bot account is enough).",
+    )
+}
+
+// ---------------------------------------------------------------- the setting
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamInput {
+    pub provider: String,
+    pub repository: String,
+    /// The member whose account reads it; `null` picks one; absent keeps the
+    /// current reader (or picks one for a new upstream).
+    #[serde(default, deserialize_with = "crate::domain::double_option")]
+    pub reader: Option<Option<String>>,
+}
+
+/// Sets the repository's upstream after checking that Branvil can follow it:
+/// its reader's account reads it, and Branvil's default branch is the host's
+/// or behind it (then it moves to the host's). The reader is named, picked
+/// when `null` (or for a new upstream), and otherwise kept.
+pub async fn set(
+    app: &App,
+    caller: &Caller,
+    path: &str,
+    input: UpstreamInput,
+) -> AppResult<RepoView> {
+    caller.require_owner()?;
+    let repo = repos::visible(app, caller, path).await?;
+    let host = app.upstream.hosts.get(&input.provider)?;
+    host.validate_repository(&input.repository)?;
+    let provider = host.name().to_string();
+    let kept = repo
+        .upstream
+        .as_ref()
+        .filter(|u| u.provider == provider)
+        .map(|u| u.reader.clone());
+    let p2 = provider.clone();
+    let reader = match input.reader {
+        Some(Some(name)) => {
+            let m = app.store.read(move |r| member_by_name(r, &name)).await?;
+            if !m.accounts.iter().any(|a| a.provider == p2) {
+                return Err(AppError::conflict_code(
+                    "no_account",
+                    format!(
+                        "{} has no {} account in Branvil.",
+                        m.name,
+                        host.display_name()
+                    ),
+                ));
+            }
+            Reader {
+                member: m.name,
+                chosen: true,
+            }
+        }
+        Some(None) => picked(app, &p2).await?,
+        None => match kept {
+            Some(r) => r,
+            None => picked(app, &p2).await?,
+        },
+    };
+    let setting = Setting {
+        provider,
+        repository: input.repository,
+        reader,
+    };
+    let reader_member = reader_of(app, &setting).await?;
+    let token = token_of(app, &reader_member, host)
+        .await
+        .map_err(|why| AppError::conflict_code("no_account", why))?;
+    let reader = As {
+        member: &reader_member.name,
+        token: &token,
+    };
+    let at = Place {
+        app,
+        repo: &repo,
+        host,
+        setting: &setting,
+    };
+    match follow_once(at, reader).await {
+        Ok(_) => {}
+        Err(super::Stop::Failed(why)) => return Err(AppError::unavailable(why)),
+        Err(super::Stop::Stopped(_, why)) => return Err(AppError::conflict(why)),
+    }
+    let (id, s) = (repo.id.clone(), setting.clone());
+    let updated = app
+        .store
+        .write(move |w| {
+            let mut r = repo_by_id(w, &id)?;
+            if r.upstream.as_ref() != Some(&s) {
+                r.upstream = Some(s);
+                r.revision += 1;
+                w.put(store::REPOS, &Repo::key(&r.id), &r)?;
+            }
+            Ok(r)
+        })
+        .await?;
+    super::follow(
+        Place {
+            repo: &updated,
+            ..at
+        },
+        reader,
+    )
+    .await;
+    app.events.publish("repo", &updated.path, "");
+    app.upstream.wake();
+    Ok(repo_view(app, &updated))
+}
+
+pub async fn delete(app: &App, caller: &Caller, path: &str) -> AppResult<RepoView> {
+    caller.require_owner()?;
+    let repo = repos::visible(app, caller, path).await?;
+    let id = repo.id.clone();
+    let updated = app
+        .store
+        .write(move |w| {
+            let mut r = repo_by_id(w, &id)?;
+            if r.upstream.take().is_some() {
+                r.revision += 1;
+                w.put(store::REPOS, &Repo::key(&r.id), &r)?;
+            }
+            Ok(r)
+        })
+        .await?;
+    app.upstream.following.lock().unwrap().remove(&repo.id);
+    app.events.publish("repo", &updated.path, "");
+    Ok(repo_view(app, &updated))
+}
+
+/// Polls the repository now ("Check now") and answers with what it found.
+pub async fn refresh(app: &App, caller: &Caller, path: &str) -> AppResult<RepoView> {
+    let repo = repos::visible(app, caller, path).await?;
+    if repo.upstream.is_none() {
+        return Err(AppError::conflict(format!(
+            "{} has no upstream.",
+            repo.path
+        )));
+    }
+    super::poll_repo(app, &repo).await;
+    Ok(repo_view(app, &repo))
+}
+
+/// A reader picked as when nobody is named (`pick_reader`).
+async fn picked(app: &App, provider: &str) -> AppResult<Reader> {
+    let p = provider.to_string();
+    let member = app
+        .store
+        .read(move |r| super::pick_reader(r, &p))
+        .await?
+        .ok_or_else(no_reader)?;
+    Ok(Reader {
+        member,
+        chosen: false,
+    })
+}
+
+// ---------------------------------------------------------------- accounts
+
+/// Sets a member's account on a host after the host accepted the
+/// credential (`{"token"}` or `{"app"}`).
+pub async fn set_account(
+    app: &App,
+    caller: &Caller,
+    name: &str,
+    provider: &str,
+    credential: Credential,
+) -> AppResult<MemberView> {
+    caller.require_owner()?;
+    let host = app.upstream.hosts.get(provider)?;
+    credential.validate()?;
+    let n = name.to_string();
+    let member = app.store.read(move |r| member_by_name(r, &n)).await?;
+    if member.kind == MemberKind::Runner {
+        return Err(AppError::invalid("A runner has no upstream account."));
+    }
+    let login = host
+        .check(&member.name, &credential)
+        .await
+        .map_err(|e| match e.status {
+            Some(400..500) => AppError::invalid(e.message),
+            _ => AppError::unavailable(e.message),
+        })?;
+    super::write_credential(app, &member.name, host.name(), &credential)?;
+    let (n, p, kind) = (
+        member.name.clone(),
+        host.name().to_string(),
+        credential.kind(),
+    );
+    let m = app
+        .store
+        .write(move |w| {
+            let mut m = member_by_name(w, &n)?;
+            m.accounts.retain(|a| a.provider != p);
+            m.accounts.push(Account {
+                provider: p,
+                login,
+                kind,
+                set_at: util::now(),
+            });
+            w.put(store::MEMBERS, &Member::key(&m.name), &m)?;
+            Ok(m)
+        })
+        .await?;
+    app.upstream.wake();
+    Ok(member_view(&m))
+}
+
+pub async fn delete_account(
+    app: &App,
+    caller: &Caller,
+    name: &str,
+    provider: &str,
+) -> AppResult<MemberView> {
+    caller.require_owner()?;
+    let host = app.upstream.hosts.get(provider)?;
+    let (n, p) = (name.to_string(), host.name().to_string());
+    let (m, repos) = app
+        .store
+        .write(move |w| {
+            let mut m = member_by_name(w, &n)?;
+            m.accounts.retain(|a| a.provider != p);
+            w.put(store::MEMBERS, &Member::key(&m.name), &m)?;
+            // The upstreams this account read get another reader, picked.
+            let mut changed: Vec<String> = Vec::new();
+            for mut r in w.prefix_all::<Repo>(store::REPOS, &[])? {
+                let Some(u) = &mut r.upstream else { continue };
+                if u.provider != p || u.reader.member != m.name {
+                    continue;
+                }
+                u.reader = Reader {
+                    member: super::pick_reader(w, &p)?.unwrap_or_default(),
+                    chosen: false,
+                };
+                r.revision += 1;
+                w.put(store::REPOS, &Repo::key(&r.id), &r)?;
+                changed.push(r.path.clone());
+            }
+            Ok((m, changed))
+        })
+        .await?;
+    for path in repos {
+        app.events.publish("repo", &path, "");
+    }
+    super::remove_credential(app, &m.name, host.name());
+    Ok(member_view(&m))
+}
+
+// ---------------------------------------------------------------- publishing
+
+/// What publishing would post, for the owner to read first.
+#[derive(Serialize, Debug)]
+pub struct Preview {
+    /// The provider's name for people ("GitHub").
+    pub host: String,
+    pub repository: String,
+    pub head: String,
+    pub base: String,
+    pub title: String,
+    pub body: String,
+    /// The member whose account posts it (the author).
+    pub account: String,
+    /// That account's login, or `None` when the author has none.
+    pub login: Option<String>,
+}
+
+fn setting_of(repo: &Repo) -> AppResult<Setting> {
+    repo.upstream
+        .clone()
+        .ok_or_else(|| AppError::conflict(format!("{} has no upstream; merge instead.", repo.path)))
+}
+
+pub async fn preview(app: &App, caller: &Caller, path: &str, number: u64) -> AppResult<Preview> {
+    let repo = repos::visible(app, caller, path).await?;
+    let setting = setting_of(&repo)?;
+    let host = app.upstream.hosts.get(&setting.provider)?;
+    let r2 = repo.clone();
+    let (p, author) = app
+        .store
+        .read(move |r| {
+            let p = load_pull(r, &r2, number)?;
+            let author = member_by_name(r, &p.author)?;
+            Ok((p, author))
+        })
+        .await?;
+    let at = Place {
+        app,
+        repo: &repo,
+        host,
+        setting: &setting,
+    };
+    let (title, body) = super::compose(at, &p).await?;
+    Ok(Preview {
+        host: host.display_name().to_string(),
+        repository: setting.repository.clone(),
+        head: p.head.clone(),
+        base: p.base.clone(),
+        title,
+        body,
+        account: author.name.clone(),
+        login: author
+            .accounts
+            .iter()
+            .find(|a| a.provider == setting.provider)
+            .map(|a| a.login.clone()),
+    })
+}
+
+/// Publishes a pull request to the repository's upstream host as its
+/// author: pushes the head branch there and opens the host's pull request.
+/// Publishing a pull request whose sending stopped replaces what the host has.
+pub async fn publish(
+    app: &App,
+    caller: &Caller,
+    path: &str,
+    number: u64,
+    input: MergeInput,
+) -> AppResult<PullView> {
+    caller.require_owner()?;
+    let repo = repos::visible(app, caller, path).await?;
+    let setting = setting_of(&repo)?;
+    let host = app.upstream.hosts.get(&setting.provider)?;
+    let key = Key::new().s(&repo.id).u(number).bytes();
+    let _guard = app.upstream.pulls.lock(&key).await;
+    let (repo, p, head) = {
+        let lock = app.repo_lock(&repo.id);
+        let _guard = lock.lock().await;
+        let id = repo.id.clone();
+        let (repo, p) = app
+            .store
+            .read(move |r| {
+                let repo = repo_by_id(r, &id)?;
+                let p = load_pull(r, &repo, number)?;
+                Ok((repo, p))
+            })
+            .await?;
+        if p.base != repo.default_branch {
+            return Err(AppError::conflict_code(
+                "not_mergeable",
+                format!(
+                    "!{number} goes into {}; only pull requests into {} are published.",
+                    p.base, repo.default_branch
+                ),
+            ));
+        }
+        let (head, _) = check_landable(app, &repo, &p, &input).await?;
+        (repo, p, head)
+    };
+    // A record of another place (the upstream changed since) is replaced.
+    let earlier = p
+        .upstream
+        .clone()
+        .filter(|x| x.provider == setting.provider && x.repository == setting.repository);
+    if earlier
+        .as_ref()
+        .is_some_and(|x| x.stopped.is_none() && x.number.is_some())
+    {
+        // Already there; the poller carries every later change.
+        app.upstream.wake();
+        let tips = pulls::tips(app, &repo).await?;
+        return pulls::pull_view(app, &repo, &p, &tips).await;
+    }
+    let author = {
+        let a = p.author.clone();
+        app.store.read(move |r| member_by_name(r, &a)).await?
+    };
+    let token = token_of(app, &author, host)
+        .await
+        .map_err(|why| AppError::conflict_code("no_account", why))?;
+    let writer = As {
+        member: &author.name,
+        token: &token,
+    };
+    let mut x = earlier.unwrap_or_else(|| Published {
+        provider: setting.provider.clone(),
+        repository: setting.repository.clone(),
+        account: author.name.clone(),
+        number: None,
+        url: None,
+        state: "none".into(),
+        pushed: None,
+        sent_title: String::new(),
+        sent_body: String::new(),
+        sent_state: "open".into(),
+        checks: Vec::new(),
+        published_at: util::now(),
+        error: None,
+        stopped: None,
+    });
+    x.account = author.name.clone();
+    x.error = None;
+    // Publishing after sending stopped is the owner's decision to replace
+    // what the host has on the branch.
+    let replace = x.stopped.take().is_some();
+    let theirs = host
+        .branch_tip(writer, &setting.repository, &p.head)
+        .await
+        .map_err(|e| AppError::unavailable(e.message))?;
+    let at = Place {
+        app,
+        repo: &repo,
+        host,
+        setting: &setting,
+    };
+    let refused = if theirs.as_deref() == Some(head.as_str()) {
+        // Already there (an earlier publish pushed it, then stopped).
+        None
+    } else if theirs.is_none() || theirs == x.pushed || replace {
+        // Nothing there, Branvil's own push, or the owner replaces it.
+        let lease = theirs.clone().unwrap_or_default();
+        match push_branch(at, writer, &p.head, &head, &lease).await {
+            Pushed::Done => None,
+            Pushed::Refused(why) => Some(why),
+            Pushed::Failed(why) => return Err(AppError::unavailable(why)),
+        }
+    } else {
+        let t = theirs.clone().unwrap_or_default();
+        Some(format!(
+            "{} already has a branch {} (at {}) that Branvil did not push for this pull request; publishing again replaces it.",
+            host.display_name(),
+            p.head,
+            &t[..t.len().min(12)]
+        ))
+    };
+    if refused.is_none() {
+        if x.pushed.as_deref() != Some(head.as_str()) {
+            x.checks.clear();
+        }
+        x.pushed = Some(head);
+        if x.number.is_none() {
+            open_on_host(at, writer, super::login_of(&author, host), &p, &mut x).await;
+        }
+    }
+    x.stopped = refused.clone();
+    let failed = x.error.clone();
+    let r2 = repo.clone();
+    let stored = app
+        .store
+        .write(move |w| {
+            pulls::store_published(w, &r2, number, x, None)?;
+            load_pull(w, &r2, number)
+        })
+        .await?;
+    app.events.publish("pull", &repo.path, number.to_string());
+    app.upstream.wake();
+    if let Some(why) = refused {
+        return Err(AppError::conflict_code("upstream_refused", why));
+    }
+    if let Some(why) = failed {
+        return Err(AppError::unavailable(format!(
+            "The branch is on {}, but opening the pull request failed: {why} Branvil tries again.",
+            host.display_name()
+        )));
+    }
+    let tips = pulls::tips(app, &repo).await?;
+    pulls::pull_view(app, &repo, &stored, &tips).await
+}
+
+// ---------------------------------------------------------------- check logs
+
+/// The log of one of the host's check runs (`<provider>-<id>`, as the checks
+/// name it), or `None` when `id` does not name one.
+pub async fn check_log(
+    app: &App,
+    caller: &Caller,
+    path: &str,
+    id: &str,
+    tail: u64,
+) -> AppResult<Option<serde_json::Value>> {
+    let repo = repos::visible(app, caller, path).await?;
+    let Some(setting) = &repo.upstream else {
+        return Ok(None);
+    };
+    let Some(check) = id.strip_prefix(&format!("{}-", setting.provider)) else {
+        return Ok(None);
+    };
+    let host = app.upstream.hosts.get(&setting.provider)?;
+    let reader_member = reader_of(app, setting).await?;
+    let token = token_of(app, &reader_member, host)
+        .await
+        .map_err(AppError::unavailable)?;
+    let (log, size) = host
+        .check_log(
+            As {
+                member: &reader_member.name,
+                token: &token,
+            },
+            &setting.repository,
+            check,
+            tail as usize,
+        )
+        .await
+        .map_err(|e| match e.status {
+            Some(404) => AppError::not_found(e.message),
+            _ => AppError::unavailable(e.message),
+        })?;
+    Ok(Some(serde_json::json!({
+        "log": String::from_utf8_lossy(&log),
+        "log_bytes": size,
+        "truncated": size > tail,
+        "pruned": false,
+    })))
+}
