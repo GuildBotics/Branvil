@@ -45,7 +45,7 @@ for command in cargo npm git; do
   fi
 done
 
-if [[ ! -d web/node_modules ]]; then
+if [[ ! -f web/node_modules/.package-lock.json || web/package-lock.json -nt web/node_modules/.package-lock.json ]]; then
   npm --prefix web ci
 fi
 npm --prefix web run build
@@ -93,9 +93,13 @@ echo "Branvil is running. Press Ctrl-C to stop."
 if "$open_browser"; then
   # Use this data directory's owner token and configured URL even when the
   # calling shell has credentials for a different Branvil instance.
-  if ! (unset BRANVIL_TOKEN BRANVIL_URL; "$binary" open --data-dir "$data_dir"); then
-    echo "Could not open the GUI; the server is still running. Try branvil open --print with the same --data-dir." >&2
-  fi
+  (
+    unset BRANVIL_TOKEN BRANVIL_URL
+    if ! "$binary" open --data-dir "$data_dir"; then
+      echo "Could not open the browser; the server is still running. Open this single-use link within 60 seconds:" >&2
+      "$binary" open --print --data-dir "$data_dir" >&2 || true
+    fi
+  )
 fi
 
 wait "$server_pid"
