@@ -353,6 +353,46 @@ Logging goes to stderr; `BRANVIL_LOG` takes a `tracing` filter
 
 ## Development
 
+To build and start the server with its browser GUI from this checkout:
+
+```sh
+./scripts/dev.sh
+```
+
+Requires Node.js 24 or later and npm, in addition to Rust and Git. The script
+runs `npm ci` when `web/node_modules/.package-lock.json` is missing or older
+than `web/package-lock.json`, builds the GUI and the debug binary,
+initializes `<repo>/data` on the first run with owner name `owner`,
+and opens the GUI after the server is ready. Later runs reuse the data and
+`branvil.toml`. Ctrl-C stops the server; restart the script to pick up code
+changes. It does not watch files.
+
+Use a different data directory and initial owner, or skip opening the browser:
+
+```sh
+./scripts/dev.sh --data-dir /path/to/dev-data --owner alice
+./scripts/dev.sh --no-open
+```
+
+`BRANVIL_DATA_DIR` also selects the data directory; `--data-dir` takes precedence.
+Relative data paths are resolved from the repository root. `--owner` applies
+only when initializing a new database. An existing configuration keeps its
+listen address and base URL (by default `http://127.0.0.1:7878`).
+
+If the browser cannot open, the script prints a single-use GUI link valid for
+60 seconds and keeps the server running. Both attempts use this data
+directory's credentials and URL rather than `BRANVIL_TOKEN` or `BRANVIL_URL`
+from the calling shell. `--no-open` skips both attempts.
+
+To check the launcher without building or starting a real server (Python 3,
+POSIX only):
+
+```sh
+python3 -m unittest discover -s tests -p test_dev_script.py -v
+```
+
+To run the Rust checks:
+
 ```sh
 cargo fmt
 cargo clippy --all-targets -- -D warnings
