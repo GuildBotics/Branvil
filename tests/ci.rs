@@ -3,7 +3,7 @@
 //! so the service's queue, leases, supersession, checks, and merge gate are
 //! exercised exactly as a real runner would see them.
 
-mod common;
+use crate::common;
 
 use common::*;
 use reqwest::StatusCode;

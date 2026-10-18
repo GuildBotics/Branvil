@@ -405,7 +405,9 @@ cargo test
 
 The integration tests start real `branvil serve` processes on free loopback
 ports and drive them with real Git clients isolated from the user's Git
-configuration and credential helpers.
+configuration and credential helpers. They are one test crate,
+[`tests/main.rs`](tests/main.rs), with a module per file:
+`cargo test --test main tickets::` runs the tests of `tests/tickets.rs`.
 
 ### GitHub Actions
 

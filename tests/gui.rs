@@ -1,6 +1,6 @@
 //! The single-page GUI is served for every page URL, app routes included.
 
-mod common;
+use crate::common;
 
 use common::*;
 

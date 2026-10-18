@@ -1,7 +1,7 @@
 //! Git over Smart HTTP against a real service: clone, fetch, push, Basic auth,
 //! member kinds, protected branches, and Branvil-owned hooks.
 
-mod common;
+use crate::common;
 
 use common::*;
 use serde_json::json;

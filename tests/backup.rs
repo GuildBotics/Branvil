@@ -3,7 +3,7 @@
 //! threads, and references between them; members' upstream tokens are not
 //! carried.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 

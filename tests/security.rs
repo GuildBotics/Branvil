@@ -7,7 +7,7 @@
 //! loopback redirects, single-use codes), hook callbacks, and the absence of
 //! CORS.
 
-mod common;
+use crate::common;
 
 use common::*;
 use reqwest::StatusCode;

@@ -3,7 +3,7 @@
 //! file), the offline admin commands against a stopped one, and how `serve`
 //! stops.
 
-mod common;
+use crate::common;
 
 use common::*;
 
