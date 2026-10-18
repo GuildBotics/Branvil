@@ -15,6 +15,15 @@ following an upstream on GitHub and publishing pull requests to it,
 real service from this repository (see "Development"). See
 [`docs/architecture.md`](docs/architecture.md) for what exists.
 
+## Important Notice (Disclaimer)
+
+- This software is in alpha. Its data format, HTTP API, configuration, and
+  command line will change incompatibly without notice. A data directory or a
+  backup written by another schema version is refused and not converted; start
+  from a new data directory.
+- The author and distributor assume no responsibility for malfunctions of this
+  software or damages caused thereby. Use it at your own risk.
+
 ## Requirements
 
 - Rust 1.90 or later (developed with 1.96, edition 2024)
