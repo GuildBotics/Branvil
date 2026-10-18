@@ -49,8 +49,10 @@ if [[ ! -f web/node_modules/.package-lock.json || web/package-lock.json -nt web/
   npm --prefix web ci
 fi
 npm --prefix web run build
-cargo build --target-dir "$repo_root/target"
-binary="$repo_root/target/debug/branvil"
+target="$repo_root/target"
+"$repo_root/scripts/clean-stale-target.sh" "$target"
+cargo build --target-dir "$target"
+binary="$target/debug/branvil"
 
 if [[ ! -f "$data_dir/branvil.redb" ]]; then
   "$binary" init --data-dir "$data_dir" --owner "$owner"
