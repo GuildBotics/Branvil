@@ -105,11 +105,18 @@ What registers a run:
 - a push of the default branch or of the head of an open pull request (after
   the push is recorded, `Ci::on_ref_changes`), opening or reopening a pull
   request, and a merge;
-- the reconciler (at start and every minute), which registers the run of every
-  default-branch tip and open pull request head that has none: a crash between
-  recording a push and registering its run is repaired, and until then the
-  checks say "No CI run is registered for this commit yet" (`queued`, never
-  `no checks`).
+- the reconciler (at start, before the service listens, and every minute),
+  which registers every default-branch tip and open pull request head again:
+  a crash between recording a push and registering its run, or a Git failure
+  while reading its pipeline, is repaired, and until then the checks say "No
+  CI run is registered for this commit yet" (`queued`, never `no checks`).
+
+A registration always reads the commit's own pipeline. When a run was recorded
+with another one (a run of schema version 7 read its pull request's base),
+the run takes it: jobs whose definition changed, or that are new, get a new
+attempt. Checks show only attempts of the run's current job definitions; an
+attempt of a job the pipeline dropped or defined differently stays on its job
+page as history and never counts as a check.
 
 Rapid pushes: when a branch moves from commit A to B and no other branch still
 wants A, A is **superseded**: its queued attempts are concluded `cancelled`
@@ -315,7 +322,9 @@ On every OS: `msb doctor` (run by `branvil runner doctor`) must pass.
   pushes supersede, late and forged results are refused, required checks are
   never success or "no checks" when unregistered, pending, failed, cancelled,
   invalid, or without a runner; leases expire and re-queue once; a restart
-  interrupts orphaned attempts; a merge needs success on the exact head.
+  interrupts orphaned attempts; a merge needs success on the exact head; a run
+  of schema version 7 that holds its base's pipeline takes the head's own
+  after `branvil admin upgrade`.
 - `src/runner/mod.rs`: the runner loop against an in-process service with a
   fake executor that starts no process (results, cancellation, an unusable
   executor).

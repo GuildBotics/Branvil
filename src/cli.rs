@@ -101,6 +101,9 @@ pub enum AdminCommand {
     Check,
     /// Rebuild every derived index from the records
     Reindex,
+    /// Upgrade the database from the previous schema version, keeping a copy
+    /// of it as it was (stop the service and take a backup first)
+    Upgrade,
 }
 
 pub fn init(
@@ -209,6 +212,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         report.rescanned_changes
     );
 
+    // Before any check is read: a run recorded with a pipeline that is not
+    // its commit's own takes it (`Ci::reconcile`).
+    if let Err(e) = app.ci.reconcile(&app).await {
+        tracing::warn!("CI: reconcile failed: {e}");
+    }
     crate::ci::Ci::start(app.clone());
     crate::ci::supervise::start(app.clone(), format!("http://{bound}"));
     crate::upstream::start(app.clone());
@@ -271,9 +279,15 @@ pub fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {
             layout.db().display()
         );
     }
-    let store = Store::open(&layout.db(), config.storage.cache_size_mib << 20, 1)?;
+    let open = || Store::open(&layout.db(), config.storage.cache_size_mib << 20, 1);
     match command {
+        AdminCommand::Upgrade => {
+            let done = store::upgrade(&layout.db())?;
+            println!("{}", store::upgrade_report(&layout.db(), &done));
+            Ok(0)
+        }
         AdminCommand::Check => {
+            let store = open()?;
             let problems = store.read_sync(crate::model::index_problems)?;
             let pending = store.read_sync(|r| Ok(r.prefix_keys(store::JOURNAL, &[])?.len()))?;
             let structure = store.check_integrity()?;
@@ -297,7 +311,7 @@ pub fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {
             }
         }
         AdminCommand::Reindex => {
-            let n = store.write_sync(crate::model::rebuild_indexes)?;
+            let n = open()?.write_sync(crate::model::rebuild_indexes)?;
             println!("rebuilt {n} index entries");
             Ok(0)
         }

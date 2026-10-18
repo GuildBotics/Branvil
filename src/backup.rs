@@ -368,11 +368,12 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
             from.display()
         );
     }
-    if manifest.schema_version != store::SCHEMA_VERSION {
+    if ![store::SCHEMA_VERSION, crate::upgrade::FROM].contains(&manifest.schema_version) {
         bail!(
-            "the backup has schema version {}; this build restores only version {}",
+            "the backup has schema version {}; this build restores only version {} (and upgrades version {})",
             manifest.schema_version,
-            store::SCHEMA_VERSION
+            store::SCHEMA_VERSION,
+            crate::upgrade::FROM
         );
     }
     for f in &manifest.files {
@@ -401,6 +402,10 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
     let layout = Layout::new(data_dir);
     layout.create()?;
     std::fs::copy(inside(from, DB_FILE)?, layout.db()).context("copying the database")?;
+    if manifest.schema_version == crate::upgrade::FROM {
+        let done = store::upgrade(&layout.db())?;
+        println!("{}", store::upgrade_report(&layout.db(), &done));
+    }
     if from.join(CONFIG_FILE).exists() {
         std::fs::copy(from.join(CONFIG_FILE), layout.config_file())?;
     }

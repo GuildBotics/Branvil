@@ -9,8 +9,9 @@
 //! - Runs and attempts live in redb (`queue.rs`); logs and artifacts are files
 //!   under `<data>/ci/` (`files.rs`).
 //! - A background task expires leases, fails queued work when no runner shows
-//!   up, admits waiting runs, registers runs that a crash between a push and
-//!   its registration missed, and applies retention.
+//!   up, admits waiting runs, registers every wanted tip again (a run a crash
+//!   or a failed registration missed, a run recorded with another pipeline),
+//!   and applies retention.
 
 pub mod admin;
 pub mod api;
@@ -29,7 +30,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::config::Layout;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::events::Events;
 use crate::git::{Git, ZERO_SHA};
 use crate::model::Repo;
@@ -176,7 +177,7 @@ impl Ci {
             _ => return Vec::new(),
         };
         match self.read_pipeline(repo, &sha).await {
-            PipelineState::Jobs { jobs } => jobs,
+            Ok(PipelineState::Jobs { jobs }) => jobs,
             _ => Vec::new(),
         }
     }
@@ -206,18 +207,25 @@ impl Ci {
 
     /// The checks of `sha` in `repo`: the latest attempt of every job of the
     /// commit's run, plus an entry for each required check the run does not
-    /// have (see `docs/api.md`, "Checks"). Nothing here ever reports success
-    /// without a successful attempt of that commit.
+    /// have (see `docs/api.md`, "Checks"). Only attempts of the run's current
+    /// job definitions count. Nothing here ever reports success without a
+    /// successful attempt of that commit.
     pub async fn head_checks(&self, repo: &Repo, sha: &str) -> AppResult<Checks> {
         let (id, s) = (repo.id.clone(), sha.to_string());
+        // Attempts of a job the pipeline no longer has, or had with another
+        // definition, are history, not checks.
         let (run, latest) = self
             .inner
             .store
             .read(move |r| {
-                Ok((
-                    queue::get_run(r, &id, &s)?,
-                    queue::latest_attempts(r, &id, &s)?,
-                ))
+                let run = queue::get_run(r, &id, &s)?;
+                let latest = match run.as_ref().map(|x| &x.pipeline) {
+                    Some(PipelineState::Jobs { jobs }) => {
+                        queue::current_attempts(r, &id, &s, jobs)?
+                    }
+                    _ => Vec::new(),
+                };
+                Ok((run, latest))
             })
             .await?;
         let mut checks = Vec::new();
@@ -230,8 +238,12 @@ impl Ci {
                     "No CI run is registered for this commit yet.".into(),
                 ));
             }
+            // An unreadable pipeline is expected rather than "no checks".
             let expected = !repo.required_checks.is_empty()
-                || self.read_pipeline(repo, sha).await != PipelineState::Absent;
+                || !matches!(
+                    self.read_pipeline(repo, sha).await,
+                    Ok(PipelineState::Absent)
+                );
             return Ok(Checks {
                 checks,
                 checks_expected: expected,
@@ -304,48 +316,46 @@ impl Ci {
         })
     }
 
-    /// Reads the pipeline of commit `sha`.
-    async fn read_pipeline(&self, repo: &Repo, sha: &str) -> PipelineState {
+    /// Reads the pipeline of commit `sha`. A Git failure is an error, never a
+    /// pipeline: the registration is retried by the reconciler.
+    async fn read_pipeline(&self, repo: &Repo, sha: &str) -> AppResult<PipelineState> {
         let dir = self.inner.git.repo_dir(&repo.path);
         let spec = format!("{sha}:{}", pipeline::PIPELINE_PATH);
-        let unreadable = |m: String| PipelineState::Invalid {
-            message: format!("Branvil could not read it: {m}"),
-        };
-        match self
+        let out = self
             .inner
             .git
             .run(Some(&dir), &["cat-file", "-t", &spec])
-            .await
-        {
-            Ok(out) if out.ok() && out.text().trim() == "blob" => {}
-            Ok(out) if out.ok() => {
-                return PipelineState::Invalid {
+            .await?;
+        match out.text().trim() {
+            "blob" if out.ok() => {}
+            _ if out.ok() => {
+                return Ok(PipelineState::Invalid {
                     message: format!("{} is not a file.", pipeline::PIPELINE_PATH),
-                };
+                });
             }
-            Ok(_) => return PipelineState::Absent,
-            Err(e) => return unreadable(e.message),
+            _ => return Ok(PipelineState::Absent),
         }
-        let out = match self
+        let out = self
             .inner
             .git
             .run(Some(&dir), &["cat-file", "blob", &spec])
-            .await
-        {
-            Ok(out) if out.ok() => out,
-            Ok(out) => return unreadable(out.stderr.trim().to_string()),
-            Err(e) => return unreadable(e.message),
-        };
+            .await?;
+        if !out.ok() {
+            return Err(AppError::internal(format!(
+                "reading {spec}: {}",
+                out.stderr.trim()
+            )));
+        }
         if out.stdout.len() > pipeline::MAX_PIPELINE_BYTES {
-            return PipelineState::Invalid {
+            return Ok(PipelineState::Invalid {
                 message: format!(
                     "{} is larger than {} bytes.",
                     pipeline::PIPELINE_PATH,
                     pipeline::MAX_PIPELINE_BYTES
                 ),
-            };
+            });
         }
-        match String::from_utf8(out.stdout) {
+        Ok(match String::from_utf8(out.stdout) {
             Ok(text) => match pipeline::parse(&text) {
                 Ok(jobs) => PipelineState::Jobs { jobs },
                 Err(message) => PipelineState::Invalid { message },
@@ -353,7 +363,7 @@ impl Ci {
             Err(_) => PipelineState::Invalid {
                 message: format!("{} is not UTF-8.", pipeline::PIPELINE_PATH),
             },
-        }
+        })
     }
 
     /// Registers CI of `sha` for `branch` when the branch wants CI: it is the
@@ -377,7 +387,7 @@ impl Ci {
             sha: sha.to_string(),
             branch: branch.to_string(),
             protected: repo.is_protected(branch),
-            pipeline: self.read_pipeline(repo, sha).await,
+            pipeline: self.read_pipeline(repo, sha).await?,
             network: repo.ci_network,
         };
         let queue_max = self.inner.config.queue_max;
@@ -423,8 +433,18 @@ impl Ci {
                     self.publish(&[(repo.path.clone(), c.old.clone())]);
                 }
             }
-            if c.new != ZERO_SHA && self.consider(repo, branch, &c.new).await? {
-                self.publish(&[(repo.path.clone(), c.new.clone())]);
+            if c.new != ZERO_SHA {
+                // A failed registration does not hold up the other changes;
+                // the reconciler retries it.
+                match self.consider(repo, branch, &c.new).await {
+                    Ok(true) => self.publish(&[(repo.path.clone(), c.new.clone())]),
+                    Ok(false) => {}
+                    Err(e) => tracing::error!(
+                        "CI registration of {} {branch} {} failed: {e}",
+                        repo.path,
+                        c.new
+                    ),
+                }
             }
         }
         if left {
@@ -452,9 +472,11 @@ impl Ci {
         }
     }
 
-    /// Registers runs that should exist but do not (a crash between a push
-    /// and its registration, a failed registration): the tips of the default
-    /// branch and of every open pull request head.
+    /// Registers the tips of the default branch and of every open pull
+    /// request head again: a run that is missing (a crash between a push and
+    /// its registration, a failed registration) is created, and a run whose
+    /// recorded pipeline is not the commit's own gets it. Returns how many
+    /// runs changed.
     pub async fn reconcile(&self, app: &App) -> AppResult<usize> {
         let repos: Vec<Repo> = self
             .inner
@@ -480,19 +502,17 @@ impl Ci {
                 let Some(sha) = tips.get(&branch) else {
                     continue;
                 };
-                let (id, s) = (repo.id.clone(), sha.clone());
-                let present = self
-                    .inner
-                    .store
-                    .read(move |r| Ok(queue::get_run(r, &id, &s)?.is_some()))
-                    .await?;
-                if !present && self.consider(&repo, &branch, sha).await? {
-                    tracing::warn!(
-                        "CI: registered the missing run of {} {branch} {sha}",
+                match self.consider(&repo, &branch, sha).await {
+                    Ok(true) => {
+                        tracing::warn!("CI: reconciled the run of {} {branch} {sha}", repo.path);
+                        registered += 1;
+                        self.publish(&[(repo.path.clone(), sha.clone())]);
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(
+                        "CI: registering {} {branch} {sha} failed (retried in a minute): {e}",
                         repo.path
-                    );
-                    registered += 1;
-                    self.publish(&[(repo.path.clone(), sha.clone())]);
+                    ),
                 }
             }
         }
@@ -757,6 +777,53 @@ mod tests {
         repo.required_checks.clear();
         let c = ci.head_checks(&repo, "s1").await.unwrap();
         assert!(!c.checks_expected && c.checks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_takes_its_commits_pipeline_and_counts_only_its_jobs() {
+        let (_d, ci, repo) = setup();
+        let reg = |jobs: Vec<JobDef>| Registration {
+            repo: repo.id.clone(),
+            repo_path: repo.path.clone(),
+            sha: "s1".into(),
+            branch: "feature".into(),
+            protected: false,
+            pipeline: PipelineState::Jobs { jobs },
+            network: false,
+        };
+        let run = |r: Registration| {
+            let now = util::now();
+            ci.inner
+                .store
+                .write(move |w| queue::register(w, r, 10, &now))
+        };
+        let succeed = || {
+            ci.inner.store.write(|w| {
+                let now = util::now();
+                let c = queue::claim(w, "r", 60, &now)?.unwrap();
+                queue::finish(w, &c.attempt.id, &c.lease, "success", None, &now)
+            })
+        };
+        let test = |c: &Checks| c.checks.iter().find(|x| x.name == "test").cloned().unwrap();
+        // Recorded with another pipeline (a base's), and its test succeeded.
+        assert!(run(reg(vec![job("test")])).await.unwrap());
+        succeed().await.unwrap();
+        assert!(test(&ci.head_checks(&repo, "s1").await.unwrap()).succeeded());
+        // The commit's own pipeline has no test: the old success is not a check.
+        assert!(run(reg(vec![job("lint")])).await.unwrap());
+        let c = ci.head_checks(&repo, "s1").await.unwrap();
+        let t = test(&c);
+        assert_eq!(t.conclusion.as_deref(), Some("failure"));
+        assert!(!t.recorded(), "{t:?}");
+        assert!(c.checks.iter().any(|x| x.name == "lint" && x.recorded()));
+        // Its test is another definition: it runs again, and only that counts.
+        let mut changed = job("test");
+        changed.commands = vec!["echo changed".into()];
+        assert!(run(reg(vec![changed.clone(), job("lint")])).await.unwrap());
+        let t = test(&ci.head_checks(&repo, "s1").await.unwrap());
+        assert_eq!((t.status.as_str(), t.attempt), ("queued", Some(2)));
+        // The same pipeline again changes nothing.
+        assert!(!run(reg(vec![changed, job("lint")])).await.unwrap());
     }
 
     #[tokio::test]

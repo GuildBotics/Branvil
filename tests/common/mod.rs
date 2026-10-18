@@ -490,3 +490,81 @@ impl World {
         v["pull"].clone()
     }
 }
+
+/// The JSON records of `table` in the database file `db` (the service
+/// stopped).
+pub fn records(db: &Path, table: &str) -> Vec<Value> {
+    let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
+    let database = redb::Database::open(db).unwrap();
+    let txn = redb::ReadableDatabase::begin_read(&database).unwrap();
+    let t = txn.open_table(def).unwrap();
+    redb::ReadableTable::iter(&t)
+        .unwrap()
+        .map(|item| serde_json::from_slice(item.unwrap().1.value()).unwrap())
+        .collect()
+}
+
+/// Rewrites every JSON record of `table` in the database file `db` (the
+/// service stopped) with `f`; with `table` `meta`, the schema version.
+pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
+    let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
+    let database = redb::Database::open(db).unwrap();
+    let txn = database.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(def).unwrap();
+        let all: Vec<(Vec<u8>, Vec<u8>)> = redb::ReadableTable::iter(&t)
+            .unwrap()
+            .map(|item| {
+                let (k, v) = item.unwrap();
+                (k.value().to_vec(), v.value().to_vec())
+            })
+            .collect();
+        for (k, v) in all {
+            let mut value: Value = serde_json::from_slice(&v).unwrap();
+            f(&mut value);
+            t.insert(k.as_slice(), serde_json::to_vec(&value).unwrap().as_slice())
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+}
+
+/// Makes the database file `db` (the service stopped) look as schema
+/// version 7 wrote it: every CI run records where its pipeline was read
+/// (`source` returns the base it was read from, or `None` for the commit
+/// itself).
+pub fn as_schema_7(db: &Path, source: impl Fn(&Value) -> Option<String>) {
+    edit_records(db, "ci_runs", |run| {
+        let sha = source(run).unwrap_or_else(|| run["sha"].as_str().unwrap().to_string());
+        run["source"] = json!({"branch": "main", "sha": sha});
+    });
+    edit_records(db, "meta", |v| {
+        if v.is_u64() {
+            *v = json!(7);
+        }
+    });
+}
+
+/// Every table of a database, by name, as raw keys and values.
+pub type Tables = std::collections::BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>;
+
+/// Every table of the database file `db` (the service stopped).
+pub fn tables(db: &Path) -> Tables {
+    let database = redb::Database::open(db).unwrap();
+    let txn = redb::ReadableDatabase::begin_read(&database).unwrap();
+    let mut out = std::collections::BTreeMap::new();
+    for handle in txn.list_tables().unwrap() {
+        let name = redb::TableHandle::name(&handle).to_string();
+        let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(&name);
+        let t = txn.open_table(def).unwrap();
+        let rows = redb::ReadableTable::iter(&t)
+            .unwrap()
+            .map(|item| {
+                let (k, v) = item.unwrap();
+                (k.value().to_vec(), v.value().to_vec())
+            })
+            .collect();
+        out.insert(name, rows);
+    }
+    out
+}

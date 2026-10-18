@@ -548,7 +548,8 @@ request was published (see "Upstream").
 ```
 
 - `head_sha` / `base_sha` are `""` and `behind_by` is `null` when that branch is gone.
-- `checks` are the latest attempt of every job of the head's run (`docs/ci.md`),
+- `checks` are the latest attempt of every job of the head's run, as the run's
+  pipeline defines the job (`docs/ci.md`),
   plus entries without an `attempt_id` that say why something is missing, each
   with `details`:
   - a required check when the commit has no run yet: `status: "queued"`,

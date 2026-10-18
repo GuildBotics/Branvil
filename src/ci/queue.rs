@@ -212,16 +212,44 @@ pub fn attempts_of(r: &impl Rd, repo: &str, sha: &str) -> AppResult<Vec<Attempt>
     Ok(out)
 }
 
-/// The latest attempt of every job of a commit.
-pub fn latest_attempts(r: &impl Rd, repo: &str, sha: &str) -> AppResult<Vec<Attempt>> {
+/// The latest attempt of every job of `jobs` that ran that very definition;
+/// attempts of another definition are history.
+pub fn current_attempts(
+    r: &impl Rd,
+    repo: &str,
+    sha: &str,
+    jobs: &[JobDef],
+) -> AppResult<Vec<Attempt>> {
     let mut out: Vec<Attempt> = Vec::new();
     for a in attempts_of(r, repo, sha)? {
+        if !jobs.contains(&a.job) {
+            continue;
+        }
         match out.last_mut() {
             Some(last) if last.job.name == a.job.name => *last = a,
             _ => out.push(a),
         }
     }
     Ok(out)
+}
+
+/// The jobs of `run`'s pipeline that have no current attempt, or whose
+/// current attempt ended because the commit was replaced.
+fn jobs_to_run(r: &impl Rd, run: &Run) -> AppResult<Vec<JobDef>> {
+    let PipelineState::Jobs { jobs } = &run.pipeline else {
+        return Ok(Vec::new());
+    };
+    let current = current_attempts(r, &run.repo, &run.sha, jobs)?;
+    Ok(jobs
+        .iter()
+        .filter(|j| {
+            current
+                .iter()
+                .find(|a| a.job.name == j.name)
+                .is_none_or(|a| a.superseded)
+        })
+        .cloned()
+        .collect())
 }
 
 fn next_number(r: &impl Rd, repo: &str, sha: &str, job: &str) -> AppResult<u64> {
@@ -318,21 +346,15 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
         if reg.protected {
             run.cache_scope = scope;
         }
-        if run.superseded_by.take().is_some()
-            && let PipelineState::Jobs { jobs } = run.pipeline.clone()
-        {
-            // Jobs whose latest attempt ended because the commit was replaced,
-            // or that never ran, run (again).
-            let latest = latest_attempts(w, &run.repo, &run.sha)?;
-            let todo: Vec<JobDef> = jobs
-                .into_iter()
-                .filter(|j| {
-                    latest
-                        .iter()
-                        .find(|a| a.job.name == j.name)
-                        .is_none_or(|a| a.superseded)
-                })
-                .collect();
+        let revived = run.superseded_by.take().is_some();
+        // The registration read the commit's own pipeline; a run recorded with
+        // another one (by schema version 7, from a pull request's base) takes
+        // it. The comparison is of the parsed jobs, so a change to what the
+        // parser yields for the same file runs the jobs again.
+        let replaced = run.pipeline != reg.pipeline;
+        run.pipeline = reg.pipeline;
+        if revived || replaced {
+            let todo = jobs_to_run(w, &run)?;
             admit_jobs(w, &mut run, &todo, reg.network, queue_max, now)?;
         }
         if run != old {
@@ -393,12 +415,9 @@ pub fn admit_waiting(w: &Wtx, queue_max: usize, now: &str) -> AppResult<Vec<(Str
         let Some(old) = w.get::<Run>(store::CI_RUNS, &key)? else {
             continue;
         };
-        let PipelineState::Jobs { jobs } = &old.pipeline else {
-            continue;
-        };
         let mut run = old.clone();
         let network = network_of(w, &run.repo)?;
-        let jobs = jobs.clone();
+        let jobs = jobs_to_run(w, &run)?;
         admit_jobs(w, &mut run, &jobs, network, queue_max, now)?;
         if run.waiting {
             break;
@@ -437,7 +456,7 @@ pub fn branch_left(
         run.superseded_by = Some(by.to_string());
         run.waiting = false;
         let reason = format!("Superseded: {branch} moved from {sha} to {by}.");
-        for a in latest_attempts(w, repo, sha)? {
+        for a in attempts_of(w, repo, sha)? {
             let mut x = a.clone();
             match a.status.as_str() {
                 "queued" => {
@@ -782,6 +801,14 @@ mod tests {
     const T2: &str = "2026-10-14T10:02:00.000Z";
     const T3: &str = "2026-10-14T10:05:00.000Z";
 
+    fn latest_attempts(r: &impl Rd, repo: &str, sha: &str) -> AppResult<Vec<Attempt>> {
+        let jobs: Vec<JobDef> = attempts_of(r, repo, sha)?
+            .into_iter()
+            .map(|a| a.job)
+            .collect();
+        current_attempts(r, repo, sha, &jobs)
+    }
+
     fn latest(s: &Store, sha: &str) -> Vec<Attempt> {
         s.read_sync(|r| latest_attempts(r, "repo_1", sha)).unwrap()
     }
@@ -936,6 +963,96 @@ mod tests {
             s.read_sync(crate::model::index_problems)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    fn with(sha: &str, jobs: Vec<JobDef>) -> Registration {
+        let mut r = reg(sha, "feature", &[]);
+        r.pipeline = PipelineState::Jobs { jobs };
+        r
+    }
+
+    fn changed(name: &str) -> JobDef {
+        let mut j = job(name);
+        j.commands = vec!["echo changed".into()];
+        j
+    }
+
+    #[test]
+    fn a_taken_pipeline_counts_only_attempts_of_its_definitions() {
+        let (_d, s) = store();
+        // The old definition of test runs when the run takes the new one.
+        s.write_sync(|w| register(w, reg("s1", "feature", &["test"]), 10, T0))
+            .unwrap();
+        s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+        s.write_sync(|w| register(w, with("s1", vec![changed("test")]), 10, T0))
+            .unwrap();
+        // Interrupted, the old attempt is queued again with its definition;
+        // it is the newest, and still not the current attempt.
+        s.write_sync(|w| expire(w, T2)).unwrap();
+        let all = s.read_sync(|r| attempts_of(r, "repo_1", "s1")).unwrap();
+        let shape: Vec<(u64, bool, &str)> = all
+            .iter()
+            .map(|a| (a.number, a.job == changed("test"), a.status.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (1, false, "completed"),
+                (2, true, "queued"),
+                (3, false, "queued")
+            ]
+        );
+        let current = s
+            .read_sync(|r| current_attempts(r, "repo_1", "s1", &[changed("test")]))
+            .unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].number, 2);
+        // Leaving the commit ends every unfinished attempt, not only the newest.
+        s.write_sync(|w| branch_left(w, "repo_1", "s1", "feature", "s2", T2))
+            .unwrap();
+        let all = s.read_sync(|r| attempts_of(r, "repo_1", "s1")).unwrap();
+        assert!(all.iter().all(|a| a.status == "completed"), "{all:?}");
+    }
+
+    #[test]
+    fn an_admitted_run_runs_only_jobs_without_a_current_attempt() {
+        let (_d, s) = store();
+        s.write_sync(|w| register(w, reg("s1", "feature", &["a", "b"]), 10, T0))
+            .unwrap();
+        for _ in 0..2 {
+            let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+            s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, T0))
+                .unwrap();
+        }
+        // The queue is full when the run takes a pipeline with a new b.
+        s.write_sync(|w| register(w, reg("s2", "other", &["x"]), 1, T0))
+            .unwrap();
+        s.write_sync(|w| register(w, with("s1", vec![job("a"), changed("b")]), 1, T0))
+            .unwrap();
+        let run = s
+            .read_sync(|r| get_run(r, "repo_1", "s1"))
+            .unwrap()
+            .unwrap();
+        assert!(run.waiting);
+        s.write_sync(|w| {
+            let x = attempts_of(w, "repo_1", "s2")?;
+            cancel(w, &x[0].id, "ken", T1)
+        })
+        .unwrap();
+        assert_eq!(s.write_sync(|w| admit_waiting(w, 1, T1)).unwrap().len(), 1);
+        let all = s.read_sync(|r| attempts_of(r, "repo_1", "s1")).unwrap();
+        let shape: Vec<(&str, u64, &str)> = all
+            .iter()
+            .map(|a| (a.job.name.as_str(), a.number, a.status.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("a", 1, "completed"),
+                ("b", 1, "completed"),
+                ("b", 2, "queued")
+            ]
         );
     }
 

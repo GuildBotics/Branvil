@@ -20,6 +20,7 @@ mod runner;
 mod smart_http;
 mod store;
 mod tunnel;
+mod upgrade;
 mod upstream;
 mod util;
 

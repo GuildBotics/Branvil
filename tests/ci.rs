@@ -420,6 +420,137 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
 }
 
 #[tokio::test]
+async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upgrade() {
+    let mut w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test"]))],
+        None,
+    )
+    .await;
+    assert_eq!(runner.drain("success").await, 1);
+    set_required(&w, &["test"]).await;
+    sync_main(&w);
+    let changed = pipeline(&["test"]).replace("echo test", "echo changed");
+    std::fs::write(w.work.join(".branvil/ci.toml"), changed).unwrap();
+    git_ok(&w.work, &["add", ".branvil/ci.toml"]);
+    let head = w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let base = p["base_sha"].as_str().unwrap().to_string();
+    let c = runner.claim().await.unwrap();
+    runner.finish(&c, "success").await;
+    let old_attempt = c["attempt_id"].as_str().unwrap().to_string();
+
+    // What version 7 recorded for the head: the base's pipeline, and a
+    // successful attempt of the base's job.
+    w.server.stop();
+    let db = w.server.data.join("branvil.redb");
+    let base_run = records(&db, "ci_runs")
+        .into_iter()
+        .find(|r| r["sha"] == base.as_str())
+        .unwrap();
+    let base_job = base_run["pipeline"]["jobs"][0].clone();
+    edit_records(&db, "ci_runs", |r| {
+        if r["sha"] == head.as_str() {
+            r["pipeline"] = base_run["pipeline"].clone();
+        }
+    });
+    edit_records(&db, "ci_attempts", |a| {
+        if a["sha"] == head.as_str() {
+            a["job"] = base_job.clone();
+        }
+    });
+    as_schema_7(&db, |r| (r["sha"] == head.as_str()).then(|| base.clone()));
+    let before = tables(&db);
+
+    // The service does not open it; `admin upgrade` does, keeping a copy.
+    let data = w.server.data.clone();
+    let admin = |what: &str| {
+        let out = std::process::Command::new(BIN)
+            .args(["admin", what, "--data-dir"])
+            .arg(&data)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    };
+    let (ok, text) = admin("check");
+    assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
+    let (ok, text) = admin("upgrade");
+    assert!(ok, "{text}");
+    let copy = text
+        .lines()
+        .find_map(|l| l.strip_prefix("the database as it was: "))
+        .unwrap();
+    let copy = std::path::Path::new(copy);
+    assert_eq!(tables(copy), before);
+    // Only the runs and the version changed: each run lost its source.
+    let (mut after, mut expected) = (tables(&db), before.clone());
+    for t in ["ci_runs", "meta"] {
+        after.remove(t);
+        expected.remove(t);
+    }
+    assert_eq!(after, expected);
+    let mut runs = records(copy, "ci_runs");
+    for r in runs.iter_mut() {
+        assert!(r["source"].is_object(), "{r}");
+        r.as_object_mut().unwrap().remove("source");
+    }
+    assert_eq!(records(&db, "ci_runs"), runs);
+    let (ok, text) = admin("upgrade");
+    assert!(
+        ok && text.contains("already has schema version 8"),
+        "{text}"
+    );
+    let (ok, text) = admin("check");
+    assert!(ok && text.contains("indexes: ok"), "{text}");
+
+    // Started again, the head runs its own pipeline: the base's success is
+    // history, not the check, and the merge waits.
+    w.restart(&[]);
+    let runner = Runner {
+        url: w.server.url.clone(),
+        token: runner.token.clone(),
+        http: reqwest::Client::new(),
+    };
+    let v = checks(&w, n).await;
+    let t = check(&v, "test");
+    assert_eq!(
+        (t["status"].as_str(), t["attempt"].as_u64()),
+        (Some("queued"), Some(2)),
+        "{v}"
+    );
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/merge", w.repo_path()),
+            &w.owner,
+            json!({"expected_head": head, "expected_base": base}),
+        )
+        .await;
+    assert_eq!(
+        (st.as_u16(), v["error"]["code"].as_str()),
+        (409, Some("not_mergeable")),
+        "{v}"
+    );
+    let c = runner.claim().await.unwrap();
+    assert_eq!(c["sha"], head.as_str());
+    assert_eq!(c["job"]["commands"], json!(["echo changed"]));
+    let old = w
+        .server
+        .ok(&format!("{}/jobs/{old_attempt}", w.repo_path()), &w.ken)
+        .await;
+    assert_eq!(old["conclusion"], "success");
+}
+
+#[tokio::test]
 async fn rapid_pushes_supersede_older_commits_and_their_late_results_never_count() {
     let w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;
