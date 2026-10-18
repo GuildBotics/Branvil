@@ -554,8 +554,8 @@ request was published (see "Upstream").
   - a required check when the commit has no run yet: `status: "queued"`,
     `conclusion: null` ("No CI run is registered for this commit yet");
   - a job of a run that waits for room in the queue: `queued`, `null`;
-  - a required check the run cannot have (no pipeline on the trusted branch,
-    an invalid pipeline, no job of that name): `completed`, `failure`;
+  - a required check the run cannot have (no pipeline in the commit, an
+    invalid pipeline, no job of that name): `completed`, `failure`;
   - an invalid pipeline: a check named `pipeline`, `completed`, `failure`, the
     reason in `details`;
   - a job of a superseded run that never got queued: `completed`, `cancelled`.
@@ -566,9 +566,8 @@ request was published (see "Upstream").
   completed) is `success`, `failure`, `cancelled`, `timed_out`, `skipped`, or
   `startup_failure` (no runner or no usable executor; the details say which).
   Only an attempt of that exact commit can be `success`.
-- `checks_expected` is true when the head's run has a pipeline (valid or not),
-  when there is no run yet and the default branch has a pipeline, or when the
-  repository has required checks: a head without checks is then "not
+- `checks_expected` is true when the head has a pipeline (valid or not), or
+  when the repository has required checks: a head without checks is then "not
   registered yet", never "no checks".
 - `base_checks` counts the checks of the base tip.
 - A published pull request whose head is the commit Branvil pushed also lists

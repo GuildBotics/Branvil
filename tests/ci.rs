@@ -220,7 +220,7 @@ fn set_ci_config(w: &World, values: &[(&str, i64)]) {
 }
 
 #[tokio::test]
-async fn a_head_runs_the_pipeline_of_its_base_and_reports_logs_and_artifacts() {
+async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
     let w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;
     land(
@@ -234,9 +234,10 @@ async fn a_head_runs_the_pipeline_of_its_base_and_reports_logs_and_artifacts() {
     assert_eq!(runner.drain("success").await, 1);
     set_required(&w, &["test"]).await;
 
-    // The head tries to drop its own check; the pipeline comes from the base.
+    // The head changes its pipeline; its own pipeline runs.
     sync_main(&w);
-    std::fs::write(w.work.join(".branvil/ci.toml"), pipeline(&["lint"])).unwrap();
+    let changed = pipeline(&["test"]).replace("echo test", "echo changed");
+    std::fs::write(w.work.join(".branvil/ci.toml"), changed).unwrap();
     git_ok(&w.work, &["add", ".branvil/ci.toml"]);
     let head = w.push_change("feature", "f.txt", "one\n");
     let p = w.open_pull("feature", json!([])).await;
@@ -250,7 +251,7 @@ async fn a_head_runs_the_pipeline_of_its_base_and_reports_logs_and_artifacts() {
     let c = runner.claim().await.unwrap();
     assert_eq!(c["sha"], head.as_str());
     assert_eq!(c["job"]["name"], "test");
-    assert_eq!(c["job"]["commands"], json!(["echo test"]));
+    assert_eq!(c["job"]["commands"], json!(["echo changed"]));
     assert_eq!(c["repo"], REPO);
     assert_eq!(c["network"], false);
     assert_eq!(c["cache_scope"], "branch:feature");
@@ -411,6 +412,8 @@ async fn a_head_runs_the_pipeline_of_its_base_and_reports_logs_and_artifacts() {
         )
         .await;
     assert_eq!(st, 200, "{v}");
+    // The fast-forwarded main keeps the head's run: nothing runs again.
+    assert!(runner.claim().await.is_none());
     let diag = w.server.ok("/admin/diagnostics", &w.owner).await;
     assert_eq!(diag["runner"]["state"], "ready", "{diag}");
     assert_eq!(diag["runner"]["runners"][0]["name"], "runner1");
@@ -531,7 +534,7 @@ async fn required_ci_is_never_shown_as_success_or_no_checks() {
     runner.drain("success").await;
     set_required(&w, &["test"]).await;
 
-    // An invalid pipeline on a base is a failing check, never success.
+    // A pending, failed, or cancelled required check is never success.
     sync_main(&w);
     let head = w.push_change("feature2", "g.txt", "1\n");
     let p2 = w.open_pull("feature2", json!([])).await;
@@ -625,21 +628,14 @@ async fn required_ci_is_never_shown_as_success_or_no_checks() {
         "a cancelled attempt is not handed out"
     );
 
-    // Pipeline broken on main: heads based on it get a failing pipeline check.
-    set_required(&w, &[]).await;
-    land(
-        &w,
-        "break",
-        &[(
-            ".branvil/ci.toml",
-            "[[jobs]]\nname = \"test\"\nprivileged = true\n",
-        )],
-        Some(&runner),
-    )
-    .await;
-    runner.drain("success").await;
-    set_required(&w, &["test"]).await;
+    // A head that breaks its own pipeline gets a failing pipeline check.
     sync_main(&w);
+    std::fs::write(
+        w.work.join(".branvil/ci.toml"),
+        "[[jobs]]\nname = \"test\"\nprivileged = true\n",
+    )
+    .unwrap();
+    git_ok(&w.work, &["add", ".branvil/ci.toml"]);
     w.push_change("feature3", "h.txt", "1\n");
     let p3 = w.open_pull("feature3", json!([])).await;
     let v = checks(&w, p3["number"].as_u64().unwrap()).await;
@@ -659,6 +655,48 @@ async fn required_ci_is_never_shown_as_success_or_no_checks() {
             .unwrap()
             .iter()
             .all(|c| c["conclusion"] != "success")
+    );
+
+    // A head that drops the required check from its own pipeline runs what is
+    // left, and still cannot be merged: the required check fails.
+    sync_main(&w);
+    std::fs::write(w.work.join(".branvil/ci.toml"), pipeline(&["lint"])).unwrap();
+    git_ok(&w.work, &["add", ".branvil/ci.toml"]);
+    let head4 = w.push_change("feature4", "i.txt", "1\n");
+    let p4 = w.open_pull("feature4", json!([])).await;
+    let n4 = p4["number"].as_u64().unwrap();
+    let c = runner.claim().await.unwrap();
+    assert_eq!(
+        (c["sha"].as_str(), c["job"]["name"].as_str()),
+        (Some(head4.as_str()), Some("lint"))
+    );
+    runner.finish(&c, "success").await;
+    let v = checks(&w, n4).await;
+    assert_eq!(check(&v, "lint")["conclusion"], "success");
+    let t = check(&v, "test");
+    assert_eq!(
+        (t["status"].as_str(), t["conclusion"].as_str()),
+        (Some("completed"), Some("failure"))
+    );
+    assert!(
+        t["details"]
+            .as_str()
+            .unwrap()
+            .contains("defines no job named test"),
+        "{t}"
+    );
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n4}/merge", w.repo_path()),
+            &w.owner,
+            json!({"expected_head": head4, "expected_base": p4["base_sha"]}),
+        )
+        .await;
+    assert_eq!(
+        (st.as_u16(), v["error"]["code"].as_str()),
+        (409, Some("not_mergeable")),
+        "{v}"
     );
 }
 

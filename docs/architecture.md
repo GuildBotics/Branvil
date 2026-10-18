@@ -138,7 +138,7 @@ impl Ci {
   merge, startup rescan) under the repository lock: the old commit of each
   moved branch may be superseded, the new tip of the default branch or of an
   open pull request head gets a run. The pipeline is read from Git before the
-  write transaction (`git cat-file`), from the trusted branch.
+  write transaction (`git cat-file`), from the commit itself.
 - A background task (started by `serve` after recovery) sweeps every 5 s:
   expired leases are interrupted (re-queued once), queued work fails with
   `startup_failure` when no runner has been seen for `ci.runner_absent_secs`,

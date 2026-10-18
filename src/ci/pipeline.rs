@@ -1,5 +1,5 @@
-//! The pipeline definition, `.branvil/ci.toml`, read from the trusted branch
-//! (see `docs/ci.md`). The schema is small and validated strictly: anything
+//! The pipeline definition, `.branvil/ci.toml`, read from the commit that runs
+//! it (see `docs/ci.md`). The schema is small and validated strictly: anything
 //! unknown or out of range makes the whole pipeline invalid, which shows as a
 //! failing `pipeline` check, never as success.
 
@@ -20,8 +20,8 @@ const MAX_ARTIFACTS: usize = 16;
 const MAX_PATHS: usize = 32;
 const MAX_CACHE_PATHS: usize = 8;
 
-/// One job as recorded with its attempts (the trusted snapshot taken when the
-/// run was registered; retries reuse it).
+/// One job as recorded with its attempts (the snapshot taken when the run was
+/// registered; retries reuse it).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct JobDef {
     pub name: String,

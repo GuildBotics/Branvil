@@ -2,9 +2,10 @@
 //! only through `Ci`; the runner talks to it through the runner API
 //! (`api.rs`). See `docs/ci.md`.
 //!
-//! - The pipeline (`.branvil/ci.toml`) is read from the trusted branch: the
-//!   default branch for its own tips, the pull request's base for a head. A
-//!   head cannot change its own checks.
+//! - The pipeline (`.branvil/ci.toml`) is read from the commit itself, for a
+//!   tip of the default branch and for a pull request head alike. What a head
+//!   cannot change is the repository's settings: the required checks and
+//!   `ci_network`.
 //! - Runs and attempts live in redb (`queue.rs`); logs and artifacts are files
 //!   under `<data>/ci/` (`files.rs`).
 //! - A background task expires leases, fails queued work when no runner shows
@@ -36,7 +37,7 @@ use crate::refs::RefChange;
 use crate::store::{self, Key, Rd, Store};
 use crate::util;
 use config::CiConfig;
-use queue::{Attempt, PipelineState, Registration, Source};
+use queue::{Attempt, PipelineState, Registration};
 
 /// One check of a commit, in the shape of `docs/api.md` "Checks".
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -88,7 +89,7 @@ impl Check {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Checks {
     pub checks: Vec<Check>,
-    /// True when the base has a pipeline or the repository has required
+    /// True when the commit has a pipeline or the repository has required
     /// checks: no checks then means "not registered yet", never "no checks".
     pub checks_expected: bool,
 }
@@ -229,8 +230,8 @@ impl Ci {
                     "No CI run is registered for this commit yet.".into(),
                 ));
             }
-            let expected =
-                !repo.required_checks.is_empty() || self.default_has_pipeline(repo).await;
+            let expected = !repo.required_checks.is_empty()
+                || self.read_pipeline(repo, sha).await != PipelineState::Absent;
             return Ok(Checks {
                 checks,
                 checks_expected: expected,
@@ -242,8 +243,9 @@ impl Ci {
                 "completed",
                 Some("failure"),
                 format!(
-                    "The pipeline of {} at {} is invalid: {message}",
-                    run.source.branch, run.source.sha
+                    "The {} of {} is invalid: {message}",
+                    pipeline::PIPELINE_PATH,
+                    run.sha
                 ),
             ));
         }
@@ -280,17 +282,17 @@ impl Ci {
             }
             let why = match &run.pipeline {
                 PipelineState::Absent => format!(
-                    "{} has no {} at {}, so the required check {name} cannot run.",
-                    run.source.branch,
-                    pipeline::PIPELINE_PATH,
-                    run.source.sha
+                    "{} has no {}, so the required check {name} cannot run.",
+                    run.sha,
+                    pipeline::PIPELINE_PATH
                 ),
                 PipelineState::Invalid { .. } => {
                     format!("The pipeline is invalid, so the required check {name} cannot run.")
                 }
                 PipelineState::Jobs { .. } => format!(
-                    "The pipeline of {} at {} defines no job named {name}.",
-                    run.source.branch, run.source.sha
+                    "The {} of {} defines no job named {name}.",
+                    pipeline::PIPELINE_PATH,
+                    run.sha
                 ),
             };
             checks.push(Check::placeholder(name, "completed", Some("failure"), why));
@@ -302,20 +304,7 @@ impl Ci {
         })
     }
 
-    async fn default_has_pipeline(&self, repo: &Repo) -> bool {
-        let dir = self.inner.git.repo_dir(&repo.path);
-        let spec = format!(
-            "refs/heads/{}:{}",
-            repo.default_branch,
-            pipeline::PIPELINE_PATH
-        );
-        matches!(
-            self.inner.git.run(Some(&dir), &["cat-file", "-e", &spec]).await,
-            Ok(out) if out.ok()
-        )
-    }
-
-    /// Reads the pipeline of commit `sha` (the trusted source).
+    /// Reads the pipeline of commit `sha`.
     async fn read_pipeline(&self, repo: &Repo, sha: &str) -> PipelineState {
         let dir = self.inner.git.repo_dir(&repo.path);
         let spec = format!("{sha}:{}", pipeline::PIPELINE_PATH);
@@ -368,51 +357,27 @@ impl Ci {
     }
 
     /// Registers CI of `sha` for `branch` when the branch wants CI: it is the
-    /// default branch, or the head of an open pull request. The caller holds
-    /// the repository lock.
+    /// default branch, or the head of an open pull request. The pipeline is
+    /// the commit's own. The caller holds the repository lock.
     async fn consider(&self, repo: &Repo, branch: &str, sha: &str) -> AppResult<bool> {
-        let source_branch = if branch == repo.default_branch {
-            branch.to_string()
-        } else {
+        if branch != repo.default_branch {
             let (id, b) = (repo.id.clone(), branch.to_string());
-            let bases = self
+            if !self
                 .inner
                 .store
-                .read(move |r| open_pull_bases(r, &id, &b))
-                .await?;
-            match bases.into_iter().min() {
-                Some((_, base)) => base,
-                None => return Ok(false),
-            }
-        };
-        let source_sha = if source_branch == branch {
-            Some(sha.to_string())
-        } else {
-            let dir = self.inner.git.repo_dir(&repo.path);
-            self.inner
-                .git
-                .branch_tips(&dir)
+                .read(move |r| has_open_pull(r, &id, &b))
                 .await?
-                .get(&source_branch)
-                .cloned()
-        };
-        let pipeline = match &source_sha {
-            Some(s) => self.read_pipeline(repo, s).await,
-            None => PipelineState::Invalid {
-                message: format!("The base branch {source_branch} does not exist."),
-            },
-        };
+            {
+                return Ok(false);
+            }
+        }
         let reg = Registration {
             repo: repo.id.clone(),
             repo_path: repo.path.clone(),
             sha: sha.to_string(),
             branch: branch.to_string(),
             protected: repo.is_protected(branch),
-            source: Source {
-                branch: source_branch,
-                sha: source_sha.unwrap_or_default(),
-            },
-            pipeline,
+            pipeline: self.read_pipeline(repo, sha).await,
             network: repo.ci_network,
         };
         let queue_max = self.inner.config.queue_max;
@@ -697,17 +662,12 @@ impl Ci {
     }
 }
 
-/// (pull number, base) of every open pull request whose head is `branch`.
-fn open_pull_bases(r: &impl Rd, repo: &str, branch: &str) -> AppResult<Vec<(u64, String)>> {
+/// Whether an open pull request has `branch` as its head.
+fn has_open_pull(r: &impl Rd, repo: &str, branch: &str) -> AppResult<bool> {
     let prefix = Key::new().s(repo).s(branch).bytes();
-    let mut out = Vec::new();
-    for (k, v) in r.prefix_raw(store::IX_OPEN_PULLS, &prefix, None, usize::MAX)? {
-        if let Some(p) = store::decode_key(&k, "sss") {
-            let n = String::from_utf8_lossy(&v).parse().unwrap_or(u64::MAX);
-            out.push((n, p[2].s().to_string()));
-        }
-    }
-    Ok(out)
+    Ok(!r
+        .prefix_raw(store::IX_OPEN_PULLS, &prefix, None, 1)?
+        .is_empty())
 }
 
 /// The head branches of every open pull request of a repository.
@@ -809,10 +769,6 @@ mod tests {
             sha: sha.into(),
             branch: "feature".into(),
             protected: false,
-            source: Source {
-                branch: "main".into(),
-                sha: "base".into(),
-            },
             pipeline: PipelineState::Jobs { jobs },
             network: false,
         };

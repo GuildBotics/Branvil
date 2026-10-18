@@ -36,7 +36,7 @@ const MAX_DETAILS: usize = 4 << 10;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum PipelineState {
-    /// The trusted branch has no `.branvil/ci.toml`.
+    /// The commit has no `.branvil/ci.toml`.
     Absent,
     /// It has one and it is invalid.
     Invalid {
@@ -45,12 +45,6 @@ pub enum PipelineState {
     Jobs {
         jobs: Vec<JobDef>,
     },
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Source {
-    pub branch: String,
-    pub sha: String,
 }
 
 /// The CI of one commit of one repository.
@@ -64,8 +58,7 @@ pub struct Run {
     /// Branches whose tip this commit is and that asked for CI of it. When
     /// the last one moves away, the run is superseded.
     pub branches: Vec<String>,
-    /// Where the pipeline was read (the trusted branch and its tip then).
-    pub source: Source,
+    /// The commit's own pipeline.
     pub pipeline: PipelineState,
     /// `protected` (a protected branch asked) or `branch:<name>`; selects
     /// which dependency caches the jobs may read and write.
@@ -303,7 +296,6 @@ pub struct Registration {
     pub sha: String,
     pub branch: String,
     pub protected: bool,
-    pub source: Source,
     pub pipeline: PipelineState,
     pub network: bool,
 }
@@ -326,20 +318,11 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
         if reg.protected {
             run.cache_scope = scope;
         }
-        let revived = run.superseded_by.take().is_some();
-        // A protected branch reads the pipeline from the commit itself. When
-        // that differs from the pipeline the run was registered with (a
-        // merged pipeline change), the commit's own pipeline applies.
-        let replaced = reg.protected && run.source != reg.source && run.pipeline != reg.pipeline;
-        if replaced {
-            run.source = reg.source.clone();
-            run.pipeline = reg.pipeline.clone();
-        }
-        if (revived || replaced)
+        if run.superseded_by.take().is_some()
             && let PipelineState::Jobs { jobs } = run.pipeline.clone()
         {
             // Jobs whose latest attempt ended because the commit was replaced,
-            // ran another definition, or never ran, run (again).
+            // or that never ran, run (again).
             let latest = latest_attempts(w, &run.repo, &run.sha)?;
             let todo: Vec<JobDef> = jobs
                 .into_iter()
@@ -347,7 +330,7 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
                     latest
                         .iter()
                         .find(|a| a.job.name == j.name)
-                        .is_none_or(|a| a.superseded || a.job != *j)
+                        .is_none_or(|a| a.superseded)
                 })
                 .collect();
             admit_jobs(w, &mut run, &todo, reg.network, queue_max, now)?;
@@ -365,7 +348,6 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
         seq: w.next("ci_seq")?,
         created_at: now.to_string(),
         branches: vec![reg.branch],
-        source: reg.source,
         pipeline: reg.pipeline,
         cache_scope: scope,
         waiting: false,
@@ -623,7 +605,7 @@ pub fn cancel(w: &Wtx, id: &str, who: &str, now: &str) -> AppResult<Attempt> {
     Ok(a)
 }
 
-/// Queues a new attempt of the same job (with the same trusted definition)
+/// Queues a new attempt of the same job (with the same recorded definition)
 /// after a completed latest attempt.
 pub fn retry(w: &Wtx, id: &str, queue_max: usize, now: &str) -> AppResult<Attempt> {
     let old =
@@ -782,10 +764,6 @@ mod tests {
             sha: sha.into(),
             branch: branch.into(),
             protected: branch == "main",
-            source: Source {
-                branch: "main".into(),
-                sha: "base".into(),
-            },
             pipeline: PipelineState::Jobs {
                 jobs: jobs.iter().map(|j| job(j)).collect(),
             },

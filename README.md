@@ -225,9 +225,9 @@ Register-ScheduledTask -TaskName "Branvil tunnel" -Action $action -Trigger $trig
 
 ## CI
 
-Put the pipeline on the default branch as `.branvil/ci.toml` (it changes only
-by a merged pull request, and a pull request's own copy never applies to its
-checks):
+Put the pipeline in the repository as `.branvil/ci.toml`. Every commit runs
+its own copy, so a pull request that changes it runs the changed pipeline as
+its checks; review that change like any other part of the diff:
 
 ```toml
 [[jobs]]

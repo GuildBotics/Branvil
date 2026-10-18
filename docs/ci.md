@@ -7,7 +7,7 @@ in a throwaway microVM. Its results are the checks of `GET
 must have succeeded on the exact head).
 
 ```
-git push ─▶ branvil serve ─ register run (pipeline from the trusted branch) ─▶ redb queue
+git push ─▶ branvil serve ─ register run (pipeline from the commit) ─────────▶ redb queue
                  ▲                                                               │ claim (lease)
                  │  heartbeat · log · artifacts · finish                         ▼
                  └──────────────────────────────────────────────── branvil runner ─ msb run ─▶ microVM
@@ -64,22 +64,31 @@ cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # 
 
 ## Trust: where the pipeline comes from
 
-A pull request head cannot change its own checks or permissions:
+Every commit runs its own pipeline: a tip of the default branch and the head
+of an open pull request alike read `.branvil/ci.toml` from that commit. A pull
+request that changes the pipeline runs the changed pipeline as its checks, so
+a mistake in it shows before the merge. A merge is a fast-forward, so the
+default branch's new tip keeps the run the head already has.
 
-| Commit | Pipeline read from |
-| --- | --- |
-| a tip of the default branch | that commit (the default branch changes only by merge) |
-| the head of an open pull request | the tip of the pull request's base branch at registration |
+A pull request can therefore change its own jobs, but not the repository's
+settings, which only the owner changes (`PATCH /api/v1/repos/{repo}`):
 
-So a change to `.branvil/ci.toml` in a pull request takes effect only after
-it is merged. The same holds for the required checks and for network access
-(`ci_network`), repository settings only the owner changes (`PATCH
-/api/v1/repos/{repo}`). A base branch that is not protected gives no more
-trust than an agent's push to it does.
+- **Required checks.** Each required check needs a successful job of that
+  name in the head's own run. A head whose pipeline drops or breaks one cannot
+  be merged or published; a head that weakens what one does is caught by
+  reviewing its diff (below).
+- **Network access** (`ci_network`). Whatever the pipeline says, a job has no
+  network unless the owner allows it for the repository.
+- **What a job runs on.** A job runs in a microVM with no secrets, only images
+  already in the runner's cache, and the runner's limits; a pull request's run
+  never writes the protected cache ("Dependency cache"). Settings → CI lists
+  the images of the default branches' pipelines; a pull request that names
+  another image concludes `startup_failure` with the reason until the owner
+  pulls or loads it.
 
-When a merge moves the default branch to a commit whose run was registered
-with the base's pipeline, the commit's own pipeline applies from then on: jobs
-whose definition changed (or that are new) get a new attempt.
+So a change to `.branvil/ci.toml` in a pull request changes that pull request's
+own checks, and is reviewed as part of its diff: the owner reads it before
+merging or publishing, as with any other change.
 
 ## Runs, attempts, and states
 
@@ -141,7 +150,7 @@ No runner, no executor:
 
 Cancel and retry: `POST …/jobs/{id}/cancel` concludes a queued attempt
 `cancelled` at once and asks a running one to stop; `POST …/jobs/{id}/retry`
-queues attempt n+1 of the latest completed attempt, with the same trusted job
+queues attempt n+1 of the latest completed attempt, with the same job
 definition (the pipeline is not read again).
 
 ## Limits
@@ -302,11 +311,11 @@ On every OS: `msb doctor` (run by `branvil runner doctor`) must pass.
 - `src/ci/queue.rs`, `src/ci/mod.rs`: the state machine and the checks, on a
   real redb file.
 - `tests/ci.rs`: a real service and real Git, with the test acting as the
-  runner: the base's pipeline wins over the head's, rapid pushes supersede,
-  late and forged results are refused, required checks are never success or
-  "no checks" when unregistered, pending, failed, cancelled, invalid, or
-  without a runner; leases expire and re-queue once; a restart interrupts
-  orphaned attempts; a merge needs success on the exact head.
+  runner: a head runs its own pipeline and cannot drop a required check, rapid
+  pushes supersede, late and forged results are refused, required checks are
+  never success or "no checks" when unregistered, pending, failed, cancelled,
+  invalid, or without a runner; leases expire and re-queue once; a restart
+  interrupts orphaned attempts; a merge needs success on the exact head.
 - `src/runner/mod.rs`: the runner loop against an in-process service with a
   fake executor that starts no process (results, cancellation, an unusable
   executor).
