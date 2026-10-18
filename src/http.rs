@@ -1225,6 +1225,7 @@ pub fn router(app: Shared) -> Router {
         .route("/events", get(events))
         .route("/admin/diagnostics", get(diagnostics))
         .merge(crate::ci::api::routes())
+        .merge(crate::ci::admin::routes())
         .route("/admin/backup", post(crate::backup::http_backup))
         .merge(crate::upstream::http::routes())
         .fallback(|| async { AppError::not_found("No such endpoint.") })

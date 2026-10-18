@@ -2,13 +2,14 @@
 // `/{repo}/-/{kind}/{id}` where `{repo}` is `<workspace>/<name>`; a workspace's
 // page (its board) is `/{workspace}`, its pull requests `/{workspace}/-/pulls`,
 // and a repository's page `/{repo}` lists that repository's pull requests;
-// app routes live under `/-/`.
+// app routes live under `/-/` (`/-/settings/repos/{repo}` opens a repository's
+// editor in its workspace's settings).
 
 export type Route =
   | { name: "home" }
   | { name: "enter" }
   | { name: "authorize" }
-  | { name: "settings"; section: string | null }
+  | { name: "settings"; section: string | null; repo?: string }
   | { name: "workspace"; workspace: string }
   | { name: "pulls"; workspace: string }
   | { name: "ticket"; repo: string; key: string }
@@ -41,6 +42,7 @@ export function parseRoute(pathname: string): Route {
     if (page === "enter" && rest.length === 0) return { name: "enter" };
     if (page === "authorize" && rest.length === 0) return { name: "authorize" };
     if (page === "settings" && rest.length <= 1) return { name: "settings", section: rest[0] ?? null };
+    if (page === "settings" && rest[0] === "repos" && rest.length === 3) return { name: "settings", section: null, repo: rest.slice(1).join("/") };
     return { name: "not_found", pathname };
   }
 
@@ -75,6 +77,7 @@ const joinPath = (path: string) => path.split("/").map(encodeURIComponent).join(
 export const href = {
   home: () => "/",
   settings: (section?: string) => (section ? `/-/settings/${encodeURIComponent(section)}` : "/-/settings"),
+  repoSettings: (repo: string) => `/-/settings/repos/${joinPath(repo)}`,
   workspace: (workspace: string) => `/${encodeURIComponent(workspace)}`,
   pulls: (workspace: string) => `/${encodeURIComponent(workspace)}/-/pulls`,
   ticket: (repo: string, key: string) => `/${joinPath(repo)}/-/tickets/${key}`,

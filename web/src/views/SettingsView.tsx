@@ -1,9 +1,11 @@
 import { Card, Stack, Text, Title } from "@mantine/core";
-import { SquareKanban, Users } from "lucide-react";
+import { Cpu, SquareKanban, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import { useT } from "../i18n";
+import { useSession } from "../query/hooks";
 import { Link } from "../router/Router";
 import { href } from "../router/routes";
+import { CiSettings } from "./settings/CiSettings";
 import { MembersSettings } from "./settings/MembersSettings";
 import { WorkspaceSettings } from "./settings/WorkspaceSettings";
 
@@ -19,11 +21,13 @@ function NavItem({ to, active, icon, children }: { to: string; active: boolean; 
 /**
  * Settings, laid out as GuildBotics' setup: sections on the left, one card on
  * the right. The shown workspace (with its repositories) apart from what
- * belongs to all of Branvil (its members).
+ * belongs to all of Branvil (its members, and CI for the owner). `repo` opens
+ * that repository's editor on its CI tab.
  */
-export function SettingsView({ section, workspace }: { section: string | null; workspace: string | null }) {
+export function SettingsView({ section, workspace, repo }: { section: string | null; workspace: string | null; repo: string | null }) {
   const t = useT();
-  const current = section === "members" || !workspace ? "members" : "workspace";
+  const owner = useSession().data?.me.kind === "owner";
+  const current = section === "ci" && owner ? "ci" : section === "members" || !workspace ? "members" : "workspace";
   return (
     <Stack gap="lg">
       <Title order={2}>{t("nav.settings")}</Title>
@@ -43,12 +47,17 @@ export function SettingsView({ section, workspace }: { section: string | null; w
               <NavItem to={href.settings("members")} active={current === "members"} icon={<Users size={18} />}>
                 {t("settings.members")}
               </NavItem>
+              {owner && (
+                <NavItem to={href.settings("ci")} active={current === "ci"} icon={<Cpu size={18} />}>
+                  {t("ci.settings.title")}
+                </NavItem>
+              )}
             </div>
           </nav>
         </Card>
         <div>
-          {current === "workspace" && workspace ? <WorkspaceSettings workspace={workspace} /> : <MembersSettings />}
-          {!workspace && (
+          {current === "ci" ? <CiSettings /> : current === "workspace" && workspace ? <WorkspaceSettings workspace={workspace} open={repo} /> : <MembersSettings />}
+          {!workspace && current !== "ci" && (
             <Text size="sm" c="dimmed" mt="sm">
               {t("workspace.noneHelp")}
             </Text>

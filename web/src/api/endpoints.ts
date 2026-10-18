@@ -6,6 +6,8 @@ import type {
   Activity,
   Card,
   Checks,
+  CiLimits,
+  CiSettings,
   Comment,
   Commit,
   Diagnostics,
@@ -80,6 +82,7 @@ export interface RepoPatch {
   revision: number;
   default_branch?: string;
   required_checks?: string[];
+  ci_network?: boolean;
   protected_branches?: string[];
   labels?: string[];
 }
@@ -213,4 +216,10 @@ export const jobs = {
 
 export const admin = {
   diagnostics: () => get<Diagnostics>("/admin/diagnostics"),
+  ci: () => get<CiSettings>("/admin/ci"),
+  setRunner: (mode: CiSettings["runner"]["mode"]) => request<CiSettings>("PUT", "/admin/ci/runner", { body: { mode } }),
+  setLimits: (limits: CiLimits) => request<CiSettings>("PUT", "/admin/ci/limits", { body: limits }),
+  /** Starts an image operation (one at a time); the answer's `operation` is running. */
+  pullImage: (reference: string) => request<CiSettings>("POST", "/admin/ci/images/pull", { body: { reference } }),
+  loadImage: (path: string) => request<CiSettings>("POST", "/admin/ci/images/load", { body: { path } }),
 };

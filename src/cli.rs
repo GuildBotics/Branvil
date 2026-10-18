@@ -210,9 +210,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     );
 
     crate::ci::Ci::start(app.clone());
-    if app.config.ci.runner == crate::ci::config::RunnerMode::Auto {
-        crate::ci::supervise::start(app.clone(), format!("http://{bound}"));
-    }
+    crate::ci::supervise::start(app.clone(), format!("http://{bound}"));
     crate::upstream::start(app.clone());
 
     let router = crate::http::router(app.clone());

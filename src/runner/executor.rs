@@ -17,6 +17,83 @@ use crate::ci::pipeline::JobDef;
 /// verified against).
 pub const MSB_VERSION: &str = "0.6.17";
 
+/// How long pulling or loading an image may take (a GiB-sized archive).
+const IMAGE_TRANSFER: Duration = Duration::from_secs(1800);
+
+/// An image of the cache, as `msb image inspect` reports it.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ImageInfo {
+    pub reference: String,
+    /// The manifest digest, which `docker save` and `msb load` re-encode.
+    pub digest: String,
+    /// The configuration digest, which survives saving and loading.
+    pub config_digest: String,
+    pub size_bytes: u64,
+    pub created_at: String,
+}
+
+impl ImageInfo {
+    /// What a pipeline names it by: the reference when it carries a digest
+    /// (a pulled image), else the tag pinned to the configuration digest
+    /// (a loaded image, which the cache knows by its tag only).
+    pub fn pinned(&self) -> String {
+        if self.reference.contains('@') {
+            self.reference.clone()
+        } else {
+            format!("{}@{}", self.reference, self.config_digest)
+        }
+    }
+
+    /// Whether `digest` names this image (hex compares case-insensitively).
+    pub fn is(&self, digest: &str) -> bool {
+        digest.eq_ignore_ascii_case(&self.config_digest)
+            || digest.eq_ignore_ascii_case(&self.digest)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Inspected {
+    reference: String,
+    digest: String,
+    config: InspectedConfig,
+    #[serde(default)]
+    size_bytes: u64,
+    #[serde(default)]
+    created_at: String,
+}
+
+#[derive(serde::Deserialize)]
+struct InspectedConfig {
+    #[serde(default)]
+    digest: String,
+}
+
+impl From<Inspected> for ImageInfo {
+    fn from(i: Inspected) -> Self {
+        Self {
+            reference: i.reference,
+            digest: i.digest,
+            config_digest: i.config.digest,
+            size_bytes: i.size_bytes,
+            created_at: i.created_at,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Listed {
+    reference: String,
+}
+
+/// `name:tag@sha256:…` split into the tag and the digest it is pinned to.
+/// The cache knows a loaded image by its tag only, so a job pinning one is
+/// run by the tag once the digest is confirmed.
+pub fn tagged_pin(image: &str) -> Option<(&str, &str)> {
+    let (name, digest) = image.split_once('@')?;
+    let last = name.rsplit('/').next().unwrap_or(name);
+    last.contains(':').then_some((name, digest))
+}
+
 #[derive(Clone, Debug)]
 pub struct Health {
     pub ready: bool,
@@ -27,6 +104,9 @@ pub struct Health {
 pub struct JobRun<'a> {
     pub attempt_id: &'a str,
     pub job: &'a JobDef,
+    /// The reference the image is run by (`Executor::resolve_image`); the
+    /// job's own `image` stays the pinned one (the cache key holds it).
+    pub image: &'a str,
     /// The host directory mounted at `/work`: the commit's tree.
     pub work: &'a Path,
     /// An empty host directory of this job only, mounted at [`LOG_MOUNT`]:
@@ -48,10 +128,21 @@ pub enum Outcome {
     StartupFailure(String),
 }
 
+/// What the image cache holds for a job's image.
+#[derive(Debug, PartialEq)]
+pub enum ImageCheck {
+    /// It is there; run it by this reference.
+    Present(String),
+    Missing,
+    /// The cache holds the pinned name as another image (its digest).
+    Other(String),
+}
+
 pub trait Executor: Send + Sync {
     fn name(&self) -> &'static str;
     fn health(&self) -> impl Future<Output = Health> + Send;
-    fn image_present(&self, image: &str) -> impl Future<Output = Result<bool, String>> + Send;
+    fn resolve_image(&self, image: &str)
+    -> impl Future<Output = Result<ImageCheck, String>> + Send;
     /// Runs the job; output goes to `log`, `cancel` turning true stops it.
     fn run(
         &self,
@@ -192,12 +283,87 @@ impl Microsandbox {
     }
 
     async fn output(&self, args: &[&str]) -> Result<std::process::Output, String> {
+        self.output_within(args, Duration::from_secs(120)).await
+    }
+
+    async fn output_within(
+        &self,
+        args: &[&str],
+        limit: Duration,
+    ) -> Result<std::process::Output, String> {
         let mut cmd = self.command().ok_or_else(|| self.missing())?;
         cmd.args(args);
-        tokio::time::timeout(Duration::from_secs(120), cmd.output())
+        tokio::time::timeout(limit, cmd.output())
             .await
             .map_err(|_| format!("msb {} timed out", args.first().unwrap_or(&"")))?
             .map_err(|e| format!("cannot run msb: {e}"))
+    }
+
+    /// The cached image `reference`, or `None` when the cache has none.
+    pub async fn inspect(&self, reference: &str) -> Result<Option<ImageInfo>, String> {
+        let out = self
+            .output(&["image", "inspect", "--format", "json", reference])
+            .await?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        serde_json::from_slice::<Inspected>(&out.stdout)
+            .map(|i| Some(i.into()))
+            .map_err(|e| format!("msb image inspect answered something unreadable: {e}"))
+    }
+
+    /// Every image of the cache.
+    pub async fn images(&self) -> Result<Vec<ImageInfo>, String> {
+        let out = self.output(&["image", "list", "--format", "json"]).await?;
+        if !out.status.success() {
+            return Err(format!(
+                "msb image list failed: {}",
+                tail(&out.stderr, 1024)
+            ));
+        }
+        let listed: Vec<Listed> = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("msb image list answered something unreadable: {e}"))?;
+        let mut images = Vec::new();
+        // The list leaves out the configuration digest, which is what a
+        // loaded image is pinned by.
+        for l in listed {
+            if let Some(i) = self.inspect(&l.reference).await? {
+                images.push(i);
+            }
+        }
+        Ok(images)
+    }
+
+    /// Pulls `reference` into the cache.
+    pub async fn pull(&self, reference: &str) -> Result<(), String> {
+        let _ = std::fs::create_dir_all(&self.home);
+        self.finish(
+            "pull",
+            self.output_within(&["pull", "--quiet", reference], IMAGE_TRANSFER)
+                .await?,
+        )
+    }
+
+    /// Loads a `docker save` / OCI archive into the cache.
+    pub async fn load(&self, archive: &Path) -> Result<(), String> {
+        let _ = std::fs::create_dir_all(&self.home);
+        let path = archive.to_string_lossy();
+        self.finish(
+            "load",
+            self.output_within(&["load", "--quiet", "--input", &path], IMAGE_TRANSFER)
+                .await?,
+        )
+    }
+
+    fn finish(&self, what: &str, out: std::process::Output) -> Result<(), String> {
+        if out.status.success() {
+            return Ok(());
+        }
+        Err(format!(
+            "msb {what} failed: {}{}",
+            tail(&out.stdout, 1024),
+            tail(&out.stderr, 1024)
+        ))
     }
 
     fn missing(&self) -> String {
@@ -345,9 +511,18 @@ impl Executor for Microsandbox {
         h
     }
 
-    async fn image_present(&self, image: &str) -> Result<bool, String> {
-        let out = self.output(&["image", "inspect", image]).await?;
-        Ok(out.status.success())
+    async fn resolve_image(&self, image: &str) -> Result<ImageCheck, String> {
+        if self.inspect(image).await?.is_some() {
+            return Ok(ImageCheck::Present(image.to_string()));
+        }
+        let Some((name, pin)) = tagged_pin(image) else {
+            return Ok(ImageCheck::Missing);
+        };
+        Ok(match self.inspect(name).await? {
+            Some(held) if held.is(pin) => ImageCheck::Present(name.to_string()),
+            Some(held) => ImageCheck::Other(held.config_digest),
+            None => ImageCheck::Missing,
+        })
     }
 
     async fn run(
@@ -404,7 +579,7 @@ impl Executor for Microsandbox {
         for (k, v) in &job.env {
             cmd.args(["--env", &format!("{k}={v}")]);
         }
-        cmd.arg(&j.image)
+        cmd.arg(job.image)
             .args(["--", "/bin/sh", "-c", &script(&j.commands)])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -533,6 +708,40 @@ mod tests {
         assert!(s.starts_with("exec >>/.branvil-log/out 2>&1\nprintf '\\036branvil:started\\n'\n"));
         assert!(s.contains("/bin/sh -c 'echo '\\''a b'\\''' || exit $?"));
         assert!(s.contains("/bin/sh -c 'exit 3' || exit $?"));
+    }
+
+    #[test]
+    fn a_tagged_pin_splits_and_an_untagged_one_does_not() {
+        assert_eq!(
+            tagged_pin("guildbotics/agent-environment:dev@sha256:ab"),
+            Some(("guildbotics/agent-environment:dev", "sha256:ab"))
+        );
+        assert_eq!(
+            tagged_pin("registry:5000/a/b:1@sha256:ab"),
+            Some(("registry:5000/a/b:1", "sha256:ab"))
+        );
+        assert_eq!(tagged_pin("registry:5000/a/b@sha256:ab"), None);
+        assert_eq!(tagged_pin("docker.io/library/alpine@sha256:ab"), None);
+        assert_eq!(tagged_pin("alpine:3"), None);
+    }
+
+    #[test]
+    fn a_loaded_image_is_pinned_by_its_configuration_digest() {
+        let mut i = ImageInfo {
+            reference: "guildbotics/agent-environment:dev".into(),
+            digest: "sha256:manifest".into(),
+            config_digest: "sha256:config".into(),
+            size_bytes: 1,
+            created_at: String::new(),
+        };
+        assert_eq!(
+            i.pinned(),
+            "guildbotics/agent-environment:dev@sha256:config"
+        );
+        assert!(i.is("sha256:config") && i.is("sha256:manifest") && !i.is("sha256:x"));
+        assert!(i.is("SHA256:CONFIG"));
+        i.reference = "docker.io/library/alpine@sha256:index".into();
+        assert_eq!(i.pinned(), "docker.io/library/alpine@sha256:index");
     }
 
     #[test]

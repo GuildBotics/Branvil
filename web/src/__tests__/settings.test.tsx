@@ -20,6 +20,7 @@ const REPO = {
   url: "",
   protected_branches: ["main"],
   required_checks: [],
+  ci_network: false,
   labels: ["bug"],
   upstream: null,
   revision: 4,
@@ -109,16 +110,25 @@ describe("settings", () => {
     expect(fake.calls("POST", "/api/v1/repos")[0]?.body).toEqual({ path: "acme/demo", default_branch: "main", labels: ["bug", "ui"] });
   });
 
-  it("saves a repository's branches, required checks, and labels with the revision the form was filled from", async () => {
+  it("saves a repository's branches, CI, and labels with the revision the form was filled from", async () => {
     const fake = fakeApi({
       ...SHELL,
       "GET /api/v1/repos": page([REPO]),
-      "PATCH /api/v1/repos/acme/demo": json(200, { ...REPO, required_checks: ["test", "lint"], revision: 5 }),
+      "PATCH /api/v1/repos/acme/demo": json(200, { ...REPO, required_checks: ["test", "lint"], ci_network: true, revision: 5 }),
     });
     const user = userEvent.setup();
     renderApp("/-/settings");
     await user.click(await screen.findByRole("button", { name: "Edit" }));
     expect(screen.getByText("http://127.0.0.1:7878/git/acme/demo.git")).toBeInTheDocument();
+    // Required checks live on the CI tab, with the network for jobs.
+    const basics = screen.getByRole("tabpanel", { name: "Basics" });
+    expect(within(basics).getByLabelText("Protected branches", { selector: "input:not([type=hidden])" })).toBeInTheDocument();
+    expect(within(basics).queryByLabelText("Required checks", { selector: "input:not([type=hidden])" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "CI" }));
+    const network = screen.getByRole("switch", { name: /^Network for jobs/ });
+    expect(network).not.toBeChecked();
+    expect(screen.getByText(/public destinations only, never the Branvil machine or private networks/)).toBeInTheDocument();
+    await user.click(network);
     await addPills(user, "Required checks", ["test", "lint"]);
     await user.click(screen.getByRole("tab", { name: "Labels" }));
     await addPills(user, "Ticket labels", ["ui"]);
@@ -129,6 +139,7 @@ describe("settings", () => {
       default_branch: "main",
       protected_branches: ["main"],
       required_checks: ["test", "lint"],
+      ci_network: true,
       labels: ["bug", "ui"],
     });
   });

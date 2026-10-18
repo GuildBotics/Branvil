@@ -42,7 +42,18 @@ cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # 
   pipeline is shown as a failing check named `pipeline` whose details give the
   reason; it never yields success.
 - Pin images by digest. The runner never pulls during a job (pull policy
-  `never`): images enter the runner's cache only through `branvil runner pull`.
+  `never`): images enter the runner's cache only through `branvil runner pull`
+  or Settings → CI (pull from a registry, or load a `docker save` / OCI
+  archive from a file on the Branvil machine).
+- An image pulled by digest is pinned as it was pulled (`name@sha256:<digest>`).
+  One loaded from an archive (or pulled by tag) is known to the cache by its
+  tag only, so it is pinned as `name:tag@sha256:<configuration digest>`: the
+  configuration digest survives `docker save` and loading, the manifest digest
+  does not. The runner runs it by the tag once the image the cache holds under
+  that tag has that digest, and concludes `startup_failure` when it holds
+  another one. Settings → CI shows the reference to write for every cached
+  image. (A runner started by hand on another machine loads such an archive
+  with `msb load` under its own `MSB_HOME`.)
 
 ## Trust: where the pipeline comes from
 
@@ -186,8 +197,21 @@ Or let the service supervise one: `[ci] runner = "auto"` in `branvil.toml`
 makes `branvil serve` start `branvil runner` as a child (member
 `branvil-runner`, a token minted at every start and passed through the
 environment; the previous automatic token is revoked) and restart it when it
-exits. The child reads `<data dir>/branvil.toml` for its `[ci.executor]` and
-`[ci.microsandbox]` settings.
+exits. The child reads the service's configuration file for its
+`[ci.executor]` and `[ci.microsandbox]` settings.
+
+The owner changes the mode and the job limits under Settings → CI
+(`docs/api.md`, "CI settings") without restarting the service: they are
+written to `branvil.toml` (the rest of the file is kept as it is), switching
+the mode off stops the child, and new limits start it again; the settings
+already in effect change nothing. Stopping or restarting the child interrupts
+the attempt it is running, which is queued once more (see "Leases and
+interruptions"); the service then removes the microVM the child left. The
+child refuses to start when it cannot read the configuration file. The image
+cache Settings → CI
+manages is the supervised runner's (`[ci.microsandbox] home`); a runner
+started by hand on another machine keeps its own, filled with
+`branvil runner pull`.
 
 Per job the runner:
 

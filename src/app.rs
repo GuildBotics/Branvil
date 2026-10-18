@@ -123,6 +123,7 @@ impl App {
             base_url.clone(),
             layout.clone(),
             config.ci.clone(),
+            config.file.clone(),
         );
         Self {
             base_url,

@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::ci::config::ExecutorConfig;
 use crate::ci::pipeline::JobDef;
-use executor::{Executor, Health, JobRun, Microsandbox, Outcome};
+use executor::{Executor, Health, ImageCheck, JobRun, Microsandbox, Outcome};
 
 #[derive(Subcommand)]
 pub enum RunnerCommand {
@@ -622,12 +622,22 @@ impl Runner {
         for n in notes.drain(..) {
             say(n).await;
         }
-        match executor.image_present(&job.image).await {
-            Ok(true) => {}
-            Ok(false) => {
+        // Checked here and run after the source arrives: a load that re-points
+        // the tag in between runs the newer image (one owner loads them).
+        let run_image = match executor.resolve_image(&job.image).await {
+            Ok(ImageCheck::Present(reference)) => reference,
+            Ok(ImageCheck::Missing) => {
                 let why = format!(
-                    "The image {} is not in the runner's image cache (jobs never pull); run `branvil runner pull {}` on the runner's machine.",
+                    "The image {} is not in the runner's image cache (jobs never pull); pull or load it under Settings → CI for the runner on the Branvil machine, or run `branvil runner pull {}` on the runner's machine.",
                     job.image, job.image
+                );
+                say(why.clone()).await;
+                return ("startup_failure", Some(why));
+            }
+            Ok(ImageCheck::Other(held)) => {
+                let why = format!(
+                    "The runner's image cache holds the tag of {} as an image whose digest is {held}; load the pinned image into the runner's cache (Settings → CI for the runner on the Branvil machine).",
+                    job.image
                 );
                 say(why.clone()).await;
                 return ("startup_failure", Some(why));
@@ -638,7 +648,7 @@ impl Runner {
                     Some(format!("Checking the image failed: {e}")),
                 );
             }
-        }
+        };
         // The work directory as the VM will see it: canonical (the runner's
         // directory may sit behind system links such as macOS's /var), and
         // with no link anywhere below the runner's directory.
@@ -737,6 +747,7 @@ impl Runner {
                 JobRun {
                     attempt_id: &c.attempt_id,
                     job: &job,
+                    image: &run_image,
                     work: &work,
                     log_dir: &log_dir,
                     network: c.network,
@@ -903,6 +914,8 @@ mod tests {
 
     struct Fake {
         ready: AtomicBool,
+        /// (the reference run, the job's pinned image) of every run.
+        ran: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     impl Executor for Fake {
@@ -916,8 +929,8 @@ mod tests {
                 detail: (!ready).then(|| "fake executor switched off".to_string()),
             }
         }
-        async fn image_present(&self, _image: &str) -> Result<bool, String> {
-            Ok(true)
+        async fn resolve_image(&self, image: &str) -> Result<ImageCheck, String> {
+            Ok(ImageCheck::Present(format!("{image}#resolved")))
         }
         async fn run(
             &self,
@@ -925,6 +938,10 @@ mod tests {
             log: mpsc::Sender<Vec<u8>>,
             mut cancel: watch::Receiver<bool>,
         ) -> Outcome {
+            self.ran
+                .lock()
+                .unwrap()
+                .push((job.image.to_string(), job.job.image.clone()));
             for c in &job.job.commands {
                 let words: Vec<&str> = c.split_whitespace().collect();
                 match words.as_slice() {
@@ -1066,6 +1083,7 @@ mod tests {
         };
         let fake = Fake {
             ready: AtomicBool::new(true),
+            ran: Default::default(),
         };
         let job = |id: &str| {
             let (http, url, owner, id) = (http.clone(), url.clone(), owner.clone(), id.to_string());
@@ -1090,6 +1108,10 @@ mod tests {
         assert!(runner.once(&fake).await.unwrap());
         let ok = checks().await.into_iter().find(|c| c.name == "ok").unwrap();
         assert_eq!(ok.conclusion.as_deref(), Some("success"), "{ok:?}");
+        // The executor runs the resolved reference; the job (and with it the
+        // cache key) keeps the pinned image.
+        let (run, pinned) = fake.ran.lock().unwrap()[0].clone();
+        assert_eq!(run, format!("{pinned}#resolved"));
         assert_eq!(ok.artifact_names, vec!["report".to_string()]);
         let id = ok.attempt_id.clone().unwrap();
         let (log, _) = app.ci.log_tail(&id, 1 << 20).await.unwrap();
