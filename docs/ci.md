@@ -182,6 +182,12 @@ cache entry that the default branch would use. Copies never write through a
 symbolic link at the destination. The cache lives in
 `<runner work dir>/cache/`.
 
+Restoring and saving both explicitly record the last-use time. Eviction removes
+the oldest timestamps first. For equal timestamps, the entry just saved is
+removed last; other entries are removed in cache-key order, regardless of size.
+The byte limit still applies to the saved entry: an entry larger than the limit
+is removed too.
+
 ## The runner
 
 `branvil runner` is a separate process (the same binary). It talks to the
