@@ -1,68 +1,85 @@
 # AGENTS.md
 
-このファイルは、このリポジトリで作業する AI/自動化エージェント向けの作業ガイドです。
-構造の説明は [`docs/architecture.md`](docs/architecture.md) に、文書の一覧は
-[`README.md`](README.md) の「Documents」にあります。ここには、コードを読んでも分からず、
-破ると困る約束事だけを書きます。
+A working guide for AI and automation agents in this repository. The structure
+is described in [`docs/architecture.md`](docs/architecture.md), and the list of
+documents is under "Documents" in [`README.md`](README.md). This file holds
+only the rules that reading the code does not reveal and that hurt when broken.
 
-## 最重要ルール
+## Most important rules
 
-- ソースコードを正とする（README / `docs/*.md` は参考情報）
-- `.gitignore` 対象のファイル・ディレクトリは参照しない。特に `/data/`（開発用のデータディレクトリ。
-  `secrets/owner.token` などの実トークンを含む）と `target/`
-- 挙動変更を行った場合は、関連ドキュメントも必要に応じて更新する。HTTP API は
-  [`docs/api.md`](docs/api.md) が契約で、GuildBotics の `branvil` provider がそれを前提にしている
-- コードの修正に際しては「最小限の変更量」ではなく、「変更後のコード量が最小になること」を
-  最優先事項とし、場当たり的対応ではなくあるべき姿の美しいコードとなることを心がける
-- 後方互換性を維持するためのコード（移行フラグ、フォールバック読み込み、旧形式の並行サポート、
-  deprecation 期間の新旧併存パス）を追加しない。互換性のために冗長なコードを残すより、
-  常にあるべき姿のコードを維持することを優先する。破壊的な非互換が起こりうることは README の
-  「Important Notice (Disclaimer)」で宣言済みであり、利用者は実質的にメンテナ本人のみである。
-  - 保存形式を変えるときは `src/store.rs` の `SCHEMA_VERSION` を上げる。他の版のデータディレクトリと
-    バックアップは変換せずに拒否する（変換処理を書かない）
-  - HTTP API を変えるときは、互換の層を作らず、GuildBotics の `guildbotics/integrations/branvil/` を
-    同時に直す
-- 自然言語の意味判定（分類・採用可否など）は Branvil の責務ではない。必要になったら GuildBotics 側に置き、
-  Branvil はキーワード列挙や文字列マッチで代用しない
-- 責務境界を越えた実装をしない（下の「責務境界」）
+- The source code is the source of truth (README and `docs/*.md` are reference
+  material).
+- Do not read files or directories that `.gitignore` excludes, in particular
+  `/data/` (the development data directory, which holds real tokens such as
+  `secrets/owner.token`) and `target/`.
+- When you change behavior, update the related documents as needed. The HTTP
+  API's contract is [`docs/api.md`](docs/api.md), and GuildBotics' `branvil`
+  provider relies on it.
+- When changing code, give top priority not to the smallest diff but to the
+  smallest amount of code after the change. Aim for the clean code the design
+  calls for, not an ad hoc patch.
+- Do not add code that keeps backward compatibility (migration flags, fallback
+  reads, parallel support for old formats, old and new paths side by side
+  during a deprecation period). Keeping the code as the design calls for comes
+  before keeping redundant code for compatibility. "Important Notice
+  (Disclaimer)" in the README declares that incompatible changes happen, and
+  in practice the maintainer is the only user.
+  - When the stored format changes, raise `SCHEMA_VERSION` in `src/store.rs`.
+    Data directories and backups of other versions are refused, not converted
+    (write no conversion).
+  - When the HTTP API changes, build no compatibility layer; change GuildBotics'
+    `guildbotics/integrations/branvil/` at the same time.
+- Judging the meaning of natural language (classifying, deciding whether to
+  accept, …) is not Branvil's job. When it is needed, it goes to GuildBotics;
+  Branvil does not substitute keyword lists or string matching for it.
+- Do not implement across responsibility boundaries (see "Boundaries" below).
 
-## 責務境界
+## Boundaries
 
-モジュールごとの責務は [`docs/architecture.md`](docs/architecture.md) の「Modules」が正本。
-それとは別に、モジュールをまたいで守る境界は次のとおり。
+The responsibilities of each module are defined by "Modules" in
+[`docs/architecture.md`](docs/architecture.md). Beyond those, these boundaries
+hold across modules:
 
-- **Branvil は GuildBotics を知らない。** 依存は GuildBotics → Branvil の一方向で、Branvil の動作が
-  GuildBotics を前提にするのは、`branvil runner` が探す msb の既定の場所
-  （`src/runner/executor.rs` の `~/.guildbotics/data/msb`）だけ。GuildBotics を名指しするのは
-  文書と、GuildBotics の契約テストを本物のサービスに流す仕組み（`integration/guildbotics/`、
-  `scripts/guildbotics-contracts.sh`、`scripts/e2e-flow.sh`）に限る
-- **upstream は provider に依らない境界の向こう。** `src/upstream/` はコードのホストを知らず、
-  ホスト固有のことはすべて `Host`（`src/upstream/host.rs`）の provider ごとの実装
-  （今は `src/upstream/github.rs` だけ）に置く
-- **listen は loopback だけ。** 他のマシンからは `branvil tunnel` の SSH ポート転送で届く
-  （`src/config.rs` が loopback 以外を拒否する）
-- **データへの入口は HTTP API だけ。** GUI・GuildBotics の provider・`branvil` CLI のクライアントの
-  コマンドはすべて API を使う（データディレクトリを直接扱うのは、サービスを止めて使う
-  `branvil init`・`branvil admin check|reindex`・`branvil restore` だけ）
-- **GUI は GuildBotics Desktop と同じ見た目にする。** Mantine の版、テーマ（`web/src/theme.ts`）、
-  `web/src/styles.css` のデザイントークンとコンポーネントの上書きを GuildBotics Desktop と揃える
-  （`docs/architecture.md` の「GUI files」）
+- **Branvil knows nothing of GuildBotics.** The dependency goes one way,
+  GuildBotics → Branvil. The only behavior of Branvil that assumes GuildBotics
+  is where `branvil runner` looks for msb by default (`~/.guildbotics/data/msb`
+  in `src/runner/executor.rs`). GuildBotics is named only in documents and in
+  the harness that runs GuildBotics' contract tests against a real service
+  (`integration/guildbotics/`, `scripts/guildbotics-contracts.sh`,
+  `scripts/e2e-flow.sh`).
+- **The upstream sits behind a provider-neutral boundary.** `src/upstream/`
+  knows no code host; everything host-specific goes in the provider's
+  implementation of `Host` (`src/upstream/host.rs`), today only
+  `src/upstream/github.rs`.
+- **Branvil listens on loopback only.** Other machines reach it through the SSH
+  port forward of `branvil tunnel` (`src/config.rs` refuses any other listen
+  address).
+- **The HTTP API is the only way into the data.** The GUI, GuildBotics'
+  provider, and the `branvil` CLI's client commands all use it. Only
+  `branvil init`, `branvil admin check|reindex`, and `branvil restore`, run
+  with the service stopped, work on the data directory directly.
+- **The GUI looks like GuildBotics Desktop.** Keep the Mantine version, the
+  theme (`web/src/theme.ts`), and the design tokens and component overrides in
+  `web/src/styles.css` the same as GuildBotics Desktop's ("GUI files" in
+  `docs/architecture.md`).
 
-## Git と資格情報
+## Git and credentials
 
-- サービスが動かす Git は `src/git.rs` を通す（サービスの `GIT_*` を引き継がず、system / global の
-  設定を読まない）
-- テスト・スクリプトでクライアントの Git を動かすときは、利用者の Git 設定と credential helper に
-  触れない。`tests/common/mod.rs` の `git` / `git_as` を使い、同じ分離を自前で書くときも
-  `GIT_CONFIG_NOSYSTEM=1`、空の `GIT_CONFIG_GLOBAL`、`GIT_TERMINAL_PROMPT=0`、
-  `-c credential.helper=` を付け、トークンは `GIT_ASKPASS` と環境変数で渡す（URL や argv に入れない）。
-  macOS では system の設定の `credential.helper=osxkeychain` がトークンを保存しようとして、
-  利用者の画面にキーチェーンのダイアログが出る
-- テストのメンバー名には実在の人の名前を使わない
+- Git run by the service goes through `src/git.rs` (it inherits none of the
+  service's `GIT_*` and reads no system or global configuration).
+- Client Git in tests and scripts must not touch the user's Git configuration
+  or credential helpers. Use `git` / `git_as` in `tests/common/mod.rs`; when
+  you write the same isolation yourself, set `GIT_CONFIG_NOSYSTEM=1`, an empty
+  `GIT_CONFIG_GLOBAL`, `GIT_TERMINAL_PROMPT=0`, and `-c credential.helper=`,
+  and pass tokens through `GIT_ASKPASS` and environment variables (never in a
+  URL or argv). On macOS the system configuration's
+  `credential.helper=osxkeychain` tries to store the token and puts a Keychain
+  dialog on the user's screen.
+- Do not use real people's names for test members.
 
-## 確認コマンド（CI 準拠）
+## Checks (as in CI)
 
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）と同じ確認:
+The same checks as CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
 ```sh
 cargo fmt --check
@@ -71,7 +88,8 @@ cargo test
 python3 -m unittest discover -s tests -p test_dev_script.py -v
 ```
 
-- 結合テストは 1 つのテストのクレート（`tests/main.rs`）にまとまっている。1 ファイルだけ流すときは
-  `cargo test --test main <file>::`（例: `cargo test --test main tickets::`）
-- 実機の microVM を使うテスト（`tests/real_executor.rs`）は `BRANVIL_REAL_EXECUTOR=1` のときだけ動く。
-  通常の確認には含めない
+- The integration tests are one test crate (`tests/main.rs`). To run one file:
+  `cargo test --test main <file>::` (for example
+  `cargo test --test main tickets::`).
+- The tests that use real microVMs (`tests/real_executor.rs`) run only with
+  `BRANVIL_REAL_EXECUTOR=1`. They are not part of the usual checks.
