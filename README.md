@@ -403,6 +403,18 @@ The integration tests start real `branvil serve` processes on free loopback
 ports and drive them with real Git clients isolated from the user's Git
 configuration and credential helpers.
 
+### GitHub Actions
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on pushes to `main`
+and pull requests targeting `main`. Its `checks-macos` job uses `macos-latest`
+and Rust 1.96.0 with rustfmt and clippy to run `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test`, and the Python
+development launcher tests above. The opt-in real microVM executor tests
+still require the runtime and image described in [`docs/ci.md`](docs/ci.md).
+
+For a pull request published to GitHub by the owner, Branvil imports the job's
+result as `github/checks-macos` (see "Upstream (GitHub)").
+
 ### GuildBotics port contracts against a live service
 
 GuildBotics' port contracts (`tests/guildbotics/integrations/contracts/` in
