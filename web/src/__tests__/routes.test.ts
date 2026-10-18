@@ -19,6 +19,8 @@ describe("routes", () => {
     expect(parseRoute("/-/authorize")).toEqual({ name: "authorize" });
     expect(parseRoute("/-/settings")).toEqual({ name: "settings", section: null });
     expect(parseRoute("/-/settings/members")).toEqual({ name: "settings", section: "members" });
+    // A repository's editor in its workspace's settings.
+    expect(parseRoute(href.repoSettings("acme/demo"))).toEqual({ name: "settings", section: null, repo: "acme/demo" });
   });
 
   it("rejects malformed paths", () => {

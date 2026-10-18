@@ -1,4 +1,4 @@
-import { Badge, Button, Card, Group, Modal, Stack, Tabs, TagsInput, Text, TextInput } from "@mantine/core";
+import { Badge, Button, Card, Group, Modal, Stack, Switch, Tabs, TagsInput, Text, TextInput } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FolderGit2, Plus } from "lucide-react";
 import { useState } from "react";
@@ -12,12 +12,12 @@ import { useRepos } from "../../query/hooks";
 import { keys } from "../../query/keys";
 import { UpstreamTab, upstreamTone } from "./UpstreamTab";
 
-/** The shown workspace: its board's repositories, each with its editor. */
-export function WorkspaceSettings({ workspace }: { workspace: string }) {
+/** The shown workspace: its board's repositories, each with its editor; `open` names one whose editor starts open on its CI tab. */
+export function WorkspaceSettings({ workspace, open = null }: { workspace: string; open?: string | null }) {
   const t = useT();
   const repos = useRepos();
   const [adding, setAdding] = useState(false);
-  const [editing, setEditing] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(open);
   const items = (repos.data?.items ?? []).filter((r) => r.path.startsWith(`${workspace}/`));
   return (
     <Card p="lg">
@@ -67,7 +67,7 @@ export function WorkspaceSettings({ workspace }: { workspace: string }) {
                   {t("common.edit")}
                 </Button>
               </div>
-              {editing === r.path && <RepoEditor repo={r} />}
+              {editing === r.path && <RepoEditor repo={r} tab={r.path === open ? "ci" : "basic"} />}
             </div>
           ))}
         </Stack>
@@ -133,6 +133,7 @@ type RepoForm = {
   default_branch: string;
   protected_branches: string[];
   required_checks: string[];
+  ci_network: boolean;
   labels: string[];
 };
 
@@ -141,11 +142,12 @@ const seed = (r: Repository): RepoForm => ({
   default_branch: r.default_branch,
   protected_branches: r.protected_branches,
   required_checks: r.required_checks,
+  ci_network: r.ci_network,
   labels: r.labels,
 });
 
-/** A repository's editor: its basics, its upstream, and its ticket labels, as tabs. */
-function RepoEditor({ repo }: { repo: Repository }) {
+/** A repository's editor: its basics, its upstream, its CI, and its ticket labels, as tabs. */
+function RepoEditor({ repo, tab }: { repo: Repository; tab: "basic" | "ci" }) {
   const t = useT();
   const client = useQueryClient();
   // The form keeps the revision it was filled from, so a stale save is refused (409).
@@ -156,6 +158,7 @@ function RepoEditor({ repo }: { repo: Repository }) {
     onSettled: () => {
       void client.invalidateQueries({ queryKey: keys.repos() });
       void client.invalidateQueries({ queryKey: keys.repo(repo.path) });
+      void client.invalidateQueries({ queryKey: keys.ci() });
     },
   });
   const stale = form.revision !== repo.revision;
@@ -180,10 +183,11 @@ function RepoEditor({ repo }: { repo: Repository }) {
   );
   return (
     <Card p="md" mt="sm" mb="sm" withBorder>
-      <Tabs defaultValue="basic">
+      <Tabs defaultValue={tab}>
         <Tabs.List>
           <Tabs.Tab value="basic">{t("settings.tabBasic")}</Tabs.Tab>
           <Tabs.Tab value="upstream">{t("upstream.title")}</Tabs.Tab>
+          <Tabs.Tab value="ci">{t("settings.tabCi")}</Tabs.Tab>
           <Tabs.Tab value="labels">{t("ticket.labels")}</Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="basic" pt="md">
@@ -212,6 +216,20 @@ function RepoEditor({ repo }: { repo: Repository }) {
               placeholder={t("settings.addBranch")}
               clearable
             />
+          </Stack>
+          {footer}
+        </Tabs.Panel>
+        <Tabs.Panel value="upstream" pt="md">
+          <UpstreamTab repo={repo} />
+        </Tabs.Panel>
+        <Tabs.Panel value="ci" pt="md">
+          <Stack gap="md">
+            <Switch
+              label={t("settings.ciNetwork")}
+              description={t("settings.ciNetworkHelp")}
+              checked={form.ci_network}
+              onChange={(e) => setForm({ ...form, ci_network: e.currentTarget.checked })}
+            />
             <TagsInput
               label={t("repo.requiredChecks")}
               description={t(repo.upstream ? "settings.requiredHelpUpstream" : "settings.requiredHelp")}
@@ -222,9 +240,6 @@ function RepoEditor({ repo }: { repo: Repository }) {
             />
           </Stack>
           {footer}
-        </Tabs.Panel>
-        <Tabs.Panel value="upstream" pt="md">
-          <UpstreamTab repo={repo} />
         </Tabs.Panel>
         <Tabs.Panel value="labels" pt="md">
           <TagsInput

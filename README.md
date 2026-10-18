@@ -241,8 +241,12 @@ branvil runner doctor                                          # msb found? exec
 BRANVIL_TOKEN=<runner token> branvil runner                    # runs until stopped
 ```
 
-Or let the service start and supervise one: set `runner = "auto"` in the
-`[ci]` section of `branvil.toml` and restart `branvil serve`.
+Or let the service start and supervise one: under Settings → CI in the GUI
+the owner switches the runner on, sets the job limits, and pulls an image or
+loads one from a `docker save` archive on the Branvil machine (the page shows
+the reference to write as `image`); a repository's CI tab allows its jobs the
+network. The same settings are `runner = "auto"` and `[ci.executor]` in
+`branvil.toml`.
 
 Each job runs in its own microVM with only the commit's tree mounted at
 `/work`, no network (the owner may allow public destinations per repository

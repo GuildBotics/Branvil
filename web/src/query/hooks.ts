@@ -92,6 +92,19 @@ export const useMemberTokens = (name: string) =>
 export const useDiagnostics = () =>
   useQuery({ queryKey: keys.diagnostics(), queryFn: () => api.admin.diagnostics(), refetchInterval: 30_000 });
 
+/** The CI settings; polled while an image operation runs (it has no events). */
+export const useCiSettings = () =>
+  useQuery({
+    queryKey: keys.ci(),
+    queryFn: () => api.admin.ci(),
+    // Follow a running image operation, and a runner switched on until it reports.
+    refetchInterval: (query) => {
+      const s = query.state.data;
+      if (s?.operation?.state === "running") return 2_000;
+      return s?.runner.mode === "auto" && s.runner.state !== "ready" ? 3_000 : false;
+    },
+  });
+
 export const useTicket = (repo: string, key: string) =>
   useQuery({ queryKey: keys.ticket(repo, key), queryFn: () => api.tickets.get(repo, key) });
 

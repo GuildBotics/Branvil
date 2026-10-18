@@ -124,6 +124,8 @@ impl Default for LimitsConfig {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub data_dir: PathBuf,
+    /// The configuration file: the one read, or where it would be.
+    pub file: PathBuf,
     pub listen: SocketAddr,
     /// Set when configured or given; otherwise derived from the bound address.
     pub base_url: Option<String>,
@@ -312,6 +314,7 @@ impl Config {
         };
         Ok(Config {
             data_dir,
+            file: file_path,
             listen,
             base_url,
             storage: file.storage,

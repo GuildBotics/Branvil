@@ -59,7 +59,8 @@ export interface Repository {
   url: string;
   protected_branches: string[];
   required_checks: string[];
-  ci_network?: boolean;
+  /** Whether its CI jobs may reach public network destinations. */
+  ci_network: boolean;
   /** The labels its tickets may carry. */
   labels: string[];
   /** The upstream host it follows and publishes to. */
@@ -338,7 +339,87 @@ export interface Diagnostics {
   upstream?: { state: string; problems?: { repository: string; problem: string }[] };
 }
 
-export type ChangeKind = "ticket" | "pull" | "board" | "check" | "upstream" | "repo";
+/** The CI runner, its executor, job limits, and image cache, as `/admin/ci` shows them to the owner. */
+export interface CiSettings {
+  runner: {
+    /** The `[ci] runner` setting as it applies now. */
+    mode: "auto" | "off";
+    state: "ready" | "no_runner" | "executor_unavailable";
+    detail: string;
+    runners: CiRunner[];
+  };
+  executor: {
+    /** The msb in use, or null when none is usable (`problem` says why). */
+    msb: string | null;
+    problem: string | null;
+    /** The image cache. */
+    home: string;
+  };
+  limits: CiLimits;
+  images: {
+    /** Why the cache could not be read, or null. */
+    error: string | null;
+    cached: CachedImage[];
+    /** The images pipelines name that the cache cannot run; empty when none is missing. */
+    missing: MissingImage[];
+  };
+  operation: ImageOperation | null;
+  repositories: { path: string; ci_network: boolean }[];
+}
+
+export interface CiRunner {
+  name: string;
+  last_seen_at: string;
+  executor: string;
+  executor_state: string;
+  executor_detail: string | null;
+}
+
+export interface CiLimits {
+  max_cpus: number;
+  max_memory_mib: number;
+  max_timeout_secs: number;
+  cache_max_mib: number;
+}
+
+export interface CachedImage {
+  reference: string;
+  /** The reference with its digest: what to write as `image` in `.branvil/ci.toml`. */
+  pinned: string;
+  digest: string;
+  size_bytes: number;
+  created_at: string;
+  /** The repositories whose default-branch pipeline names this image; empty when none does. */
+  used_by: ImageUse[];
+}
+
+/** A repository whose default-branch pipeline names an image, and the jobs that do. */
+export interface ImageUse {
+  repository: string;
+  jobs: string[];
+}
+
+/** An image pipelines name that the cache cannot run. */
+export interface MissingImage {
+  image: string;
+  repositories: ImageUse[];
+  /** The digest the cache holds under that tag, or null when the image is not there at all. */
+  held: string | null;
+}
+
+export interface ImageOperation {
+  kind: "pull" | "load";
+  /** The reference pulled or the path loaded. */
+  target: string;
+  state: "running" | "succeeded" | "failed";
+  detail: string | null;
+  started_at: string;
+  finished_at: string | null;
+  /** The images the operation brought, also those already in the cache. */
+  loaded: { reference: string; pinned: string }[];
+}
+
+export type ChangeKind ="ticket" | "pull" | "board" | "check" | "upstream" | "repo";
 
 export interface ChangeEvent {
   kind: ChangeKind;

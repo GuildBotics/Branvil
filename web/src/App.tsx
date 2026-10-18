@@ -81,7 +81,7 @@ function RouteView({ route, workspace, workspaces }: { route: AppRoute; workspac
     case "home":
       return <Home workspace={workspace} workspaces={workspaces} />;
     case "settings":
-      return <SettingsView section={route.section} workspace={workspace} />;
+      return <SettingsView section={route.section} workspace={workspace} repo={route.repo ?? null} />;
     case "workspace":
       return <BoardView key={route.workspace} workspace={route.workspace} />;
     case "pulls":

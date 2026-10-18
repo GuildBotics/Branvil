@@ -21,6 +21,8 @@ export function workspaceOfRoute(route: Route): string | null {
     case "commit":
     case "job":
       return route.repo.split("/")[0] ?? null;
+    case "settings":
+      return route.repo?.split("/")[0] ?? null;
     default:
       return null;
   }

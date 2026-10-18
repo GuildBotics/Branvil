@@ -288,7 +288,17 @@ async fn run(cli: Cli) -> anyhow::Result<u8> {
             client,
             data,
         } => {
-            let config = data_config(&data);
+            // A configuration named explicitly (the supervised runner gets the
+            // service's) has to be read: its limits apply to every job.
+            let config = match &data.config {
+                Some(file) => Some(config::Config::load(
+                    Some(file),
+                    data.data_dir.as_deref(),
+                    None,
+                    None,
+                )?),
+                None => data_config(&data),
+            };
             let settings =
                 runner::Settings::new(client.url, client.token, work_dir, config.as_ref())?;
             match command {

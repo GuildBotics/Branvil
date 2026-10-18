@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::ci::config::ExecutorConfig;
 use crate::ci::pipeline::JobDef;
-use executor::{Executor, Health, JobRun, Microsandbox, Outcome};
+use executor::{Executor, Health, ImageCheck, JobRun, Microsandbox, Outcome};
 
 #[derive(Subcommand)]
 pub enum RunnerCommand {
@@ -347,13 +347,22 @@ pub async fn pull(settings: &Settings, image: &str) -> anyhow::Result<()> {
             }
         );
     };
-    std::fs::create_dir_all(ms.home())?;
-    let status = cmd
-        .args(["pull", image])
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .await?;
+    let _lock = ms
+        .lock_images(true, || {
+            eprintln!("waiting for another image pull or load to finish")
+        })
+        .await
+        .map_err(anyhow::Error::msg)?;
+    // Bounded like the GUI's pulls: jobs wait for the lock it holds.
+    let status = tokio::time::timeout(
+        executor::IMAGE_TRANSFER,
+        cmd.args(["pull", image])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status(),
+    )
+    .await
+    .with_context(|| format!("msb pull {image} timed out"))??;
     if !status.success() {
         bail!("msb pull {image} failed ({status})");
     }
@@ -622,23 +631,46 @@ impl Runner {
         for n in notes.drain(..) {
             say(n).await;
         }
-        match executor.image_present(&job.image).await {
-            Ok(true) => {}
-            Ok(false) => {
-                let why = format!(
-                    "The image {} is not in the runner's image cache (jobs never pull); run `branvil runner pull {}` on the runner's machine.",
-                    job.image, job.image
-                );
-                say(why.clone()).await;
-                return ("startup_failure", Some(why));
+        // Checked before the source is fetched; the lock that comes with the
+        // check keeps a load or a pull from re-pointing the checked tag until
+        // the VM has picked the image.
+        let mut stopping = cancel.clone();
+        let checked = tokio::select! {
+            checked = executor.resolve_image(&job.image, &log) => checked.map_err(Some),
+            Ok(_) = stopping.wait_for(|stop| *stop) => Err(None),
+        };
+        let (check, image_lock) = match checked {
+            Ok(checked) => checked,
+            Err(None) => {
+                say("job ended: cancelled while waiting for the image cache".into()).await;
+                return ("cancelled", Some("Stopped on request.".to_string()));
             }
-            Err(e) => {
+            Err(Some(e)) => {
                 return (
                     "startup_failure",
                     Some(format!("Checking the image failed: {e}")),
                 );
             }
-        }
+        };
+        let run_image = match check {
+            ImageCheck::Present(reference) => reference,
+            ImageCheck::Missing => {
+                let why = format!(
+                    "The image {} is not in the runner's image cache (jobs never pull); pull or load it under Settings → CI for the runner on the Branvil machine, or run `branvil runner pull {}` on the runner's machine.",
+                    job.image, job.image
+                );
+                say(why.clone()).await;
+                return ("startup_failure", Some(why));
+            }
+            ImageCheck::Other(held) => {
+                let why = format!(
+                    "The runner's image cache holds the tag of {} as an image whose digest is {held}; load the pinned image into the runner's cache (Settings → CI for the runner on the Branvil machine).",
+                    job.image
+                );
+                say(why.clone()).await;
+                return ("startup_failure", Some(why));
+            }
+        };
         // The work directory as the VM will see it: canonical (the runner's
         // directory may sit behind system links such as macOS's /var), and
         // with no link anywhere below the runner's directory.
@@ -737,6 +769,8 @@ impl Runner {
                 JobRun {
                     attempt_id: &c.attempt_id,
                     job: &job,
+                    image: &run_image,
+                    image_lock,
                     work: &work,
                     log_dir: &log_dir,
                     network: c.network,
@@ -899,10 +933,15 @@ mod tests {
     //! never starts a process.
 
     use super::*;
+    use executor::ImageLock;
     use std::sync::atomic::AtomicBool;
 
     struct Fake {
         ready: AtomicBool,
+        /// The image cache is held (by a pull or a load): checks wait.
+        hold_images: AtomicBool,
+        /// (the reference run, the job's pinned image) of every run.
+        ran: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     impl Executor for Fake {
@@ -916,8 +955,18 @@ mod tests {
                 detail: (!ready).then(|| "fake executor switched off".to_string()),
             }
         }
-        async fn image_present(&self, _image: &str) -> Result<bool, String> {
-            Ok(true)
+        async fn resolve_image(
+            &self,
+            image: &str,
+            _: &mpsc::Sender<Vec<u8>>,
+        ) -> Result<(ImageCheck, ImageLock), String> {
+            if self.hold_images.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            Ok((
+                ImageCheck::Present(format!("{image}#resolved")),
+                ImageLock::default(),
+            ))
         }
         async fn run(
             &self,
@@ -925,6 +974,10 @@ mod tests {
             log: mpsc::Sender<Vec<u8>>,
             mut cancel: watch::Receiver<bool>,
         ) -> Outcome {
+            self.ran
+                .lock()
+                .unwrap()
+                .push((job.image.to_string(), job.job.image.clone()));
             for c in &job.job.commands {
                 let words: Vec<&str> = c.split_whitespace().collect();
                 match words.as_slice() {
@@ -1066,6 +1119,8 @@ mod tests {
         };
         let fake = Fake {
             ready: AtomicBool::new(true),
+            hold_images: AtomicBool::new(false),
+            ran: Default::default(),
         };
         let job = |id: &str| {
             let (http, url, owner, id) = (http.clone(), url.clone(), owner.clone(), id.to_string());
@@ -1090,6 +1145,10 @@ mod tests {
         assert!(runner.once(&fake).await.unwrap());
         let ok = checks().await.into_iter().find(|c| c.name == "ok").unwrap();
         assert_eq!(ok.conclusion.as_deref(), Some("success"), "{ok:?}");
+        // The executor runs the resolved reference; the job (and with it the
+        // cache key) keeps the pinned image.
+        let (run, pinned) = fake.ran.lock().unwrap()[0].clone();
+        assert_eq!(run, format!("{pinned}#resolved"));
         assert_eq!(ok.artifact_names, vec!["report".to_string()]);
         let id = ok.attempt_id.clone().unwrap();
         let (log, _) = app.ci.log_tail(&id, 1 << 20).await.unwrap();
@@ -1103,40 +1162,67 @@ mod tests {
             "work directory removed"
         );
 
-        // Job "slow": cancelled through the API while it runs.
-        let running = tokio::spawn(async move {
-            let r = runner.once(&fake).await;
-            (runner, fake, r)
-        });
-        let mut slow_id = None;
-        for _ in 0..50 {
-            if let Some(c) = checks()
-                .await
-                .into_iter()
-                .find(|c| c.name == "slow" && c.status == "in_progress")
-            {
-                slow_id = c.attempt_id;
-                break;
+        // Job "slow": cancelled through the API while it runs, then again
+        // while its check waits for the image cache.
+        let cancel_slow = |runner: Runner, fake: Fake| {
+            let (checks, http, url, owner) = (checks, http.clone(), url.clone(), owner.clone());
+            async move {
+                let running = tokio::spawn(async move {
+                    let r = runner.once(&fake).await;
+                    (runner, fake, r)
+                });
+                let mut slow_id = None;
+                for _ in 0..50 {
+                    if let Some(c) = checks()
+                        .await
+                        .into_iter()
+                        .find(|c| c.name == "slow" && c.status == "in_progress")
+                    {
+                        slow_id = c.attempt_id;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let slow_id = slow_id.expect("slow job running");
+                let resp = http
+                    .post(format!(
+                        "{url}/api/v1/repos/acme%2Fdemo/jobs/{slow_id}/cancel"
+                    ))
+                    .bearer_auth(&owner)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), 200);
+                let (runner, fake, r) = tokio::time::timeout(Duration::from_secs(20), running)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(r.unwrap());
+                (runner, fake, slow_id)
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let slow_id = slow_id.expect("slow job running");
+        };
+        let (runner, fake, slow_id) = cancel_slow(runner, fake).await;
+        let slow = job(&slow_id).await;
+        assert_eq!(slow["conclusion"], "cancelled", "{slow}");
+        fake.hold_images.store(true, Ordering::SeqCst);
         let resp = http
             .post(format!(
-                "{url}/api/v1/repos/acme%2Fdemo/jobs/{slow_id}/cancel"
+                "{url}/api/v1/repos/acme%2Fdemo/jobs/{slow_id}/retry"
             ))
             .bearer_auth(&owner)
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let (runner, fake, r) = tokio::time::timeout(Duration::from_secs(20), running)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(r.unwrap());
-        let slow = job(&slow_id).await;
-        assert_eq!(slow["conclusion"], "cancelled", "{slow}");
+        let (runner, fake, waiting_id) = cancel_slow(runner, fake).await;
+        let waiting = job(&waiting_id).await;
+        assert_eq!(waiting["conclusion"], "cancelled", "{waiting}");
+        assert_eq!(
+            fake.ran.lock().unwrap().len(),
+            2,
+            "the waiting job never ran"
+        );
+        fake.hold_images.store(false, Ordering::SeqCst);
 
         // An unusable executor: the job concludes startup_failure with why.
         fake.ready.store(false, Ordering::SeqCst);

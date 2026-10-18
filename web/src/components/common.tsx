@@ -53,13 +53,15 @@ export function Notice({ children }: { children: ReactNode }) {
   );
 }
 
-export function Time({ value }: { value: string | null | undefined }) {
+/** A moment in the reader's language; `date` shows only its day. */
+export function Time({ value, date }: { value: string | null | undefined; date?: boolean }) {
   const { lang } = useI18n();
   if (!value) return null;
   const d = new Date(value);
+  const shown = date ? d.toLocaleDateString(lang, { year: "numeric", month: "2-digit", day: "2-digit" }) : d.toLocaleString(lang);
   return (
     <time dateTime={value} title={value}>
-      {Number.isNaN(d.getTime()) ? value : d.toLocaleString(lang)}
+      {Number.isNaN(d.getTime()) ? value : shown}
     </time>
   );
 }

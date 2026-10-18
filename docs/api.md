@@ -283,7 +283,7 @@ a code host it follows and publishes to, or `null` (see "Upstream").
 
 - `GET /api/v1/repos` → items (every repository), by path.
 - `POST /api/v1/repos` (owner) `{"path","default_branch"?,"labels"?}` (default `main`, no labels) → repository. `path` is `<workspace>/<name>` of an existing workspace (`404 not_found` otherwise). An empty bare repository is created.
-- `PATCH /api/v1/repos/{repo}` (owner) `{"revision", "default_branch"?, "required_checks"?, "protected_branches"?, "ci_network"?, "labels"?}` → `409 conflict` when `revision` is stale. Removing a label leaves it on the tickets that carry it. `ci_network` is the network access of CI jobs (`docs/ci.md`). With an upstream, the default branch follows the upstream's and cannot be changed (`409 conflict`).
+- `PATCH /api/v1/repos/{repo}` (owner) `{"revision", "default_branch"?, "required_checks"?, "protected_branches"?, "ci_network"?, "labels"?}` → `409 conflict` when `revision` is stale. Removing a label leaves it on the tickets that carry it. `ci_network` is the network access of CI jobs (`docs/ci.md`; the CI tab of the repository's settings). With an upstream, the default branch follows the upstream's and cannot be changed (`409 conflict`).
 
 ### `GET /api/v1/repos/{repo}/branches/{branch}`
 
@@ -742,6 +742,60 @@ is polled when, and how conflicts are settled: `docs/architecture.md`,
   last pushed. `error` is the last failure (retried at the next poll);
   `stopped` says why sending the branch stopped (the host has a commit Branvil
   did not push, or refused the update).
+
+### CI settings
+
+What the owner changes under Settings → CI (`docs/ci.md`). The runner mode and
+the limits are `branvil.toml` settings: written there, keeping the rest of the
+file, and applied without a restart. The image cache is the supervised
+runner's (`[ci.microsandbox] home`).
+
+- `GET /api/v1/admin/ci` (owner) →
+
+  ```json
+  {"runner": {"mode": "auto", "state": "ready", "detail": "1 runner(s) connected.", "runners": [...], "queue": {...}},
+   "executor": {"msb": "/…/msb", "problem": null, "home": "/…/.branvil/msb-home"},
+   "limits": {"max_cpus": 4, "max_memory_mib": 4096, "max_timeout_secs": 3600, "cache_max_mib": 2048},
+   "images": {"error": null,
+              "cached": [{"reference": "guildbotics/agent-environment:dev",
+                          "pinned": "guildbotics/agent-environment:dev@sha256:…",
+                          "digest": "sha256:…", "size_bytes": 3701474304, "created_at": "…",
+                          "used_by": [{"repository": "acme/demo", "jobs": ["test"]}]}],
+              "missing": [{"image": "…", "repositories": [{"repository": "acme/web", "jobs": ["lint"]}],
+                           "held": null}]},
+   "operation": null,
+   "repositories": [{"path": "acme/demo", "ci_network": false}]}
+  ```
+
+  `runner` is the diagnostics' runner section (below). `executor.msb` is the
+  msb the runner would use (`null` with the reason in `problem`). `cached` are
+  the images of the cache; `pinned` is what a pipeline writes as `image`
+  (`docs/ci.md`); `digest` is the configuration digest; `used_by` are the
+  repositories whose default-branch pipelines run it, with their jobs.
+  `missing` are the images those pipelines name that the cache cannot run:
+  not there (`held: null`), or that tag held as another image (`held`: its
+  digest). `operation` is the latest image pull or load:
+  `{"kind": "pull"|"load", "target", "state": "running"|"succeeded"|"failed",
+  "detail", "started_at", "finished_at", "loaded": [{"reference", "pinned"}]}`.
+- `PUT /api/v1/admin/ci/runner` (owner) `{"mode": "auto"|"off"}` → the settings.
+  `auto` starts the supervised runner, `off` stops it.
+- `PUT /api/v1/admin/ci/limits` (owner) `{"max_cpus", "max_memory_mib",
+  "max_timeout_secs", "cache_max_mib"}` → the settings; `400 invalid` outside
+  1–64, 128–65536, 1–86400, 0–1048576. A running supervised runner starts again
+  with them (its attempt in progress is interrupted and queued once more).
+- `POST /api/v1/admin/ci/images/pull` (owner) `{"reference"}` → `202` with the
+  settings, `operation` running; `400 invalid` for a reference that is not
+  `name[:tag][@sha256:<64 hex>]`.
+- `POST /api/v1/admin/ci/images/load` (owner) `{"path"}` → `202` likewise. The
+  path is absolute and names a regular file (a `docker save` / OCI archive) on
+  the service's machine; `400 invalid` otherwise.
+- The mode or limits already in effect change nothing (the runner goes on).
+  A configuration file that cannot be updated (not TOML, or no longer a
+  configuration once changed) is `409 conflict` and stays as it is.
+- One image operation at a time: another one while it runs is `409 conflict`.
+  `loaded` names the images the operation brought, new or already cached:
+  the pulled reference, or the references the archive carries (`RepoTags` of
+  a `docker save` manifest, the image names of an OCI index).
 
 ### Backups
 

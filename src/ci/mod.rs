@@ -11,11 +11,13 @@
 //!   up, admits waiting runs, registers runs that a crash between a push and
 //!   its registration missed, and applies retention.
 
+pub mod admin;
 pub mod api;
 pub mod config;
 pub mod files;
 pub mod pipeline;
 pub mod queue;
+pub mod settings;
 pub mod supervise;
 
 use std::collections::BTreeMap;
@@ -116,6 +118,7 @@ struct Inner {
     base_url: String,
     layout: Layout,
     config: CiConfig,
+    settings: settings::Control,
     started: Instant,
     runners: Mutex<BTreeMap<String, RunnerSeen>>,
     /// Serializes log appends (one file per attempt, small writes).
@@ -130,6 +133,7 @@ impl Ci {
         base_url: String,
         layout: Layout,
         config: CiConfig,
+        config_file: std::path::PathBuf,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -138,6 +142,7 @@ impl Ci {
                 events,
                 base_url,
                 layout,
+                settings: settings::Control::new(config_file, &config),
                 config,
                 started: Instant::now(),
                 runners: Mutex::new(BTreeMap::new()),
@@ -148,6 +153,31 @@ impl Ci {
 
     pub fn config(&self) -> &CiConfig {
         &self.inner.config
+    }
+
+    /// What the owner changes from the GUI (`settings.rs`).
+    pub fn settings(&self) -> &settings::Control {
+        &self.inner.settings
+    }
+
+    /// The jobs of the pipeline on the tip of `repo`'s default branch (none
+    /// without a valid one).
+    pub async fn default_jobs(&self, repo: &Repo) -> Vec<pipeline::JobDef> {
+        let dir = self.inner.git.repo_dir(&repo.path);
+        let tip = format!("refs/heads/{}^{{commit}}", repo.default_branch);
+        let sha = match self
+            .inner
+            .git
+            .run(Some(&dir), &["rev-parse", "--verify", "-q", &tip])
+            .await
+        {
+            Ok(out) if out.ok() => out.text().trim().to_string(),
+            _ => return Vec::new(),
+        };
+        match self.read_pipeline(repo, &sha).await {
+            PipelineState::Jobs { jobs } => jobs,
+            _ => Vec::new(),
+        }
     }
 
     fn job_url(&self, repo_path: &str, id: &str) -> String {
@@ -558,6 +588,11 @@ impl Ci {
         Ok(())
     }
 
+    /// Forgets a runner that was stopped, so the diagnostics stop counting it.
+    pub fn forget_runner(&self, name: &str) {
+        self.inner.runners.lock().unwrap().remove(&util::fold(name));
+    }
+
     /// Notes a runner request (for diagnostics and the no-runner rule).
     pub fn saw_runner(&self, name: &str, executor: Option<(String, String, Option<String>)>) {
         let mut runners = self.inner.runners.lock().unwrap();
@@ -624,7 +659,7 @@ impl Ci {
         serde_json::json!({
             "state": state,
             "detail": detail,
-            "mode": self.inner.config.runner,
+            "mode": self.inner.settings.mode(),
             "runners": runners,
             "queue": queue,
         })
@@ -712,6 +747,7 @@ mod tests {
             "http://127.0.0.1:7878".into(),
             layout,
             config,
+            std::path::PathBuf::from("/nonexistent/branvil.toml"),
         );
         let repo = Repo {
             id: "repo_1".into(),
