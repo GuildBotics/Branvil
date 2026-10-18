@@ -5,7 +5,7 @@
 //! repositories, and
 //! image operations refuse what is not an image reference or a regular file.
 
-mod common;
+use crate::common;
 
 use common::*;
 use reqwest::StatusCode;

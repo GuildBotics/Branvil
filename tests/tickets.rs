@@ -1,7 +1,7 @@
 //! Workspaces, tickets, labels, the board and its cards, comments, cursors,
 //! and permissions against a real service.
 
-mod common;
+use crate::common;
 
 use common::*;
 use serde_json::{Value, json};

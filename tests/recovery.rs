@@ -4,7 +4,7 @@
 //! `BRANVIL_FAILPOINT`, which aborts the process at a named point. This is
 //! process-kill testing, not power-loss testing.
 
-mod common;
+use crate::common;
 
 use common::*;
 use serde_json::{Value, json};

@@ -2,7 +2,7 @@
 //! head checks for reviews and inline comments, entry ids, patrol, diffs,
 //! checks, and the fast-forward merge.
 
-mod common;
+use crate::common;
 
 use common::*;
 use serde_json::{Value, json};

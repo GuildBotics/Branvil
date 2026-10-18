@@ -3,7 +3,7 @@
 //! pull request as its author, carrying changes both ways, the host's checks
 //! and logs, the merge on the host, and conditional requests.
 
-mod common;
+use crate::common;
 
 use common::github::{AppKey, FakeGitHub};
 use common::*;

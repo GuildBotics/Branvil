@@ -7,6 +7,8 @@ description = "Branvil: a lightweight local code hosting service (Git, tickets, 
 license = "MIT"
 repository = "https://github.com/GuildBotics/Branvil"
 publish = false
+# The integration tests are one test crate (`tests/main.rs`).
+autotests = false
 
 [dependencies]
 anyhow = "1"
@@ -44,6 +46,18 @@ toml_edit = "0.25.17"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+# Line numbers are enough for this crate's backtraces; full debug info, and
+# any for dependencies, made the development `target` several gigabytes.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 lto = "thin"

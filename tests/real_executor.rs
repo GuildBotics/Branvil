@@ -6,10 +6,10 @@
 //!
 //! ```sh
 //! branvil runner pull docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
-//! BRANVIL_REAL_EXECUTOR=1 cargo test --test real_executor -- --nocapture
+//! BRANVIL_REAL_EXECUTOR=1 cargo test --test main real_executor:: -- --nocapture
 //! ```
 
-mod common;
+use crate::common;
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};

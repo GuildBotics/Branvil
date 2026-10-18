@@ -427,7 +427,7 @@ Conditions:
 | Build | `branvil` debug build (`cargo test`); `msb` is the GuildBotics-deployed release binary |
 | Image | `docker.io/library/alpine@sha256:5291449c…8fa8` (3.9 MiB, already in Branvil's image cache) |
 | Job | 1 vCPU, 512 MiB, network off, the commit's tree (two files) mounted at `/work` |
-| Harness | `BRANVIL_REAL_EXECUTOR=1 cargo test --test real_executor -- --nocapture` (three jobs of one run, one after another: a probe job, an `exit 3` job, a `sleep` job stopped by a 5 s timeout) |
+| Harness | `BRANVIL_REAL_EXECUTOR=1 cargo test --test main real_executor:: -- --nocapture` (three jobs of one run, one after another: a probe job, an `exit 3` job, a `sleep` job stopped by a 5 s timeout) |
 | Sampling | `ps -o rss` every 250 ms while the jobs run (peaks can be missed between samples) |
 
 Results of seven runs on 2026-10-14:
