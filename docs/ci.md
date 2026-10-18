@@ -51,7 +51,14 @@ cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # 
   configuration digest survives `docker save` and loading, the manifest digest
   does not. The runner runs it by the tag once the image the cache holds under
   that tag has that digest, and concludes `startup_failure` when it holds
-  another one. Settings → CI shows the reference to write for every cached
+  another one. Pulls and loads (Settings → CI, `branvil runner pull`) hold a
+  lock of the image cache (a file of `MSB_HOME`) exclusively, and a job holds
+  it shared from checking its image until its VM has started, so a load that
+  re-points the tag waits for the jobs that are starting and never changes
+  the image a checked job runs; a job that waits for a pull or a load says
+  so in its log and can be cancelled meanwhile (`msb` used by hand does not
+  take the lock).
+  Settings → CI shows the reference to write for every cached
   image. (A runner started by hand on another machine loads such an archive
   with `msb load` under its own `MSB_HOME`.)
 

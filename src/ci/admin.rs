@@ -22,7 +22,7 @@ use crate::auth::Caller;
 use crate::error::{AppError, AppResult};
 use crate::http::J;
 use crate::model::Repo;
-use crate::runner::executor::{Executor, ImageCheck, ImageInfo, Microsandbox, Msb};
+use crate::runner::executor::{ImageCheck, ImageInfo, Microsandbox, Msb};
 use crate::store::{self, Rd};
 
 #[derive(Serialize)]
@@ -129,7 +129,8 @@ async fn view(app: &Shared) -> AppResult<View> {
         let held = if msb.is_none() || images.error.is_some() {
             None
         } else {
-            match ms.resolve_image(&image).await {
+            // Without the lock: a load in progress holds it for minutes.
+            match ms.check_image(&image).await {
                 // Under the image the runner would run.
                 Ok(ImageCheck::Present(run)) => {
                     if let Some(c) = images.cached.iter_mut().find(|c| c.reference == run) {
@@ -281,6 +282,8 @@ async fn transfer(
     names: Vec<String>,
     operation: impl std::future::Future<Output = Result<(), String>>,
 ) -> Result<Vec<Loaded>, String> {
+    // Held through the report, so that it names what this operation brought.
+    let _lock = ms.lock_images(true, || {}).await?;
     let held = |i: &ImageInfo| (i.reference.clone(), i.digest.clone(), i.created_at.clone());
     let before: std::collections::HashSet<_> = ms.images().await?.iter().map(held).collect();
     operation.await?;

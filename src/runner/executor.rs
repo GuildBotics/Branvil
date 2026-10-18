@@ -18,7 +18,7 @@ use crate::ci::pipeline::JobDef;
 pub const MSB_VERSION: &str = "0.6.17";
 
 /// How long pulling or loading an image may take (a GiB-sized archive).
-const IMAGE_TRANSFER: Duration = Duration::from_secs(1800);
+pub const IMAGE_TRANSFER: Duration = Duration::from_secs(1800);
 
 /// An image of the cache, as `msb image inspect` reports it.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -107,6 +107,9 @@ pub struct JobRun<'a> {
     /// The reference the image is run by (`Executor::resolve_image`); the
     /// job's own `image` stays the pinned one (the cache key holds it).
     pub image: &'a str,
+    /// The lock that came with the image's check, held until the VM has
+    /// picked the image.
+    pub image_lock: ImageLock,
     /// The host directory mounted at `/work`: the commit's tree.
     pub work: &'a Path,
     /// An empty host directory of this job only, mounted at [`LOG_MOUNT`]:
@@ -138,11 +141,25 @@ pub enum ImageCheck {
     Other(String),
 }
 
+/// A lock of the image cache ([`Microsandbox::lock_images`]), released when
+/// dropped (closing the file).
+#[derive(Default)]
+pub struct ImageLock {
+    _file: Option<std::fs::File>,
+}
+
 pub trait Executor: Send + Sync {
     fn name(&self) -> &'static str;
     fn health(&self) -> impl Future<Output = Health> + Send;
-    fn resolve_image(&self, image: &str)
-    -> impl Future<Output = Result<ImageCheck, String>> + Send;
+    /// Checks the job's image (telling `log` when it waits for a pull or a
+    /// load). The lock that comes with the answer keeps the cache from
+    /// re-pointing what was checked until `run` has started the job, which
+    /// runs a loaded image by its tag.
+    fn resolve_image(
+        &self,
+        image: &str,
+        log: &mpsc::Sender<Vec<u8>>,
+    ) -> impl Future<Output = Result<(ImageCheck, ImageLock), String>> + Send;
     /// Runs the job; output goes to `log`, `cancel` turning true stops it.
     fn run(
         &self,
@@ -334,7 +351,64 @@ impl Microsandbox {
         Ok(images)
     }
 
-    /// Pulls `reference` into the cache.
+    /// Locks the image cache. The lock is a file of `MSB_HOME`, so that it
+    /// holds across the processes sharing the cache (the service, its
+    /// runner, `branvil runner pull`). Pulls and loads hold it exclusively; a
+    /// job holds it shared from checking its image until its VM has started.
+    /// Waiting polls (`waiting` is called once when it starts), so that it
+    /// ends with the future: a cancelled job or a stopping service leaves no
+    /// thread blocked on the lock.
+    pub async fn lock_images(
+        &self,
+        exclusive: bool,
+        waiting: impl FnOnce(),
+    ) -> Result<ImageLock, String> {
+        let fail = |e: std::io::Error| format!("cannot lock the image cache: {e}");
+        std::fs::create_dir_all(&self.home).map_err(fail)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.home.join("branvil-images.lock"))
+            .map_err(fail)?;
+        let mut waiting = Some(waiting);
+        loop {
+            let locked = if exclusive {
+                file.try_lock()
+            } else {
+                file.try_lock_shared()
+            };
+            match locked {
+                Ok(()) => return Ok(ImageLock { _file: Some(file) }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if let Some(w) = waiting.take() {
+                        w();
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(fail(e)),
+            }
+        }
+    }
+
+    /// What the cache holds for `image`, without the lock (an answer to
+    /// show: a job checks through `Executor::resolve_image`).
+    pub async fn check_image(&self, image: &str) -> Result<ImageCheck, String> {
+        if self.inspect(image).await?.is_some() {
+            return Ok(ImageCheck::Present(image.to_string()));
+        }
+        let Some((name, pin)) = tagged_pin(image) else {
+            return Ok(ImageCheck::Missing);
+        };
+        Ok(match self.inspect(name).await? {
+            Some(held) if held.is(pin) => ImageCheck::Present(name.to_string()),
+            Some(held) => ImageCheck::Other(held.config_digest),
+            None => ImageCheck::Missing,
+        })
+    }
+
+    /// Pulls `reference` into the cache; the caller holds
+    /// `lock_images(true)`.
     pub async fn pull(&self, reference: &str) -> Result<(), String> {
         let _ = std::fs::create_dir_all(&self.home);
         self.finish(
@@ -344,7 +418,8 @@ impl Microsandbox {
         )
     }
 
-    /// Loads a `docker save` / OCI archive into the cache.
+    /// Loads a `docker save` / OCI archive into the cache; the caller holds
+    /// `lock_images(true)`.
     pub async fn load(&self, archive: &Path) -> Result<(), String> {
         let _ = std::fs::create_dir_all(&self.home);
         let path = archive.to_string_lossy();
@@ -511,18 +586,18 @@ impl Executor for Microsandbox {
         h
     }
 
-    async fn resolve_image(&self, image: &str) -> Result<ImageCheck, String> {
-        if self.inspect(image).await?.is_some() {
-            return Ok(ImageCheck::Present(image.to_string()));
-        }
-        let Some((name, pin)) = tagged_pin(image) else {
-            return Ok(ImageCheck::Missing);
-        };
-        Ok(match self.inspect(name).await? {
-            Some(held) if held.is(pin) => ImageCheck::Present(name.to_string()),
-            Some(held) => ImageCheck::Other(held.config_digest),
-            None => ImageCheck::Missing,
-        })
+    async fn resolve_image(
+        &self,
+        image: &str,
+        log: &mpsc::Sender<Vec<u8>>,
+    ) -> Result<(ImageCheck, ImageLock), String> {
+        let lock = self
+            .lock_images(false, || {
+                let note = "[branvil] waiting for an image pull or load to finish\n";
+                let _ = log.try_send(note.as_bytes().to_vec());
+            })
+            .await?;
+        Ok((self.check_image(image).await?, lock))
     }
 
     async fn run(
@@ -589,6 +664,7 @@ impl Executor for Microsandbox {
             pending: Vec::new(),
             log: &log,
         };
+        let mut image_lock = Some(job.image_lock);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return Outcome::StartupFailure(format!("cannot start msb: {e}")),
@@ -614,7 +690,13 @@ impl Executor for Microsandbox {
         let mut stop: Option<Outcome> = None;
         while out_open || err_open {
             tokio::select! {
-                _ = tail.tick() => job_log.read_from(&mut output).await,
+                _ = tail.tick() => {
+                    job_log.read_from(&mut output).await;
+                    // The commands run in the VM: msb has picked the image.
+                    if job_log.started {
+                        drop(image_lock.take());
+                    }
+                }
                 // msb's own words (the job's output is in the log file).
                 n = stdout.read(&mut out_buf), if out_open => match n {
                     Ok(0) | Err(_) => out_open = false,
@@ -644,6 +726,8 @@ impl Executor for Microsandbox {
                 }
             }
         }
+        // Started or not, the VM is past picking an image.
+        drop(image_lock);
         let outcome = match stop {
             Some(o) => {
                 // Killing `msb run` stops the VM (its watchdog watches the
@@ -744,16 +828,158 @@ mod tests {
         assert_eq!(i.pinned(), "docker.io/library/alpine@sha256:index");
     }
 
+    /// Writes an executable script. On Unix a child process writes it: a
+    /// descriptor of it open for writing here could pass into a process that
+    /// another test forks meanwhile, and running the script would then fail
+    /// with "text file busy".
+    fn write_script(path: &Path, body: &str) {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            let mut child = std::process::Command::new("/bin/sh")
+                .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+                .arg(path)
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(body.as_bytes()).unwrap();
+            drop(stdin);
+            assert!(child.wait().unwrap().success());
+        }
+        #[cfg(not(unix))]
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// An msb whose cache holds `img:dev` as the digest in `$MSB_HOME/fake/tag`:
+    /// `load` writes the archive's content there, `run` notes the digest it
+    /// started, writes the start marker, and runs until `fake/done` exists.
+    #[cfg(unix)]
+    const FAKE_MSB: &str = r#"#!/bin/sh
+state="$MSB_HOME/fake"
+case "$1" in
+image)
+  [ "$5" = "img:dev" ] || exit 1
+  printf '{"reference":"img:dev","digest":"sha256:m","config":{"digest":"%s"}}' "$(cat "$state/tag")" ;;
+load)
+  cp "$4" "$state/tag" ;;
+run)
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = "--mount-dir" ] && case "$a" in *:/.branvil-log) log="${a%:/.branvil-log}" ;; esac
+    prev="$a"
+  done
+  cat "$state/tag" > "$state/ran"
+  printf '\036branvil:started\n' >> "$log/out"
+  while [ ! -f "$state/done" ]; do sleep 0.05; done ;;
+esac
+"#;
+
+    /// msb runs a loaded image by its tag, so a load that re-points the tag
+    /// waits for a job that checked it until the job's VM has started (and
+    /// not for the rest of the job), and a job's check waits for a load.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_load_waits_until_a_job_that_checked_the_tag_has_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let msb = root.join("msb");
+        write_script(&msb, FAKE_MSB);
+        let home = root.join("home");
+        let state = home.join("fake");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("tag"), "sha256:a").unwrap();
+        let archive = root.join("b.tar");
+        std::fs::write(&archive, "sha256:b").unwrap();
+        // The runner and the service: two users of one cache.
+        let cache = |name: &str| Microsandbox::new(Msb::Found(msb.clone()), home.clone(), name);
+        let (runner, service) = (cache("t"), cache("service"));
+
+        let (log, _logs) = mpsc::channel(64);
+        let (check, image_lock) = runner
+            .resolve_image("img:dev@sha256:a", &log)
+            .await
+            .unwrap();
+        assert_eq!(check, ImageCheck::Present("img:dev".into()));
+        let loading = tokio::spawn(async move {
+            let _lock = service.lock_images(true, || {}).await?;
+            service.load(&archive).await
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!loading.is_finished(), "the load waits for the checked job");
+
+        let (work, log_dir) = (root.join("work"), root.join("log"));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let job = JobDef {
+            name: "j".into(),
+            image: "img:dev@sha256:a".into(),
+            commands: vec![],
+            timeout_secs: 60,
+            cpus: 1,
+            memory_mib: 256,
+            artifacts: vec![],
+            cache: None,
+        };
+        let (_cancel, cancel) = watch::channel(false);
+        let running = tokio::spawn(async move {
+            let job = JobRun {
+                attempt_id: "a1",
+                job: &job,
+                image: "img:dev",
+                image_lock,
+                work: &work,
+                log_dir: &log_dir,
+                network: false,
+                env: vec![],
+            };
+            runner.run(job, log, cancel).await
+        });
+        tokio::time::timeout(Duration::from_secs(10), loading)
+            .await
+            .expect("the load goes ahead once the VM has started")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(state.join("ran")).unwrap(),
+            "sha256:a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state.join("tag")).unwrap(),
+            "sha256:b"
+        );
+        assert!(!running.is_finished(), "the job still runs");
+        std::fs::write(state.join("done"), "").unwrap();
+        assert_eq!(running.await.unwrap(), Outcome::Exited(0));
+
+        // While a load holds the cache, a job's check waits and says so; the
+        // wait ends with its future (a cancelled job).
+        let (runner, service) = (cache("t"), cache("service"));
+        let load = service.lock_images(true, || {}).await.unwrap();
+        let (log, mut logs) = mpsc::channel(64);
+        let waited = tokio::time::timeout(
+            Duration::from_millis(500),
+            runner.resolve_image("img:dev", &log),
+        )
+        .await;
+        assert!(waited.is_err(), "the check waits for the load");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), logs.recv())
+                .await
+                .expect("the job's log tells it waits")
+                .unwrap(),
+            b"[branvil] waiting for an image pull or load to finish\n"
+        );
+        drop(load);
+        let (check, _lock) = runner.resolve_image("img:dev", &log).await.unwrap();
+        assert_eq!(check, ImageCheck::Present("img:dev".into()));
+    }
+
     #[test]
     fn a_missing_msb_is_reported_not_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("msb");
-        std::fs::write(&fake, "#!/bin/sh\necho 'msb 0.0.1'\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_script(&fake, "#!/bin/sh\necho 'msb 0.0.1'\n");
         // The configured candidate has the wrong version; whatever else is
         // found must report exactly the pinned version.
         match resolve_msb(Some(&fake)) {
