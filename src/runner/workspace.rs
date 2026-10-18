@@ -208,6 +208,10 @@ fn tree_size(path: &Path) -> u64 {
 
 const USED: &str = ".branvil-used";
 
+fn record_use(entry: &Path, used: SystemTime) -> io::Result<()> {
+    fs::File::create(entry.join(USED))?.set_modified(used)
+}
+
 /// Creates the missing parent directories of `rel` below `root`, refusing a
 /// symbolic link anywhere on the way.
 fn make_parents(root: &Path, rel: &str) -> io::Result<()> {
@@ -249,7 +253,7 @@ pub fn restore(
                 copy_tree(&src, &work.join(rel))?;
             }
         }
-        fs::File::create(entry.join(USED))?.set_modified(SystemTime::now())?;
+        record_use(&entry, SystemTime::now())?;
         return Ok(Some(key.clone()));
     }
     Ok(None)
@@ -264,6 +268,17 @@ pub fn save(
     work: &Path,
     max_bytes: u64,
 ) -> io::Result<u64> {
+    save_with_clock(cache_root, key, cache, work, max_bytes, SystemTime::now)
+}
+
+fn save_with_clock(
+    cache_root: &Path,
+    key: &str,
+    cache: &CacheDef,
+    work: &Path,
+    max_bytes: u64,
+    now: impl FnOnce() -> SystemTime,
+) -> io::Result<u64> {
     fs::create_dir_all(cache_root)?;
     let tmp = cache_root.join(format!(".{key}.{}", crate::util::random_secret::<6>()));
     let mut total = 0;
@@ -273,15 +288,15 @@ pub fn save(
         }
     }
     fs::create_dir_all(&tmp)?;
-    fs::File::create(tmp.join(USED))?;
+    record_use(&tmp, now())?;
     let entry = cache_root.join(key);
     let _ = fs::remove_dir_all(&entry);
     fs::rename(&tmp, &entry)?;
-    evict(cache_root, max_bytes)?;
+    evict(cache_root, max_bytes, &entry)?;
     Ok(total)
 }
 
-fn evict(cache_root: &Path, max_bytes: u64) -> io::Result<()> {
+fn evict(cache_root: &Path, max_bytes: u64, saved_entry: &Path) -> io::Result<()> {
     let mut entries: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
     for e in fs::read_dir(cache_root)?.flatten() {
         let path = e.path();
@@ -293,7 +308,9 @@ fn evict(cache_root: &Path, max_bytes: u64) -> io::Result<()> {
             .unwrap_or(SystemTime::UNIX_EPOCH);
         entries.push((used, tree_size(&path), path));
     }
-    entries.sort();
+    // A save is the latest use when timestamps tie (e.g. on a coarse
+    // filesystem). Other ties are broken by key, independently of size.
+    entries.sort_by(|a, b| (a.0, a.2 == saved_entry, &a.2).cmp(&(b.0, b.2 == saved_entry, &b.2)));
     let mut total: u64 = entries.iter().map(|e| e.1).sum();
     for (_, size, path) in entries {
         if total <= max_bytes {
@@ -394,8 +411,102 @@ mod tests {
         fs::write(fresh.join("Cargo.lock"), "v2").unwrap();
         let k2 = cache_key("acme/demo", &job, &cache, "protected", &fresh);
         assert_ne!(k1, k2, "key files are in the key");
-        // A limit below one entry keeps only the newest.
+        // A limit that fits only one entry keeps the newest.
         save(&root, &k2, &cache, &fresh, 8).unwrap();
         assert!(!root.join(&k1).exists());
+    }
+
+    #[test]
+    fn cache_eviction_breaks_timestamp_ties_by_key_not_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let used = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for (key, size) in [("a", 4), ("b", 1), ("c", 2)] {
+            let entry = root.join(key);
+            fs::create_dir(&entry).unwrap();
+            fs::write(entry.join("data"), vec![0; size]).unwrap();
+            fs::File::create(entry.join(USED))
+                .unwrap()
+                .set_modified(used)
+                .unwrap();
+        }
+        evict(root, 6, &root.join("c")).unwrap();
+        assert!(!root.join("a").exists(), "equal timestamps evict by key");
+        assert!(root.join("b").exists());
+        assert!(root.join("c").exists());
+    }
+
+    #[test]
+    fn cache_save_after_restore_keeps_the_save_when_timestamps_tie() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("cache");
+        let work = dir.path().join("work");
+        let fresh = dir.path().join("fresh");
+        let cache = CacheDef {
+            paths: vec!["target".into()],
+            key_files: vec![],
+        };
+        fs::create_dir_all(work.join("target")).unwrap();
+        fs::create_dir(&fresh).unwrap();
+        fs::write(work.join("target/object"), b"object").unwrap();
+        save(&root, "z-old", &cache, &work, 100).unwrap();
+        assert_eq!(
+            restore(&root, &["z-old".into()], &cache, &fresh).unwrap(),
+            Some("z-old".into())
+        );
+        // Fix the restored entry's use time so the test never depends on
+        // how far the wall clock advances between restore and save.
+        let restored_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::open(root.join("z-old").join(USED))
+            .unwrap()
+            .set_modified(restored_at)
+            .unwrap();
+
+        // Simulate a coarse clock: the save has exactly the restore's
+        // timestamp, and its key sorts before the restored entry's key.
+        assert_eq!(
+            save_with_clock(&root, "a-new", &cache, &fresh, 6, || restored_at).unwrap(),
+            6
+        );
+        assert!(!root.join("z-old").exists());
+        assert_eq!(
+            fs::read(root.join("a-new/paths/target/object")).unwrap(),
+            b"object"
+        );
+        assert_eq!(
+            fs::metadata(root.join("a-new").join(USED))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            restored_at,
+            "save explicitly records the same clock as restore"
+        );
+
+        // The saved entry is still evicted when it cannot fit the budget.
+        evict(&root, 5, &root.join("a-new")).unwrap();
+        assert!(!root.join("a-new").exists());
+    }
+
+    #[test]
+    fn cache_eviction_orders_distinct_timestamps_before_keys_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for (key, size, seconds) in [("a", 1, 3), ("b", 2, 2), ("c", 4, 1)] {
+            let entry = root.join(key);
+            fs::create_dir(&entry).unwrap();
+            fs::write(entry.join("data"), vec![0; size]).unwrap();
+            record_use(
+                &entry,
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+            )
+            .unwrap();
+        }
+        evict(root, 6, &root.join("c")).unwrap();
+        assert!(root.join("a").exists());
+        assert!(root.join("b").exists());
+        assert!(
+            !root.join("c").exists(),
+            "timestamp precedes save preference"
+        );
     }
 }
