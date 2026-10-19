@@ -4,11 +4,11 @@
 # its tag: the version the runner's cache holds under it runs, and the jobs
 # get the runner's CPUs and memory (Settings → CI).
 #
-# A job's environment holds CI metadata only (no HOME), so Cargo's home is
-# under the work directory, where the cache can keep its registry. The cache
-# restores `target` built from other commits, while the commit's files keep
-# the commit's time: the first command makes them newer than any restored
-# output, so Cargo rebuilds this crate and reuses only the dependencies.
+# Cargo's home is under the work directory, where the cache can keep its
+# registry. The cache restores `target` built from other commits, which can
+# look newer than the checked-out files: the first command makes them newer
+# than any restored output, so Cargo rebuilds this crate and reuses only the
+# dependencies.
 # As this crate is rebuilt anyway, incremental data would only fill the
 # cache (CARGO_INCREMENTAL=0).
 #

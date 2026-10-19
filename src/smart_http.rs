@@ -143,7 +143,7 @@ async fn run_backend(
         .await
         .map_err(|_| AppError::unavailable("Git is shutting down."))?;
     let layout = app.git.layout().clone();
-    let mut cmd = git::base_command(&layout);
+    let mut cmd = git::base_command(&layout.git_config());
     let header_text = |name: header::HeaderName| {
         headers
             .get(name)

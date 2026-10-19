@@ -26,7 +26,8 @@ real service from this repository (see "Development"). See
 
 - Rust 1.90 or later (developed with 1.96, edition 2024)
 - Git 2.28 or later on `PATH` (the service runs `git http-backend`,
-  `update-ref`, `diff`, …; developed with 2.54)
+  `update-ref`, `diff`, …, and the CI runner checks the source out with it;
+  developed with 2.54)
 
 Verified on macOS 26 (arm64). Linux and Windows are not verified.
 
@@ -256,11 +257,13 @@ the tag to write as `image`); a repository's CI tab allows its jobs the
 network. The same settings are `runner = "auto"` and `[ci.executor]` in
 `branvil.toml`.
 
-Each job runs in its own microVM with only the commit's tree mounted at
-`/work`, no network (the owner may allow public destinations per repository
-with `ci_network`), the CPUs and memory of the runner's `[ci.executor]`
-settings, and its `timeout_secs` capped by the runner's time limit (which is
-the limit of a job that gives none). Without a runner, jobs end
+Each job runs in its own microVM as a user that is not root (uid 1000), with
+a Git checkout of the commit (its history and tags, no remote) mounted at
+`/work`, `/tmp` on a disk of its own rather than in memory, no network (the
+owner may allow public destinations per repository with `ci_network`), the
+CPUs and memory of the runner's `[ci.executor]` settings, and its
+`timeout_secs` capped by the runner's time limit (which is the limit of a
+job that gives none). Without a runner, jobs end
 `startup_failure` after two minutes; nothing ever runs on the host. Logs,
 artifacts, retry and cancel, states, limits, and the trust model:
 [`docs/ci.md`](docs/ci.md).

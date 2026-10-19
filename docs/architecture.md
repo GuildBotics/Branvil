@@ -33,7 +33,7 @@ branvil runner ── runner API (HTTP) ─ ci ─ redb queue · ci/ files      
 | `hooks.rs` | Branvil-owned hook scripts and the `branvil hook` entry point they exec |
 | `refs.rs` | the ref-change boundary: snapshot recording, journal, startup recovery, push policy |
 | `ci/` | CI in the service (see below and `docs/ci.md`): `pipeline` (schema), `queue` (runs, attempts, every state change), `files` (logs, artifacts, retention), `api` (job and runner endpoints), `supervise` (`[ci] runner = "auto"`) |
-| `runner/` | `branvil runner`: the claim/heartbeat/finish loop, `executor` (the `Executor` trait and the microsandbox implementation over the `msb` CLI), `workspace` (source unpacking, artifacts without links, dependency cache), `zip` |
+| `runner/` | `branvil runner`: the claim/heartbeat/finish loop, `executor` (the `Executor` trait and the microsandbox implementation over the `msb` CLI), `workspace` (source checkout, artifacts without links, dependency cache), `zip` |
 | `upstream/` | the upstream code host: the provider boundary (`host.rs`, `github.rs`), members' accounts, following the default branch, publishing pull requests, carrying changes both ways, the host's check runs (see below) |
 | `backup.rs` | `POST /admin/backup` (online, consistent) and the offline `branvil restore` (`docs/backup-restore.md`) |
 | `tunnel.rs` | `branvil tunnel`: the system `ssh -N -L` forward to the Hub machine, restarted with backoff |
@@ -149,8 +149,8 @@ impl Ci {
   hour
   retention deletes old logs and artifacts. At start it removes orphaned files.
 - The runner API (`src/ci/api.rs`) is the runner's only access: the source
-  tarball is produced by the service (`git archive`, a Smart HTTP transfer
-  permit, the transfer timeout), logs and artifacts are written to files
+  bundle is produced by the service (`git pack-objects` behind a bundle
+  header, a Smart HTTP transfer permit, the transfer timeout), logs and artifacts are written to files
   before they are recorded, and every call checks the lease in the same
   transaction that changes the attempt.
 

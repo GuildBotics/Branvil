@@ -1,8 +1,9 @@
 //! `branvil runner`: the CI runner, a separate process from the service. It
-//! claims attempts over the runner API, fetches the commit as a tarball made
-//! by the service (it never touches repositories or the database), runs the
-//! job in a microVM, streams the log, uploads artifacts, and reports the
-//! conclusion, renewing its lease while it works. See `docs/ci.md`.
+//! claims attempts over the runner API, checks the commit out of a Git bundle
+//! made by the service (it never touches the service's repositories or the
+//! database), runs the job in a microVM, streams the log, uploads artifacts,
+//! and reports the conclusion, renewing its lease while it works. See
+//! `docs/ci.md`.
 
 pub mod executor;
 pub mod workspace;
@@ -215,7 +216,9 @@ impl Api {
         resp.json().await.map(Some).map_err(Self::net)
     }
 
-    pub async fn source(&self, c: &Claim) -> Result<Vec<u8>, ApiError> {
+    /// Writes the commit's Git bundle to `dest`.
+    pub async fn source(&self, c: &Claim, dest: &Path) -> Result<(), ApiError> {
+        use tokio::io::AsyncWriteExt;
         let resp = self
             .http
             .get(self.at(&format!("/runner/attempts/{}/source", c.attempt_id)))
@@ -224,12 +227,13 @@ impl Api {
             .send()
             .await
             .map_err(Self::net)?;
-        Ok(Self::check(resp)
-            .await?
-            .bytes()
-            .await
-            .map_err(Self::net)?
-            .to_vec())
+        let mut resp = Self::check(resp).await?;
+        let io = |e: std::io::Error| ApiError::Other(format!("cannot write the source: {e}"));
+        let mut file = tokio::fs::File::create(dest).await.map_err(io)?;
+        while let Some(chunk) = resp.chunk().await.map_err(Self::net)? {
+            file.write_all(&chunk).await.map_err(io)?;
+        }
+        file.flush().await.map_err(io)
     }
 
     /// Returns whether the service asks the runner to stop.
@@ -669,15 +673,16 @@ impl Runner {
                     Some(format!("Cannot create the work directory: {e}")),
                 );
             }
-            match self.api.source(c).await {
-                Ok(tar) => {
-                    let w = work.clone();
-                    let unpacked =
-                        tokio::task::spawn_blocking(move || workspace::unpack(&tar, &w)).await;
-                    if !matches!(unpacked, Ok(Ok(()))) {
+            let bundle = dir.join("source.bundle");
+            match self.api.source(c, &bundle).await {
+                Ok(()) => {
+                    let checked_out =
+                        workspace::checkout(&bundle, &work, &root.join("gitconfig")).await;
+                    let _ = std::fs::remove_file(&bundle);
+                    if let Err(e) = checked_out {
                         return (
                             "startup_failure",
-                            Some("Unpacking the source failed.".into()),
+                            Some(format!("Checking out the source failed: {e}")),
                         );
                     }
                 }
@@ -899,11 +904,33 @@ async fn upload_log(api: Api, c: Claim, mut rx: mpsc::Receiver<Vec<u8>>) {
     }
 }
 
+/// Runs the test `test` (its full path) again in a child process with `env`
+/// added and `BRANVIL_TEST_CHILD` set, for what a test cannot change in its
+/// own process: Git and the runner read the environment. Fails with the
+/// child's output unless it passed.
+#[cfg(test)]
+pub(crate) fn pass_in_child(test: &str, env: &[(&str, &std::ffi::OsStr)]) {
+    let (_, test) = test.split_once("::").expect("a test path");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env("BRANVIL_TEST_CHILD", "1")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && text.contains("1 passed"),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[cfg(test)]
 mod tests {
     //! The runner loop against an in-process service, with a fake executor
-    //! that interprets a few words (`echo`, `write`, `exit`, `wait`) and
-    //! never starts a process.
+    //! that interprets a few words (`echo`, `write`, `exit`, `wait`, and
+    //! `git`, which runs the host's Git in the work directory) and never
+    //! starts a VM.
 
     use super::*;
     use executor::ImageLock;
@@ -969,6 +996,9 @@ mod tests {
                         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
                         std::fs::write(p, content).unwrap();
                     }
+                    ["git", args @ ..] => {
+                        let _ = log.send(git(job.work, args).into_bytes()).await;
+                    }
                     ["exit", code] => return Outcome::Exited(code.parse().unwrap()),
                     ["wait"] => loop {
                         if cancel.changed().await.is_err() || *cancel.borrow() {
@@ -983,7 +1013,8 @@ mod tests {
         async fn sweep(&self) {}
     }
 
-    fn git(dir: &Path, args: &[&str]) {
+    /// Runs Git isolated from the user's configuration; returns its output.
+    fn git(dir: &Path, args: &[&str]) -> String {
         let home = dir.join("..").join("git-home");
         std::fs::create_dir_all(&home).unwrap();
         let global = home.join("gitconfig");
@@ -1008,6 +1039,7 @@ mod tests {
             "git {args:?}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        String::from_utf8(out.stdout).unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1076,15 +1108,24 @@ mod tests {
         std::fs::create_dir_all(work.join(".branvil")).unwrap();
         std::fs::write(
             work.join(".branvil/ci.toml"),
-            "[[jobs]]\nname = \"ok\"\nimage = \"alpine\"\ncommands = [\"echo hello from the job\", \"write out/r.txt report\"]\nartifacts = [{name = \"report\", paths = [\"out/\"]}]\n\n\
+            "[[jobs]]\nname = \"ok\"\nimage = \"alpine\"\ncommands = [\"echo hello from the job\", \"write out/r.txt report\", \"git rev-parse HEAD\", \"git describe --tags\", \"git tag --list\", \"git ls-files\", \"git config --list --local\"]\nartifacts = [{name = \"report\", paths = [\"out/\"]}]\n\n\
              [[jobs]]\nname = \"slow\"\nimage = \"alpine\"\ncommands = [\"wait\"]\ntimeout_secs = 5000\n",
         )
         .unwrap();
         git(&work, &["init", "-q", "-b", "main"]);
         git(&work, &["add", "."]);
         git(&work, &["commit", "-qm", "pipeline"]);
+        // A tag of the commit, and one of a commit it does not reach.
+        git(&work, &["tag", "-a", "v1", "-m", "v1"]);
+        git(&work, &["checkout", "-qb", "side"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "later"]);
+        git(&work, &["tag", "later"]);
+        git(&work, &["checkout", "-q", "main"]);
         let bare = layout.repo_dir("acme/demo");
-        git(&work, &["push", "-q", bare.to_str().unwrap(), "main"]);
+        git(
+            &work,
+            &["push", "-q", bare.to_str().unwrap(), "main", "v1", "later"],
+        );
         let repo = app
             .store
             .read(|r| crate::domain::repo_by_path(r, "acme/demo"))
@@ -1149,6 +1190,13 @@ mod tests {
             "{log}"
         );
         assert!(log.contains("hello from the job"), "{log}");
+        // The work directory is a checkout of the commit with its history
+        // and the tags it reaches, and without a remote.
+        assert!(
+            log.contains(&format!("\n{sha}\nv1\nv1\n.branvil/ci.toml\n")),
+            "{log}"
+        );
+        assert!(!log.contains("later") && !log.contains("remote."), "{log}");
         assert!(
             log.contains("artifact report uploaded (1 file(s))"),
             "{log}"

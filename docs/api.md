@@ -632,7 +632,9 @@ kind `runner` (created by `branvil runner register`); any other member gets
   own CPUs, memory, and time limit.
   The executor state is shown in the diagnostics; a runner whose executor is
   unavailable still claims and concludes `startup_failure`.
-- `GET /attempts/{id}/source` → `application/x-tar` of the commit (`git archive`).
+- `GET /attempts/{id}/source` → `application/x-git-bundle`: a v2 Git bundle of
+  the commit as `HEAD`, with its history and the tags (`refs/tags/*`) whose
+  commits it reaches.
 - `POST /attempts/{id}/heartbeat` `{"lease"}` → `{"cancel": false, "expires_at"}`
   (renews the lease).
 - `POST /attempts/{id}/log` raw bytes (at most 1 MiB per request) appended to

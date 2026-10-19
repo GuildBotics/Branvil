@@ -426,7 +426,7 @@ Conditions:
 | Machine | Apple M1 Pro, 16 GiB, macOS 26.6.2 (build 25G83) |
 | Build | `branvil` debug build (`cargo test`); `msb` is the GuildBotics-deployed release binary |
 | Image | `docker.io/library/alpine@sha256:5291449c…8fa8` (3.9 MiB, already in Branvil's image cache) |
-| Job | 1 vCPU, 512 MiB, network off, the commit's tree (two files) mounted at `/work` |
+| Job | 1 vCPU, 512 MiB, network off, the commit's tree (two files) mounted at `/work`, run as root with `/tmp` in memory |
 | Harness | `BRANVIL_REAL_EXECUTOR=1 cargo test --test main real_executor:: -- --nocapture` (three jobs of one run, one after another: a probe job, an `exit 3` job, a `sleep` job stopped by a 5 s timeout) |
 | Sampling | `ps -o rss` every 250 ms while the jobs run (peaks can be missed between samples) |
 
@@ -444,7 +444,11 @@ Results of seven runs on 2026-10-14:
 So one running job costs about 170 MiB of host memory (VM process plus its
 `msb run` parent) for a 512 MiB guest running a shell, on top of the runner's
 20 MiB. A job that touches more guest memory raises the VM figure up to the memory
-every job gets (`ci.executor.max_memory_mib`). Not measured yet: a release build of the runner, other images,
+every job gets (`ci.executor.max_memory_mib`). These runs predate jobs getting a
+Git checkout at `/work`, a non-root user, and `/tmp` on a disk volume of their
+own (`docs/ci.md`, "The job's environment"), and the harness's fourth job (a
+Git image, run twice) that came with them; they were not measured again. Not
+measured yet: a release build of the runner, other images,
 jobs with real workloads, Linux and Windows hosts, and the service's own CPU
 and memory during CI.
 

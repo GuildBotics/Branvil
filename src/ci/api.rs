@@ -342,6 +342,9 @@ async fn leased(app: &Shared, id: &str, lease: &str) -> AppResult<Attempt> {
         .await
 }
 
+/// The commit as a Git bundle: its history, and the tags whose commits it
+/// reaches, with the commit as the bundle's `HEAD` (a v2 bundle is its
+/// header of refs and a pack of the objects they reach).
 async fn source(
     State(app): State<Shared>,
     c: Caller,
@@ -351,15 +354,43 @@ async fn source(
     require_runner(&app, &c)?;
     let a = leased(&app, &id, &lease_of(&headers)?).await?;
     let dir = app.git.repo_dir(&a.repo_path);
-    let mut cmd = crate::git::base_command(&app.layout);
+    let merged = format!("--merged={}", a.sha);
+    let tags = app
+        .git
+        .run_ok(
+            Some(&dir),
+            &[
+                "for-each-ref",
+                &merged,
+                "--format=%(objectname) %(refname)",
+                "refs/tags",
+            ],
+        )
+        .await?;
+    let mut header = format!("# v2 git bundle\n{} HEAD\n", a.sha);
+    let mut tips = format!("{}\n", a.sha);
+    for line in tags.lines() {
+        header.push_str(&format!("{line}\n"));
+        tips.push_str(&format!("{}\n", line.split(' ').next().unwrap_or_default()));
+    }
+    header.push('\n');
+    let mut cmd = crate::git::base_command(&app.layout.git_config());
     cmd.arg("--git-dir")
         .arg(&dir)
-        .args(["archive", "--format=tar", &a.sha])
+        .args([
+            "pack-objects",
+            "--revs",
+            "--stdout",
+            "-q",
+            "--delta-base-offset",
+        ])
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let mut child = cmd
         .spawn()
-        .map_err(|e| AppError::internal(format!("cannot start git archive: {e}")))?;
+        .map_err(|e| AppError::internal(format!("cannot start git pack-objects: {e}")))?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
     let permits = app.transfers.clone();
     let timeout = std::time::Duration::from_secs(app.config.limits.git_http_timeout_secs);
@@ -368,6 +399,12 @@ async fn source(
         use tokio::io::AsyncReadExt;
         let _permit = permits.acquire_owned().await;
         let work = async {
+            // pack-objects reads every tip before it writes.
+            stdin.write_all(tips.as_bytes()).await?;
+            drop(stdin);
+            if tx.send(Ok(header.into())).await.is_err() {
+                return Ok(());
+            }
             let mut out = stdout;
             let mut buf = vec![0u8; 64 << 10];
             loop {
@@ -386,14 +423,14 @@ async fn source(
             let status = child.wait().await?;
             if !status.success() {
                 let _ = tx
-                    .send(Err(std::io::Error::other("git archive failed")))
+                    .send(Err(std::io::Error::other("git pack-objects failed")))
                     .await;
             }
             Ok::<_, std::io::Error>(())
         };
         if tokio::time::timeout(timeout, work).await.is_err() {
             let _ = tx
-                .send(Err(std::io::Error::other("git archive timed out")))
+                .send(Err(std::io::Error::other("git pack-objects timed out")))
                 .await;
         }
     });
@@ -402,7 +439,7 @@ async fn source(
     ));
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("application/x-tar"),
+        HeaderValue::from_static("application/x-git-bundle"),
     );
     Ok(resp)
 }
