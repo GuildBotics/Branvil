@@ -220,7 +220,7 @@ fn set_ci_config(w: &World, values: &[(&str, i64)]) {
 }
 
 #[tokio::test]
-async fn a_head_runs_the_pipeline_of_its_base_and_reports_logs_and_artifacts() {
+async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
     let w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;
     land(
@@ -234,9 +234,10 @@ async fn a_head_runs_the_pipeline_of_its_base_and_reports_logs_and_artifacts() {
     assert_eq!(runner.drain("success").await, 1);
     set_required(&w, &["test"]).await;
 
-    // The head tries to drop its own check; the pipeline comes from the base.
+    // The head changes its pipeline; its own pipeline runs.
     sync_main(&w);
-    std::fs::write(w.work.join(".branvil/ci.toml"), pipeline(&["lint"])).unwrap();
+    let changed = pipeline(&["test"]).replace("echo test", "echo changed");
+    std::fs::write(w.work.join(".branvil/ci.toml"), changed).unwrap();
     git_ok(&w.work, &["add", ".branvil/ci.toml"]);
     let head = w.push_change("feature", "f.txt", "one\n");
     let p = w.open_pull("feature", json!([])).await;
@@ -250,7 +251,7 @@ async fn a_head_runs_the_pipeline_of_its_base_and_reports_logs_and_artifacts() {
     let c = runner.claim().await.unwrap();
     assert_eq!(c["sha"], head.as_str());
     assert_eq!(c["job"]["name"], "test");
-    assert_eq!(c["job"]["commands"], json!(["echo test"]));
+    assert_eq!(c["job"]["commands"], json!(["echo changed"]));
     assert_eq!(c["repo"], REPO);
     assert_eq!(c["network"], false);
     assert_eq!(c["cache_scope"], "branch:feature");
@@ -411,9 +412,208 @@ async fn a_head_runs_the_pipeline_of_its_base_and_reports_logs_and_artifacts() {
         )
         .await;
     assert_eq!(st, 200, "{v}");
+    // The fast-forwarded main keeps the head's run: nothing runs again.
+    assert!(runner.claim().await.is_none());
     let diag = w.server.ok("/admin/diagnostics", &w.owner).await;
     assert_eq!(diag["runner"]["state"], "ready", "{diag}");
     assert_eq!(diag["runner"]["runners"][0]["name"], "runner1");
+}
+
+#[tokio::test]
+async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upgrade() {
+    let mut w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test"]))],
+        None,
+    )
+    .await;
+    assert_eq!(runner.drain("success").await, 1);
+    set_required(&w, &["test"]).await;
+    sync_main(&w);
+    let changed = pipeline(&["test"]).replace("echo test", "echo changed");
+    std::fs::write(w.work.join(".branvil/ci.toml"), changed).unwrap();
+    git_ok(&w.work, &["add", ".branvil/ci.toml"]);
+    let head = w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let base = p["base_sha"].as_str().unwrap().to_string();
+    let c = runner.claim().await.unwrap();
+    runner.finish(&c, "success").await;
+    let old_attempt = c["attempt_id"].as_str().unwrap().to_string();
+
+    // What version 7 recorded for the head: the base's pipeline, and a
+    // successful attempt of the base's job.
+    w.server.stop();
+    let db = w.server.data.join("branvil.redb");
+    let base_run = records(&db, "ci_runs")
+        .into_iter()
+        .find(|r| r["sha"] == base.as_str())
+        .unwrap();
+    let base_job = base_run["pipeline"]["jobs"][0].clone();
+    edit_records(&db, "ci_runs", |r| {
+        if r["sha"] == head.as_str() {
+            r["pipeline"] = base_run["pipeline"].clone();
+        }
+    });
+    edit_records(&db, "ci_attempts", |a| {
+        if a["sha"] == head.as_str() {
+            a["job"] = base_job.clone();
+        }
+    });
+    // A run of a commit that is no longer in the repository.
+    let gone = "1".repeat(40);
+    let mut lost = base_run.clone();
+    lost["sha"] = json!(gone);
+    lost["branches"] = json!([]);
+    lost["superseded_by"] = json!(base);
+    let repo_id = base_run["repo"].as_str().unwrap();
+    insert_record(&db, "ci_runs", &key_of(&[repo_id, &gone]), &lost);
+    as_schema_7(&db, |r| (r["sha"] == head.as_str()).then(|| base.clone()));
+    let before = tables(&db);
+
+    // The service does not open it; `admin upgrade` does, keeping a copy.
+    let data = w.server.data.clone();
+    let admin = |what: &str| {
+        let out = std::process::Command::new(BIN)
+            .args(["admin", what, "--data-dir"])
+            .arg(&data)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    };
+    let copies = || {
+        std::fs::read_dir(&data)
+            .unwrap()
+            .filter(|e| {
+                let name = e.as_ref().unwrap().file_name();
+                name.to_string_lossy().starts_with("branvil-schema-")
+            })
+            .count()
+    };
+    let (ok, text) = admin("check");
+    assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
+    // A Git failure fails the upgrade before anything is written: a pipeline
+    // the commit has that Git cannot read, a repository Git cannot open.
+    let repo_dir = data.join("repos/acme/demo.git");
+    let blob = git_ok(
+        &repo_dir,
+        &["rev-parse", &format!("{head}:.branvil/ci.toml")],
+    );
+    let blob = blob.trim();
+    let loose = repo_dir.join("objects").join(&blob[..2]).join(&blob[2..]);
+    let aside = data.join("blob-aside");
+    std::fs::rename(&loose, &aside).unwrap();
+    let (ok, text) = admin("upgrade");
+    assert!(!ok && text.contains(REPO), "{text}");
+    assert_eq!(tables(&db), before);
+    assert_eq!(copies(), 0);
+    std::fs::rename(&aside, &loose).unwrap();
+    let (repos, away) = (data.join("repos"), data.join("repos-away"));
+    std::fs::rename(&repos, &away).unwrap();
+    let (ok, text) = admin("upgrade");
+    assert!(!ok && text.contains(REPO), "{text}");
+    assert_eq!(tables(&db), before);
+    assert_eq!(copies(), 0);
+    std::fs::rename(&away, &repos).unwrap();
+    let (ok, text) = admin("upgrade");
+    assert!(ok && text.contains("1 could not be verified"), "{text}");
+    assert_eq!(copies(), 1);
+    let copy = text
+        .lines()
+        .find_map(|l| l.strip_prefix("the database as it was: "))
+        .unwrap();
+    let copy = std::path::Path::new(copy);
+    assert_eq!(tables(copy), before);
+    // Only the runs and the version changed: each run lost its source, the
+    // head's took its own pipeline, and the gone commit's cannot be verified.
+    let (mut after, mut expected) = (tables(&db), before.clone());
+    for t in ["ci_runs", "meta"] {
+        after.remove(t);
+        expected.remove(t);
+    }
+    assert_eq!(after, expected);
+    let upgraded = records(&db, "ci_runs");
+    let original = records(copy, "ci_runs");
+    assert_eq!(upgraded.len(), original.len());
+    for (mut old, new) in original.into_iter().zip(upgraded) {
+        assert!(old.as_object_mut().unwrap().remove("source").is_some());
+        if old["sha"] == head.as_str() {
+            assert_eq!(
+                new["pipeline"]["jobs"][0]["commands"],
+                json!(["echo changed"])
+            );
+            old["pipeline"] = new["pipeline"].clone();
+        }
+        if old["sha"] == gone.as_str() {
+            assert_eq!(new["pipeline"]["state"], "invalid", "{new}");
+            assert!(
+                new["pipeline"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("could not verify"),
+                "{new}"
+            );
+            old["pipeline"] = new["pipeline"].clone();
+        }
+        assert_eq!(old, new);
+    }
+    let (ok, text) = admin("upgrade");
+    assert!(
+        ok && text.contains("already has schema version 8"),
+        "{text}"
+    );
+    let (ok, text) = admin("check");
+    assert!(ok && text.contains("indexes: ok"), "{text}");
+
+    // Started again, the head runs its own pipeline: the base's success is
+    // history, not the check, and the merge waits.
+    w.restart(&[]);
+    let runner = Runner {
+        url: w.server.url.clone(),
+        token: runner.token.clone(),
+        http: reqwest::Client::new(),
+    };
+    let v = checks(&w, n).await;
+    let t = check(&v, "test");
+    assert_eq!(t["status"], "queued", "{v}");
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/merge", w.repo_path()),
+            &w.owner,
+            json!({"expected_head": head, "expected_base": base}),
+        )
+        .await;
+    assert_eq!(
+        (st.as_u16(), v["error"]["code"].as_str()),
+        (409, Some("not_mergeable")),
+        "{v}"
+    );
+    // The reconciler queues it at start.
+    let mut claimed = None;
+    for _ in 0..60 {
+        claimed = runner.claim().await;
+        if claimed.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let c = claimed.unwrap();
+    assert_eq!(c["sha"], head.as_str());
+    assert_eq!(c["job"]["commands"], json!(["echo changed"]));
+    let old = w
+        .server
+        .ok(&format!("{}/jobs/{old_attempt}", w.repo_path()), &w.ken)
+        .await;
+    assert_eq!(old["conclusion"], "success");
 }
 
 #[tokio::test]
@@ -531,7 +731,7 @@ async fn required_ci_is_never_shown_as_success_or_no_checks() {
     runner.drain("success").await;
     set_required(&w, &["test"]).await;
 
-    // An invalid pipeline on a base is a failing check, never success.
+    // A pending, failed, or cancelled required check is never success.
     sync_main(&w);
     let head = w.push_change("feature2", "g.txt", "1\n");
     let p2 = w.open_pull("feature2", json!([])).await;
@@ -625,21 +825,14 @@ async fn required_ci_is_never_shown_as_success_or_no_checks() {
         "a cancelled attempt is not handed out"
     );
 
-    // Pipeline broken on main: heads based on it get a failing pipeline check.
-    set_required(&w, &[]).await;
-    land(
-        &w,
-        "break",
-        &[(
-            ".branvil/ci.toml",
-            "[[jobs]]\nname = \"test\"\nprivileged = true\n",
-        )],
-        Some(&runner),
-    )
-    .await;
-    runner.drain("success").await;
-    set_required(&w, &["test"]).await;
+    // A head that breaks its own pipeline gets a failing pipeline check.
     sync_main(&w);
+    std::fs::write(
+        w.work.join(".branvil/ci.toml"),
+        "[[jobs]]\nname = \"test\"\nprivileged = true\n",
+    )
+    .unwrap();
+    git_ok(&w.work, &["add", ".branvil/ci.toml"]);
     w.push_change("feature3", "h.txt", "1\n");
     let p3 = w.open_pull("feature3", json!([])).await;
     let v = checks(&w, p3["number"].as_u64().unwrap()).await;
@@ -659,6 +852,48 @@ async fn required_ci_is_never_shown_as_success_or_no_checks() {
             .unwrap()
             .iter()
             .all(|c| c["conclusion"] != "success")
+    );
+
+    // A head that drops the required check from its own pipeline runs what is
+    // left, and still cannot be merged: the required check fails.
+    sync_main(&w);
+    std::fs::write(w.work.join(".branvil/ci.toml"), pipeline(&["lint"])).unwrap();
+    git_ok(&w.work, &["add", ".branvil/ci.toml"]);
+    let head4 = w.push_change("feature4", "i.txt", "1\n");
+    let p4 = w.open_pull("feature4", json!([])).await;
+    let n4 = p4["number"].as_u64().unwrap();
+    let c = runner.claim().await.unwrap();
+    assert_eq!(
+        (c["sha"].as_str(), c["job"]["name"].as_str()),
+        (Some(head4.as_str()), Some("lint"))
+    );
+    runner.finish(&c, "success").await;
+    let v = checks(&w, n4).await;
+    assert_eq!(check(&v, "lint")["conclusion"], "success");
+    let t = check(&v, "test");
+    assert_eq!(
+        (t["status"].as_str(), t["conclusion"].as_str()),
+        (Some("completed"), Some("failure"))
+    );
+    assert!(
+        t["details"]
+            .as_str()
+            .unwrap()
+            .contains("defines no job named test"),
+        "{t}"
+    );
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n4}/merge", w.repo_path()),
+            &w.owner,
+            json!({"expected_head": head4, "expected_base": p4["base_sha"]}),
+        )
+        .await;
+    assert_eq!(
+        (st.as_u16(), v["error"]["code"].as_str()),
+        (409, Some("not_mergeable")),
+        "{v}"
     );
 }
 

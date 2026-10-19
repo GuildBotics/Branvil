@@ -368,11 +368,12 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
             from.display()
         );
     }
-    if manifest.schema_version != store::SCHEMA_VERSION {
+    if ![store::SCHEMA_VERSION, crate::upgrade::FROM].contains(&manifest.schema_version) {
         bail!(
-            "the backup has schema version {}; this build restores only version {}",
+            "the backup has schema version {}; this build restores only version {} (and upgrades version {})",
             manifest.schema_version,
-            store::SCHEMA_VERSION
+            store::SCHEMA_VERSION,
+            crate::upgrade::FROM
         );
     }
     for f in &manifest.files {
@@ -443,6 +444,10 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
             bail!("{}: the restored refs differ from the manifest", repo.path);
         }
         println!("repository {}: {} refs", repo.path, refs.len());
+    }
+    if manifest.schema_version == crate::upgrade::FROM {
+        let done = crate::upgrade::upgrade(&layout, &git).await?;
+        println!("{}", store::upgrade_report(&layout.db(), &done));
     }
     for a in &manifest.account_tokens_excluded {
         println!(

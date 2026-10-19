@@ -548,14 +548,16 @@ request was published (see "Upstream").
 ```
 
 - `head_sha` / `base_sha` are `""` and `behind_by` is `null` when that branch is gone.
-- `checks` are the latest attempt of every job of the head's run (`docs/ci.md`),
+- `checks` are the latest attempt of every job of the head's run, as the run's
+  pipeline defines the job (`docs/ci.md`),
   plus entries without an `attempt_id` that say why something is missing, each
   with `details`:
   - a required check when the commit has no run yet: `status: "queued"`,
     `conclusion: null` ("No CI run is registered for this commit yet");
-  - a job of a run that waits for room in the queue: `queued`, `null`;
-  - a required check the run cannot have (no pipeline on the trusted branch,
-    an invalid pipeline, no job of that name): `completed`, `failure`;
+  - a job of a run that waits for room in the queue, or that is not queued
+    yet (the reconciler queues it): `queued`, `null`;
+  - a required check the run cannot have (no pipeline in the commit, an
+    invalid pipeline, no job of that name): `completed`, `failure`;
   - an invalid pipeline: a check named `pipeline`, `completed`, `failure`, the
     reason in `details`;
   - a job of a superseded run that never got queued: `completed`, `cancelled`.
@@ -566,9 +568,9 @@ request was published (see "Upstream").
   completed) is `success`, `failure`, `cancelled`, `timed_out`, `skipped`, or
   `startup_failure` (no runner or no usable executor; the details say which).
   Only an attempt of that exact commit can be `success`.
-- `checks_expected` is true when the head's run has a pipeline (valid or not),
-  when there is no run yet and the default branch has a pipeline, or when the
-  repository has required checks: a head without checks is then "not
+- `checks_expected` is true when the head has a pipeline (valid or not) or
+  Branvil cannot read whether it has one, or when the repository has required
+  checks: a head without checks is then "not
   registered yet", never "no checks".
 - `base_checks` counts the checks of the base tip.
 - A published pull request whose head is the commit Branvil pushed also lists
@@ -590,9 +592,11 @@ request was published (see "Upstream").
   log is read from the host with the upstream's reader (`404` when the host has
   none for it).
 - `POST /api/v1/repos/{repo}/jobs/{attempt_id}/retry` → the new
-  attempt (`200`, `status: "queued"`, `attempt` one higher, the same job
-  definition). Only the latest attempt of its job, once completed, can be
-  retried (`409 conflict`); a full queue is `503 unavailable`.
+  attempt (`200`, `status: "queued"`, the job's next `attempt` number, the
+  same job definition). Only the latest attempt of its job as the commit's
+  pipeline defines it, once completed, can be retried (`409 conflict`
+  otherwise, also for an attempt of another definition); a full queue is
+  `503 unavailable`.
 - `POST /api/v1/repos/{repo}/jobs/{attempt_id}/cancel` → the attempt: a
   queued one is `completed`/`cancelled` at once, a running one gets
   `cancel_requested: true` and is concluded `cancelled` when its runner stops

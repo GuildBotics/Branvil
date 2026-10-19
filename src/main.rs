@@ -20,6 +20,7 @@ mod runner;
 mod smart_http;
 mod store;
 mod tunnel;
+mod upgrade;
 mod upstream;
 mod util;
 
@@ -321,7 +322,7 @@ async fn run(cli: Cli) -> anyhow::Result<u8> {
         Command::Admin { command, data } => {
             let config =
                 config::Config::load(data.config.as_deref(), data.data_dir.as_deref(), None, None)?;
-            cli::admin(command, &config)
+            cli::admin(command, &config).await
         }
         Command::Tunnel {
             via,

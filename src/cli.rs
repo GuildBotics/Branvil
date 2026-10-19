@@ -101,6 +101,9 @@ pub enum AdminCommand {
     Check,
     /// Rebuild every derived index from the records
     Reindex,
+    /// Upgrade the database from the previous schema version, keeping a copy
+    /// of it as it was (stop the service and take a backup first)
+    Upgrade,
 }
 
 pub fn init(
@@ -263,7 +266,7 @@ async fn shutdown_signal() {
     tracing::info!("shutting down");
 }
 
-pub fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {
+pub async fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {
     let layout = config.layout();
     if !layout.db().exists() {
         bail!(
@@ -271,9 +274,20 @@ pub fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {
             layout.db().display()
         );
     }
-    let store = Store::open(&layout.db(), config.storage.cache_size_mib << 20, 1)?;
+    let open = || Store::open(&layout.db(), config.storage.cache_size_mib << 20, 1);
     match command {
+        AdminCommand::Upgrade => {
+            let git = crate::git::Git::new(
+                layout.clone(),
+                1,
+                std::time::Duration::from_secs(config.limits.git_command_timeout_secs),
+            );
+            let done = crate::upgrade::upgrade(&layout, &git).await?;
+            println!("{}", store::upgrade_report(&layout.db(), &done));
+            Ok(0)
+        }
         AdminCommand::Check => {
+            let store = open()?;
             let problems = store.read_sync(crate::model::index_problems)?;
             let pending = store.read_sync(|r| Ok(r.prefix_keys(store::JOURNAL, &[])?.len()))?;
             let structure = store.check_integrity()?;
@@ -297,7 +311,7 @@ pub fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {
             }
         }
         AdminCommand::Reindex => {
-            let n = store.write_sync(crate::model::rebuild_indexes)?;
+            let n = open()?.write_sync(crate::model::rebuild_indexes)?;
             println!("rebuilt {n} index entries");
             Ok(0)
         }

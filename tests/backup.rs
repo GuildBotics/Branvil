@@ -7,6 +7,8 @@ use crate::common;
 
 use std::path::Path;
 
+use sha2::Digest;
+
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -34,6 +36,16 @@ fn absent_everywhere(dir: &Path, needle: &str) {
             );
         }
     }
+}
+
+/// Copies the backup at `from` (as `manifest` lists it) to `to`.
+fn copy_backup(from: &Path, to: &Path, manifest: &Value) {
+    for f in manifest["files"].as_array().unwrap() {
+        let rel = f["path"].as_str().unwrap();
+        std::fs::create_dir_all(to.join(rel).parent().unwrap()).unwrap();
+        std::fs::copy(from.join(rel), to.join(rel)).unwrap();
+    }
+    std::fs::copy(from.join("manifest.json"), to.join("manifest.json")).unwrap();
 }
 
 fn ls_remote(server: &Server, dir: &Path, token: &str) -> String {
@@ -189,14 +201,7 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
 
     // A damaged copy is refused before anything is written.
     let damaged = out_dir.path().join("damaged");
-    std::fs::create_dir_all(damaged.join("repos")).unwrap();
-    for f in manifest["files"].as_array().unwrap() {
-        let rel = f["path"].as_str().unwrap();
-        let to = damaged.join(rel);
-        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-        std::fs::copy(backup.join(rel), &to).unwrap();
-    }
-    std::fs::copy(backup.join("manifest.json"), damaged.join("manifest.json")).unwrap();
+    copy_backup(&backup, &damaged, &manifest);
     let bundle = damaged.join(manifest["repositories"][0]["bundle"].as_str().unwrap());
     let mut bytes = std::fs::read(&bundle).unwrap();
     let last = bytes.len() - 1;
@@ -214,9 +219,9 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     assert!(text(&out).contains("checksum"), "{}", text(&out));
     assert!(!target.path().join("data").exists());
 
-    // A backup of another schema version is refused (no conversion).
+    // A backup older than the previous schema version is refused.
     let mut other = manifest.clone();
-    other["schema_version"] = json!(manifest["schema_version"].as_u64().unwrap() - 1);
+    other["schema_version"] = json!(manifest["schema_version"].as_u64().unwrap() - 2);
     std::fs::write(
         damaged.join("manifest.json"),
         serde_json::to_string(&other).unwrap(),
@@ -238,10 +243,48 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     assert!(text(&out).contains("schema version"), "{}", text(&out));
     assert!(!target.path().join("data").exists());
 
-    // Restore into another directory, then check it offline.
+    // A backup of this schema version restores as it is.
+    let current = out_dir.path().join("current");
     let out = std::process::Command::new(BIN)
         .args(["restore", "--from"])
         .arg(&backup)
+        .arg("--data-dir")
+        .arg(&current)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("upgraded"), "{}", text(&out));
+
+    // A backup of the previous schema version: what version 7 wrote.
+    let previous = out_dir.path().join("previous");
+    copy_backup(&backup, &previous, &manifest);
+    let db = previous.join("branvil.redb");
+    as_schema_7(&db, |_| None);
+    let bytes = std::fs::read(&db).unwrap();
+    let mut old = manifest.clone();
+    old["schema_version"] = json!(7);
+    for f in old["files"].as_array_mut().unwrap() {
+        if f["path"] == "branvil.redb" {
+            f["bytes"] = json!(bytes.len());
+            f["sha256"] = json!(
+                sha2::Sha256::digest(&bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+        }
+    }
+    std::fs::write(
+        previous.join("manifest.json"),
+        serde_json::to_string(&old).unwrap(),
+    )
+    .unwrap();
+
+    // Restore it into another directory (upgraded on the way), then check it
+    // offline; everything below compares the restored data with the original.
+    let out = std::process::Command::new(BIN)
+        .args(["restore", "--from"])
+        .arg(&previous)
         .arg("--data-dir")
         .arg(target.path().join("data"))
         .output()
@@ -249,6 +292,17 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(
         text(&out).contains("warning: the github account of alice"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        text(&out).contains("from schema version 7 to 8"),
+        "{}",
+        text(&out)
+    );
+    // Its runs were read against the restored repositories.
+    assert!(
+        text(&out).contains("checked the pipeline of") && !text(&out).contains("of 0 CI run"),
         "{}",
         text(&out)
     );

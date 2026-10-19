@@ -85,7 +85,7 @@ the restored service when its lease runs out (`docs/ci.md`).
 `branvil restore --from <backup> --data-dir <new dir>`:
 
 1. reads `manifest.json` and refuses another format or a schema version other
-   than this build's (there is no conversion);
+   than this build's or the one before it;
 2. checks every file against its size and SHA-256 (a damaged backup is refused
    before anything is written) and refuses manifest paths that leave the
    backup directory;
@@ -94,7 +94,9 @@ the restored service when its lease runs out (`docs/ci.md`).
    managed bare repository and fetches its bundle (`+refs/*:refs/*`), and
    checks that the refs equal the manifest's;
 5. copies CI logs and artifacts;
-6. runs the checks of `branvil admin check` (redb structure, every index
+6. upgrades the database when the backup has the previous schema version
+   ("Upgrading"; it reads the restored repositories);
+7. runs the checks of `branvil admin check` (redb structure, every index
    against the records) plus a Git directory for every repository record, and
    exits `1` when one fails.
 
@@ -132,14 +134,60 @@ GuildBotics stays valid. Two services on the same base URL cannot both listen.
   in a Branvil backup; the upstream host has only what was published there
   (`docs/security.md`).
 
+## Upgrading
+
+A build that changes the stored format raises the schema version
+(`docs/storage-design.md`) and carries the upgrade from the version before
+it, and no other. `branvil serve` and `branvil admin check|reindex` refuse a
+database of the previous version with a message that names the upgrade:
+
+```sh
+branvil backup --to /srv/backups/branvil-before-upgrade   # with the old build, service running
+# stop the service, install the new build
+branvil admin upgrade --data-dir /srv/branvil
+branvil serve --data-dir /srv/branvil
+```
+
+`branvil admin upgrade`:
+
+1. refuses a database that another process has open, and any version other
+   than the previous one (a current database is left as it is);
+2. reads what the upgrade needs (records, and Git for 7 → 8), so that a
+   record it does not expect or a Git failure stops it before anything is
+   written (for 7 → 8, every repository needs its Git directory, as
+   `branvil admin check` requires);
+3. writes a copy of the database as it is next to it,
+   `branvil-schema-<version>-<time>.redb`, and never overwrites or removes
+   one;
+4. applies the upgrade and the new version in one write transaction, so a
+   failure leaves the database at the previous version;
+5. prints what it changed and where the copy is.
+
+To go back, stop the service, put the copy in place of `branvil.redb`, and run
+the previous build. The copy holds the database only; the backup taken before
+holds the repositories, logs, and artifacts as well. A backup of the previous
+version is upgraded the same way by `branvil restore` (its copy lands in the
+new data directory; when the upgrade fails, the restored directory is left
+at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
+it once the cause is fixed).
+
+Version 7 → 8 (`src/upgrade.rs`): every CI run takes the pipeline its own
+commit's `.branvil/ci.toml` reads as (a run of a pull request head held its
+base's), or, when the commit is no longer in its repository, a failing
+"could not verify" pipeline; unfinished attempts of another job definition
+are stopped. Every attempt is kept: one of another definition stays on its
+job page as history and never counts as a check (`docs/ci.md`). Nothing
+outside the CI runs and attempts changes.
+
 ## Tested
 
 `tests/backup.rs` creates a workspace and a repository with a push, a ticket on the workspace's board, a pull
 request that closes it, a review, a conversation comment, an inline thread with
 a reply, and an upstream (a GitHub stand-in) read with a member's account and
 its token; it backs the service up while it runs, checks that the token is in
-no file of the backup, that a damaged copy is refused, restores into another
-directory, runs `branvil admin check`, starts the restored service on the
+no file of the backup, that a damaged copy and one two schema versions old are
+refused, turns the backup into one of the previous schema version, restores
+that into another directory (upgrading it), runs `branvil admin check`, starts the restored service on the
 original address, and checks the refs (`git ls-remote`), the ticket and its
 lane, the pull request and its ticket link, the review, the comments and
 thread, the ticket's linked pull requests, the board card, the member's

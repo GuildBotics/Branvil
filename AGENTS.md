@@ -24,9 +24,12 @@ only the rules that reading the code does not reveal and that hurt when broken.
   before keeping redundant code for compatibility. "Important Notice
   (Disclaimer)" in the README declares that incompatible changes happen, and
   in practice the maintainer is the only user.
-  - When the stored format changes, raise `SCHEMA_VERSION` in `src/store.rs`.
-    Data directories and backups of other versions are refused, not converted
-    (write no conversion).
+  - When the stored format changes, raise `SCHEMA_VERSION` in `src/store.rs`
+    and replace `src/upgrade.rs` with the upgrade from the previous version
+    (`branvil admin upgrade` and `branvil restore` run it). Write no
+    conversion from any older version, and read old shapes nowhere else: the
+    data directory holds the owner's real data, so a change of the stored
+    format must never leave it unreadable.
   - When the HTTP API changes, build no compatibility layer; change GuildBotics'
     `guildbotics/integrations/branvil/` at the same time.
 - Judging the meaning of natural language (classifying, deciding whether to
@@ -56,7 +59,7 @@ hold across modules:
   address).
 - **The HTTP API is the only way into the data.** The GUI, GuildBotics'
   provider, and the `branvil` CLI's client commands all use it. Only
-  `branvil init`, `branvil admin check|reindex`, and `branvil restore`, run
+  `branvil init`, `branvil admin check|reindex|upgrade`, and `branvil restore`, run
   with the service stopped, work on the data directory directly.
 - **The GUI looks like GuildBotics Desktop.** Keep the Mantine version, the
   theme (`web/src/theme.ts`), and the design tokens and component overrides in

@@ -4,7 +4,7 @@
 //! exists.
 
 use std::ops::Bound;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -21,8 +21,9 @@ use crate::error::{AppError, AppResult};
 pub type Tbl = TableDefinition<'static, &'static [u8], &'static [u8]>;
 
 /// The schema version this build reads and writes. A database of any other
-/// version is refused instead of being misread; there is no migration.
-pub const SCHEMA_VERSION: u64 = 7;
+/// version is refused instead of being misread; one of the previous version
+/// is upgraded by `upgrade` (`branvil admin upgrade`, `branvil restore`).
+pub const SCHEMA_VERSION: u64 = 8;
 
 pub const META: Tbl = TableDefinition::new("meta");
 pub const COUNTERS: Tbl = TableDefinition::new("counters");
@@ -555,32 +556,21 @@ impl Store {
     /// Opens (or creates) the database, creates missing tables, and checks the
     /// schema version.
     pub fn open(path: &Path, cache_bytes: usize, read_concurrency: usize) -> anyhow::Result<Self> {
-        let db = Database::builder()
-            .set_cache_size(cache_bytes)
-            .create(path)
-            .map_err(|e| match e {
-                redb::DatabaseError::DatabaseAlreadyOpen => anyhow::anyhow!(
-                    "{} is already open by another Branvil process (stop `branvil serve` first)",
-                    path.display()
-                ),
-                other => anyhow::anyhow!("cannot open {}: {other}", path.display()),
-            })?;
-        let txn = db.begin_write()?;
-        {
-            for table in PRIMARY_TABLES.iter().chain(INDEX_TABLES) {
-                txn.open_table(*table)?;
-            }
-        }
-        let wtx = Wtx(txn);
-        let key = Key::new().s("schema_version").bytes();
-        let version: Option<u64> = wtx.get(META, &key).map_err(|e| anyhow::anyhow!("{e}"))?;
-        match version {
+        let db = open_db(path, cache_bytes)?;
+        let wtx = Wtx(db.begin_write()?);
+        create_tables(&wtx)?;
+        match version_of(&wtx).map_err(|e| anyhow::anyhow!("{}", e.message))? {
             None => wtx
-                .put(META, &key, &SCHEMA_VERSION)
-                .map_err(|e| anyhow::anyhow!("{e}"))?,
-            Some(v) if v != SCHEMA_VERSION => anyhow::bail!(
-                "{} has schema version {v}; this build reads only version {SCHEMA_VERSION} and does not convert others (start from a new data directory)",
+                .put(META, &version_key(), &SCHEMA_VERSION)
+                .map_err(|e| anyhow::anyhow!("{}", e.message))?,
+            Some(v) if v == crate::upgrade::FROM => anyhow::bail!(
+                "{} has schema version {v}; this build reads version {SCHEMA_VERSION}. Take a backup with the previous build (`branvil backup`), stop the service, and run `branvil admin upgrade`",
                 path.display()
+            ),
+            Some(v) if v != SCHEMA_VERSION => anyhow::bail!(
+                "{} has schema version {v}; this build reads only version {SCHEMA_VERSION} and upgrades only version {} (start from a new data directory)",
+                path.display(),
+                crate::upgrade::FROM
             ),
             Some(_) => {}
         }
@@ -704,39 +694,192 @@ impl Store {
     pub async fn export_to(&self, path: &Path) -> AppResult<Vec<(String, u64)>> {
         let db = self.db.clone();
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            let txn = db.begin_read()?;
-            if txn.list_multimap_tables()?.next().is_some() {
-                return Err(AppError::internal("export: multimap tables are not copied"));
-            }
-            let out = Database::builder()
-                .create(&path)
-                .map_err(|e| AppError::internal(format!("export: {e}")))?;
-            let wtx = out.begin_write()?;
-            let mut counts = Vec::new();
-            for handle in txn.list_tables()? {
-                let name = redb::TableHandle::name(&handle).to_string();
-                let def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(&name);
-                let source = txn.open_table(def).map_err(|e| {
-                    AppError::internal(format!("export: table {name} is not a byte table: {e}"))
-                })?;
-                {
-                    let mut target = wtx.open_table(def)?;
-                    let mut n = 0u64;
-                    for item in source.iter()? {
-                        let (k, v) = item?;
-                        target.insert(k.value(), v.value())?;
-                        n += 1;
-                    }
-                    counts.push((name, n));
-                }
-            }
-            wtx.commit()?;
-            Ok(counts)
-        })
-        .await
-        .map_err(|e| AppError::internal(format!("storage task: {e}")))?
+        tokio::task::spawn_blocking(move || copy_tables(&db.begin_read()?, &path))
+            .await
+            .map_err(|e| AppError::internal(format!("storage task: {e}")))?
     }
+}
+
+/// What an upgrade did to `db`, for the command's output.
+pub fn upgrade_report(db: &Path, done: &Option<Upgraded>) -> String {
+    match done {
+        None => format!(
+            "{} already has schema version {SCHEMA_VERSION}",
+            db.display()
+        ),
+        Some(u) => format!(
+            "upgraded {} from schema version {} to {SCHEMA_VERSION}: {}\nthe database as it was: {}",
+            db.display(),
+            u.from,
+            u.summary,
+            u.copy.display()
+        ),
+    }
+}
+
+/// What an upgrade did.
+pub struct Upgraded {
+    pub from: u64,
+    /// The database as it was before the upgrade.
+    pub copy: PathBuf,
+    /// What the upgrade changed (`crate::upgrade`).
+    pub summary: String,
+}
+
+/// A database of the previous schema version, opened exclusively for its
+/// upgrade (`crate::upgrade`): read it, then `finish`. Nothing is written
+/// before `finish`.
+pub struct Upgrading {
+    db: Database,
+    path: PathBuf,
+}
+
+impl Upgrading {
+    /// Opens the database at `path` for its upgrade, or returns `None` when it
+    /// already has this build's version.
+    pub fn open(path: &Path) -> anyhow::Result<Option<Self>> {
+        if !path.exists() {
+            anyhow::bail!("{} does not exist", path.display());
+        }
+        let db = open_db(path, 16 << 20)?;
+        let version =
+            version_of(&db.begin_read()?).map_err(|e| anyhow::anyhow!("{}", e.message))?;
+        match version {
+            Some(SCHEMA_VERSION) => Ok(None),
+            Some(crate::upgrade::FROM) => Ok(Some(Self {
+                db,
+                path: path.to_path_buf(),
+            })),
+            other => anyhow::bail!(
+                "{} has schema version {}; this build upgrades only version {}",
+                path.display(),
+                other.map_or("none".to_string(), |v| v.to_string()),
+                crate::upgrade::FROM
+            ),
+        }
+    }
+
+    pub fn read<T>(&self, f: impl FnOnce(&ReadTransaction) -> AppResult<T>) -> anyhow::Result<T> {
+        f(&self.db.begin_read()?).map_err(|e| anyhow::anyhow!("{}", e.message))
+    }
+
+    /// Writes a copy of the database as it is next to it
+    /// (`branvil-schema-<version>-<time>.redb`, never overwritten and never
+    /// removed by Branvil), then applies `apply` and this build's version in
+    /// one write transaction: when `apply` fails, the database keeps the
+    /// previous version. `apply` returns what it changed.
+    pub fn finish(
+        self,
+        apply: impl FnOnce(&Wtx) -> anyhow::Result<String>,
+    ) -> anyhow::Result<Upgraded> {
+        let path = &self.path;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let name = format!(
+            "branvil-schema-{}-{}.redb",
+            crate::upgrade::FROM,
+            chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+        );
+        let copy = dir.join(&name);
+        let partial = dir.join(format!("{name}.partial"));
+        // The copy gets its name only when complete, and never another's.
+        let copied = copy_tables(&self.db.begin_read()?, &partial)
+            .map_err(|e| anyhow::anyhow!("{}", e.message))
+            .and_then(|_| {
+                if copy.exists() {
+                    anyhow::bail!("{} exists", copy.display());
+                }
+                Ok(std::fs::rename(&partial, &copy)?)
+            });
+        if let Err(e) = copied {
+            let _ = std::fs::remove_file(&partial);
+            anyhow::bail!(
+                "copying {} to {} failed, so it was not upgraded: {e}",
+                path.display(),
+                copy.display()
+            );
+        }
+        let wtx = Wtx(self.db.begin_write()?);
+        create_tables(&wtx)?;
+        let summary = apply(&wtx).map_err(|e| {
+            anyhow::anyhow!(
+                "upgrading {} failed, and it was left at schema version {}: {e}",
+                path.display(),
+                crate::upgrade::FROM
+            )
+        })?;
+        wtx.put(META, &version_key(), &SCHEMA_VERSION)
+            .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+        wtx.0.commit()?;
+        Ok(Upgraded {
+            from: crate::upgrade::FROM,
+            copy,
+            summary,
+        })
+    }
+}
+
+fn open_db(path: &Path, cache_bytes: usize) -> anyhow::Result<Database> {
+    Database::builder()
+        .set_cache_size(cache_bytes)
+        .create(path)
+        .map_err(|e| match e {
+            redb::DatabaseError::DatabaseAlreadyOpen => anyhow::anyhow!(
+                "{} is already open by another Branvil process (stop `branvil serve` first)",
+                path.display()
+            ),
+            other => anyhow::anyhow!("cannot open {}: {other}", path.display()),
+        })
+}
+
+fn create_tables(w: &Wtx) -> anyhow::Result<()> {
+    for table in PRIMARY_TABLES.iter().chain(INDEX_TABLES) {
+        w.0.open_table(*table)?;
+    }
+    Ok(())
+}
+
+fn version_key() -> Vec<u8> {
+    Key::new().s("schema_version").bytes()
+}
+
+fn version_of(r: &impl Rd) -> AppResult<Option<u64>> {
+    r.get(META, &version_key())
+}
+
+/// Copies every table, as `txn` sees it, into a new database file at `path`
+/// (refused when the file exists). Returns the table names and entry counts.
+fn copy_tables(txn: &ReadTransaction, path: &Path) -> AppResult<Vec<(String, u64)>> {
+    if txn.list_multimap_tables()?.next().is_some() {
+        return Err(AppError::internal("export: multimap tables are not copied"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| AppError::internal(format!("export: {}: {e}", path.display())))?;
+    let out = Database::builder()
+        .create_file(file)
+        .map_err(|e| AppError::internal(format!("export: {e}")))?;
+    let wtx = out.begin_write()?;
+    let mut counts = Vec::new();
+    for handle in txn.list_tables()? {
+        let name = redb::TableHandle::name(&handle).to_string();
+        let def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(&name);
+        let source = txn.open_table(def).map_err(|e| {
+            AppError::internal(format!("export: table {name} is not a byte table: {e}"))
+        })?;
+        let mut target = wtx.open_table(def)?;
+        let mut n = 0u64;
+        for item in source.iter()? {
+            let (k, v) = item?;
+            target.insert(k.value(), v.value())?;
+            n += 1;
+        }
+        counts.push((name, n));
+    }
+    wtx.commit()?;
+    Ok(counts)
 }
 
 #[cfg(test)]
@@ -744,20 +887,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_current_schema_version_opens() {
+    fn only_the_current_schema_version_opens_and_only_the_previous_upgrades() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.redb");
-        let key = Key::new().s("schema_version").bytes();
-        for other in [SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
+        for other in [SCHEMA_VERSION - 2, SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
             let store = Store::open(&path, 1 << 20, 1).unwrap();
-            store.write_sync(|w| w.put(META, &key, &other)).unwrap();
+            store
+                .write_sync(|w| w.put(META, &version_key(), &other))
+                .unwrap();
             drop(store);
             let err = Store::open(&path, 1 << 20, 1).err().unwrap().to_string();
             assert!(err.contains(&format!("schema version {other}")), "{err}");
+            assert_eq!(
+                err.contains("branvil admin upgrade"),
+                other == crate::upgrade::FROM,
+                "{err}"
+            );
+            if other != crate::upgrade::FROM {
+                let err = Upgrading::open(&path).err().unwrap().to_string();
+                assert!(err.contains("upgrades only version"), "{err}");
+            }
             std::fs::remove_file(&path).unwrap();
         }
         Store::open(&path, 1 << 20, 1).unwrap();
         drop(Store::open(&path, 1 << 20, 1).unwrap());
+        assert!(Upgrading::open(&path).unwrap().is_none());
+        // While an upgrade has it open, nothing else opens it.
+        let store = Store::open(&path, 1 << 20, 1).unwrap();
+        store
+            .write_sync(|w| w.put(META, &version_key(), &crate::upgrade::FROM))
+            .unwrap();
+        drop(store);
+        let upgrading = Upgrading::open(&path).unwrap().unwrap();
+        let err = Store::open(&path, 1 << 20, 1).err().unwrap().to_string();
+        assert!(err.contains("already open"), "{err}");
+        drop(upgrading);
+    }
+
+    #[test]
+    fn a_failed_upgrade_leaves_the_previous_version_and_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("branvil.redb");
+        let store = Store::open(&path, 1 << 20, 1).unwrap();
+        let run = br#"{"sha":"s1"}"#;
+        store
+            .write_sync(|w| {
+                w.put_raw(CI_RUNS, b"k", run)?;
+                w.put(META, &version_key(), &crate::upgrade::FROM)
+            })
+            .unwrap();
+        drop(store);
+        // The upgrade writes, then fails: nothing of it stays.
+        let err = Upgrading::open(&path)
+            .unwrap()
+            .unwrap()
+            .finish(|w| {
+                w.put_raw(CI_RUNS, b"k", b"changed")
+                    .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+                anyhow::bail!("an unexpected record")
+            })
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("left at schema version 7"), "{err}");
+        assert!(err.contains("an unexpected record"), "{err}");
+        let err = Store::open(&path, 1 << 20, 1).err().unwrap().to_string();
+        assert!(err.contains("schema version 7"), "{err}");
+        let db = Database::open(&path).unwrap();
+        let txn = db.begin_read().unwrap();
+        assert_eq!(txn.get_raw(CI_RUNS, b"k").unwrap().unwrap(), run);
+        drop((txn, db));
+        // The copy was written first, under a name of its own.
+        let copies: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "branvil.redb")
+            .collect();
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert!(
+            copies[0].starts_with("branvil-schema-7-") && copies[0].ends_with(".redb"),
+            "{copies:?}"
+        );
     }
 
     #[test]

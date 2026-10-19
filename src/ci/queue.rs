@@ -36,7 +36,7 @@ const MAX_DETAILS: usize = 4 << 10;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum PipelineState {
-    /// The trusted branch has no `.branvil/ci.toml`.
+    /// The commit has no `.branvil/ci.toml`.
     Absent,
     /// It has one and it is invalid.
     Invalid {
@@ -45,12 +45,6 @@ pub enum PipelineState {
     Jobs {
         jobs: Vec<JobDef>,
     },
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Source {
-    pub branch: String,
-    pub sha: String,
 }
 
 /// The CI of one commit of one repository.
@@ -64,8 +58,7 @@ pub struct Run {
     /// Branches whose tip this commit is and that asked for CI of it. When
     /// the last one moves away, the run is superseded.
     pub branches: Vec<String>,
-    /// Where the pipeline was read (the trusted branch and its tip then).
-    pub source: Source,
+    /// The commit's own pipeline.
     pub pipeline: PipelineState,
     /// `protected` (a protected branch asked) or `branch:<name>`; selects
     /// which dependency caches the jobs may read and write.
@@ -176,7 +169,7 @@ pub fn expected_index(r: &impl Rd) -> AppResult<Vec<IxEntry>> {
     Ok(out)
 }
 
-fn put_run(w: &Wtx, old: Option<&Run>, new: &Run) -> AppResult<()> {
+pub fn put_run(w: &Wtx, old: Option<&Run>, new: &Run) -> AppResult<()> {
     put_indexed(
         w,
         store::CI_RUNS,
@@ -219,16 +212,44 @@ pub fn attempts_of(r: &impl Rd, repo: &str, sha: &str) -> AppResult<Vec<Attempt>
     Ok(out)
 }
 
-/// The latest attempt of every job of a commit.
-pub fn latest_attempts(r: &impl Rd, repo: &str, sha: &str) -> AppResult<Vec<Attempt>> {
+/// The latest attempt of every job of `jobs` that ran that very definition;
+/// attempts of another definition are history.
+pub fn current_attempts(
+    r: &impl Rd,
+    repo: &str,
+    sha: &str,
+    jobs: &[JobDef],
+) -> AppResult<Vec<Attempt>> {
     let mut out: Vec<Attempt> = Vec::new();
     for a in attempts_of(r, repo, sha)? {
+        if !jobs.contains(&a.job) {
+            continue;
+        }
         match out.last_mut() {
             Some(last) if last.job.name == a.job.name => *last = a,
             _ => out.push(a),
         }
     }
     Ok(out)
+}
+
+/// The jobs of `run`'s pipeline that have no current attempt, or whose
+/// current attempt ended because the commit was replaced.
+fn jobs_to_run(r: &impl Rd, run: &Run) -> AppResult<Vec<JobDef>> {
+    let PipelineState::Jobs { jobs } = &run.pipeline else {
+        return Ok(Vec::new());
+    };
+    let current = current_attempts(r, &run.repo, &run.sha, jobs)?;
+    Ok(jobs
+        .iter()
+        .filter(|j| {
+            current
+                .iter()
+                .find(|a| a.job.name == j.name)
+                .is_none_or(|a| a.superseded)
+        })
+        .cloned()
+        .collect())
 }
 
 fn next_number(r: &impl Rd, repo: &str, sha: &str, job: &str) -> AppResult<u64> {
@@ -303,82 +324,113 @@ pub struct Registration {
     pub sha: String,
     pub branch: String,
     pub protected: bool,
-    pub source: Source,
     pub pipeline: PipelineState,
     pub network: bool,
 }
 
-/// Records that `branch` wants CI of `sha`. Creates the run (and queues its
-/// jobs when they fit) or adds the branch to the existing run; a superseded
-/// run that becomes a tip again gets fresh attempts. Returns true when
-/// anything visible changed.
+/// Records that `branch` wants CI of `sha`. Creates the run or adds the
+/// branch to the existing run, and queues (when they fit) the jobs without a
+/// current attempt: all of a new run's, the replaced ones of a superseded run
+/// that becomes a tip again. Returns true when anything visible changed.
 pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppResult<bool> {
     let scope = if reg.protected {
         "protected".to_string()
     } else {
         format!("branch:{}", reg.branch)
     };
-    if let Some(old) = get_run(w, &reg.repo, &reg.sha)? {
-        let mut run = old.clone();
-        if !run.branches.contains(&reg.branch) {
-            run.branches.push(reg.branch.clone());
+    let old = get_run(w, &reg.repo, &reg.sha)?;
+    let mut run = match &old {
+        Some(old) => {
+            let mut run = old.clone();
+            if !run.branches.contains(&reg.branch) {
+                run.branches.push(reg.branch.clone());
+            }
+            if reg.protected {
+                run.cache_scope = scope;
+            }
+            run.superseded_by = None;
+            // The registration read the commit's own pipeline. The comparison
+            // is of the parsed jobs, so a change to what the parser yields for
+            // the same file runs the jobs again.
+            if run.pipeline != reg.pipeline {
+                take_pipeline(
+                    w,
+                    &mut run,
+                    reg.pipeline,
+                    "Stopped: the commit's pipeline does not define this job so.",
+                    now,
+                )?;
+            }
+            run
         }
-        if reg.protected {
-            run.cache_scope = scope;
-        }
-        let revived = run.superseded_by.take().is_some();
-        // A protected branch reads the pipeline from the commit itself. When
-        // that differs from the pipeline the run was registered with (a
-        // merged pipeline change), the commit's own pipeline applies.
-        let replaced = reg.protected && run.source != reg.source && run.pipeline != reg.pipeline;
-        if replaced {
-            run.source = reg.source.clone();
-            run.pipeline = reg.pipeline.clone();
-        }
-        if (revived || replaced)
-            && let PipelineState::Jobs { jobs } = run.pipeline.clone()
-        {
-            // Jobs whose latest attempt ended because the commit was replaced,
-            // ran another definition, or never ran, run (again).
-            let latest = latest_attempts(w, &run.repo, &run.sha)?;
-            let todo: Vec<JobDef> = jobs
-                .into_iter()
-                .filter(|j| {
-                    latest
-                        .iter()
-                        .find(|a| a.job.name == j.name)
-                        .is_none_or(|a| a.superseded || a.job != *j)
-                })
-                .collect();
-            admit_jobs(w, &mut run, &todo, reg.network, queue_max, now)?;
-        }
-        if run != old {
-            put_run(w, Some(&old), &run)?;
-            return Ok(true);
-        }
-        return Ok(false);
-    }
-    let mut run = Run {
-        repo: reg.repo,
-        repo_path: reg.repo_path,
-        sha: reg.sha,
-        seq: w.next("ci_seq")?,
-        created_at: now.to_string(),
-        branches: vec![reg.branch],
-        source: reg.source,
-        pipeline: reg.pipeline,
-        cache_scope: scope,
-        waiting: false,
-        superseded_by: None,
+        None => Run {
+            repo: reg.repo,
+            repo_path: reg.repo_path,
+            sha: reg.sha,
+            seq: w.next("ci_seq")?,
+            created_at: now.to_string(),
+            branches: vec![reg.branch],
+            pipeline: reg.pipeline,
+            cache_scope: scope,
+            waiting: false,
+            superseded_by: None,
+        },
     };
-    if let PipelineState::Jobs { jobs } = run.pipeline.clone() {
-        admit_jobs(w, &mut run, &jobs, reg.network, queue_max, now)?;
+    let queued = !run.waiting && {
+        let todo = jobs_to_run(w, &run)?;
+        admit_jobs(w, &mut run, &todo, reg.network, queue_max, now)?
+    };
+    if old.as_ref() == Some(&run) {
+        return Ok(queued);
     }
-    put_run(w, None, &run)?;
+    put_run(w, old.as_ref(), &run)?;
+    Ok(true)
+}
+
+/// Gives `run` (written by the caller) its commit's pipeline. Every
+/// unfinished attempt of a job definition the pipeline does not have is
+/// stopped with `why`, so nothing runs, or is queued again after an
+/// interruption, that is not the commit's. Returns how many it stopped.
+pub fn take_pipeline(
+    w: &Wtx,
+    run: &mut Run,
+    pipeline: PipelineState,
+    why: &str,
+    now: &str,
+) -> AppResult<usize> {
+    run.pipeline = pipeline;
+    let jobs: &[JobDef] = match &run.pipeline {
+        PipelineState::Jobs { jobs } => jobs,
+        _ => &[],
+    };
+    let mut stopped = 0;
+    for a in attempts_of(w, &run.repo, &run.sha)? {
+        if !jobs.contains(&a.job) && stop(w, &a, why, false, now)? {
+            stopped += 1;
+        }
+    }
+    Ok(stopped)
+}
+
+/// Ends an unfinished attempt: a queued one is concluded `cancelled`, a
+/// running one is asked to stop. Returns false for a finished one.
+fn stop(w: &Wtx, a: &Attempt, why: &str, superseded: bool, now: &str) -> AppResult<bool> {
+    let mut x = a.clone();
+    match a.status.as_str() {
+        "queued" => conclude(&mut x, "cancelled", Some(why.to_string()), now),
+        "in_progress" => {
+            x.cancel_requested = true;
+            x.details = Some(why.to_string());
+        }
+        _ => return Ok(false),
+    }
+    x.superseded |= superseded;
+    put_attempt(w, Some(a), &x)?;
     Ok(true)
 }
 
 /// Queues `jobs` of `run` when they all fit, else marks the run waiting.
+/// Returns whether it queued any.
 fn admit_jobs(
     w: &Wtx,
     run: &mut Run,
@@ -386,21 +438,21 @@ fn admit_jobs(
     network: bool,
     queue_max: usize,
     now: &str,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     if jobs.is_empty() {
         run.waiting = false;
-        return Ok(());
+        return Ok(false);
     }
     if pending_count(w, queue_max + 1)? + jobs.len() > queue_max {
         run.waiting = true;
-        return Ok(());
+        return Ok(false);
     }
     for job in jobs {
         let a = new_attempt(w, run, job, network, now)?;
         put_attempt(w, None, &a)?;
     }
     run.waiting = false;
-    Ok(())
+    Ok(true)
 }
 
 /// Admits waiting runs in registration order while they fit. Returns the
@@ -411,12 +463,9 @@ pub fn admit_waiting(w: &Wtx, queue_max: usize, now: &str) -> AppResult<Vec<(Str
         let Some(old) = w.get::<Run>(store::CI_RUNS, &key)? else {
             continue;
         };
-        let PipelineState::Jobs { jobs } = &old.pipeline else {
-            continue;
-        };
         let mut run = old.clone();
         let network = network_of(w, &run.repo)?;
-        let jobs = jobs.clone();
+        let jobs = jobs_to_run(w, &run)?;
         admit_jobs(w, &mut run, &jobs, network, queue_max, now)?;
         if run.waiting {
             break;
@@ -455,21 +504,8 @@ pub fn branch_left(
         run.superseded_by = Some(by.to_string());
         run.waiting = false;
         let reason = format!("Superseded: {branch} moved from {sha} to {by}.");
-        for a in latest_attempts(w, repo, sha)? {
-            let mut x = a.clone();
-            match a.status.as_str() {
-                "queued" => {
-                    x.superseded = true;
-                    conclude(&mut x, "cancelled", Some(reason.clone()), now);
-                }
-                "in_progress" => {
-                    x.superseded = true;
-                    x.cancel_requested = true;
-                    x.details = Some(reason.clone());
-                }
-                _ => continue,
-            }
-            put_attempt(w, Some(&a), &x)?;
+        for a in attempts_of(w, repo, sha)? {
+            stop(w, &a, &reason, true, now)?;
         }
     }
     if run == old {
@@ -623,8 +659,8 @@ pub fn cancel(w: &Wtx, id: &str, who: &str, now: &str) -> AppResult<Attempt> {
     Ok(a)
 }
 
-/// Queues a new attempt of the same job (with the same trusted definition)
-/// after a completed latest attempt.
+/// Queues a new attempt of the same job (with the same recorded definition)
+/// after the job's latest current attempt (`current_attempts`) completed.
 pub fn retry(w: &Wtx, id: &str, queue_max: usize, now: &str) -> AppResult<Attempt> {
     let old =
         get_attempt(w, id)?.ok_or_else(|| AppError::not_found(format!("No CI attempt {id}.")))?;
@@ -634,9 +670,18 @@ pub fn retry(w: &Wtx, id: &str, queue_max: usize, now: &str) -> AppResult<Attemp
             old.status
         )));
     }
-    if next_number(w, &old.repo, &old.sha, &old.job.name)? != old.number + 1 {
+    let run = get_run(w, &old.repo, &old.sha)?
+        .ok_or_else(|| AppError::internal("attempt without a run"))?;
+    let jobs: &[JobDef] = match &run.pipeline {
+        PipelineState::Jobs { jobs } => jobs,
+        _ => &[],
+    };
+    if !current_attempts(w, &old.repo, &old.sha, jobs)?
+        .iter()
+        .any(|a| a.id == old.id)
+    {
         return Err(AppError::conflict(format!(
-            "Attempt {id} is not the latest attempt of job {}.",
+            "Attempt {id} is not the latest attempt of job {} as the commit's pipeline defines it.",
             old.job.name
         )));
     }
@@ -645,8 +690,6 @@ pub fn retry(w: &Wtx, id: &str, queue_max: usize, now: &str) -> AppResult<Attemp
             "The CI queue is full ({queue_max} queued attempts); retry later."
         )));
     }
-    let run = get_run(w, &old.repo, &old.sha)?
-        .ok_or_else(|| AppError::internal("attempt without a run"))?;
     let network = network_of(w, &old.repo)?;
     let a = new_attempt(w, &run, &old.job, network, now)?;
     put_attempt(w, None, &a)?;
@@ -684,6 +727,8 @@ pub fn expire(w: &Wtx, now: &str) -> AppResult<Vec<(String, String)>> {
         };
         conclude(&mut a, "cancelled", Some(details), now);
         put_attempt(w, Some(&old), &a)?;
+        // Its definition is the run's: an unfinished attempt of another one
+        // was asked to stop when the run took its pipeline (`take_pipeline`).
         if requeue && let Some(run) = get_run(w, &old.repo, &old.sha)? {
             let mut next = new_attempt(w, &run, &old.job, old.network, now)?;
             next.after_interrupt = true;
@@ -782,10 +827,6 @@ mod tests {
             sha: sha.into(),
             branch: branch.into(),
             protected: branch == "main",
-            source: Source {
-                branch: "main".into(),
-                sha: "base".into(),
-            },
             pipeline: PipelineState::Jobs {
                 jobs: jobs.iter().map(|j| job(j)).collect(),
             },
@@ -803,6 +844,14 @@ mod tests {
     const T1: &str = "2026-10-14T10:00:30.000Z";
     const T2: &str = "2026-10-14T10:02:00.000Z";
     const T3: &str = "2026-10-14T10:05:00.000Z";
+
+    fn latest_attempts(r: &impl Rd, repo: &str, sha: &str) -> AppResult<Vec<Attempt>> {
+        let jobs: Vec<JobDef> = attempts_of(r, repo, sha)?
+            .into_iter()
+            .map(|a| a.job)
+            .collect();
+        current_attempts(r, repo, sha, &jobs)
+    }
 
     fn latest(s: &Store, sha: &str) -> Vec<Attempt> {
         s.read_sync(|r| latest_attempts(r, "repo_1", sha)).unwrap()
@@ -958,6 +1007,168 @@ mod tests {
             s.read_sync(crate::model::index_problems)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    fn with(sha: &str, jobs: Vec<JobDef>) -> Registration {
+        let mut r = reg(sha, "feature", &[]);
+        r.pipeline = PipelineState::Jobs { jobs };
+        r
+    }
+
+    fn changed(name: &str) -> JobDef {
+        let mut j = job(name);
+        j.commands = vec!["echo changed".into()];
+        j
+    }
+
+    #[test]
+    fn a_taken_pipeline_stops_the_old_definition_and_retries_the_current_one() {
+        let (_d, s) = store();
+        // The old definition of test runs when the run takes the new one: it
+        // is asked to stop, and the new definition is queued.
+        s.write_sync(|w| register(w, reg("s1", "feature", &["test"]), 10, T0))
+            .unwrap();
+        let old = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+        s.write_sync(|w| register(w, with("s1", vec![changed("test")]), 10, T0))
+            .unwrap();
+        let a1 = s
+            .read_sync(|r| get_attempt(r, &old.attempt.id))
+            .unwrap()
+            .unwrap();
+        assert!(a1.cancel_requested);
+        // Its lease runs out: it is not queued again.
+        s.write_sync(|w| expire(w, T2)).unwrap();
+        let all = s.read_sync(|r| attempts_of(r, "repo_1", "s1")).unwrap();
+        let shape: Vec<(u64, bool, &str)> = all
+            .iter()
+            .map(|a| (a.number, a.job == changed("test"), a.status.as_str()))
+            .collect();
+        assert_eq!(shape, vec![(1, false, "completed"), (2, true, "queued")]);
+        // The current attempt fails and is retried; the old one is history.
+        let c = s.write_sync(|w| claim(w, "r", 60, T2)).unwrap().unwrap();
+        assert_eq!(c.attempt.number, 2);
+        s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "failure", None, T2))
+            .unwrap();
+        let again = s.write_sync(|w| retry(w, &c.attempt.id, 10, T2)).unwrap();
+        assert_eq!((again.number, again.job == changed("test")), (3, true));
+        let refused = s.write_sync(|w| retry(w, &old.attempt.id, 10, T2));
+        assert_eq!(refused.unwrap_err().code, "conflict");
+        // Leaving the commit ends every unfinished attempt.
+        s.write_sync(|w| branch_left(w, "repo_1", "s1", "feature", "s2", T2))
+            .unwrap();
+        let all = s.read_sync(|r| attempts_of(r, "repo_1", "s1")).unwrap();
+        assert!(all.iter().all(|a| a.status == "completed"), "{all:?}");
+    }
+
+    #[test]
+    fn taking_the_same_pipeline_stops_only_unfinished_attempts_of_another_definition() {
+        let (_d, s) = store();
+        // As version 7 could leave it: an old definition still running beside
+        // the run's pipeline.
+        s.write_sync(|w| register(w, reg("s1", "feature", &["test"]), 10, T0))
+            .unwrap();
+        let old = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+        let pipeline = PipelineState::Jobs {
+            jobs: vec![changed("test")],
+        };
+        let stopped = s
+            .write_sync(|w| {
+                let old = get_run(w, "repo_1", "s1")?.unwrap();
+                let mut run = old.clone();
+                run.pipeline = pipeline.clone();
+                put_run(w, Some(&old), &run)?;
+                // The run already has this pipeline; the old attempt stops.
+                take_pipeline(w, &mut run, pipeline.clone(), "stop", T0)
+            })
+            .unwrap();
+        assert_eq!(stopped, 1);
+        let a1 = s
+            .read_sync(|r| get_attempt(r, &old.attempt.id))
+            .unwrap()
+            .unwrap();
+        assert!(a1.cancel_requested);
+        s.write_sync(|w| expire(w, T2)).unwrap();
+        assert_eq!(
+            s.read_sync(|r| attempts_of(r, "repo_1", "s1"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_attempt_of_another_definition_is_not_retried() {
+        let (_d, s) = store();
+        s.write_sync(|w| register(w, reg("s1", "feature", &["test"]), 10, T0))
+            .unwrap();
+        let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+        s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, T0))
+            .unwrap();
+        // The run takes another definition (as the upgrade does for a run no
+        // branch wants now): the old attempt is the newest, and only history.
+        s.write_sync(|w| {
+            let old = get_run(w, "repo_1", "s1")?.unwrap();
+            let mut run = old.clone();
+            let jobs = vec![changed("test")];
+            take_pipeline(w, &mut run, PipelineState::Jobs { jobs }, "stop", T0)?;
+            put_run(w, Some(&old), &run)
+        })
+        .unwrap();
+        let refused = s.write_sync(|w| retry(w, &c.attempt.id, 10, T1));
+        assert_eq!(refused.unwrap_err().code, "conflict");
+        // A registration queues the current definition, and says so.
+        assert!(
+            s.write_sync(|w| register(w, with("s1", vec![changed("test")]), 10, T1))
+                .unwrap()
+        );
+        let current = s
+            .read_sync(|r| current_attempts(r, "repo_1", "s1", &[changed("test")]))
+            .unwrap();
+        assert_eq!(
+            (current[0].number, current[0].status.as_str()),
+            (2, "queued")
+        );
+    }
+
+    #[test]
+    fn an_admitted_run_runs_only_jobs_without_a_current_attempt() {
+        let (_d, s) = store();
+        s.write_sync(|w| register(w, reg("s1", "feature", &["a", "b"]), 10, T0))
+            .unwrap();
+        for _ in 0..2 {
+            let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+            s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, T0))
+                .unwrap();
+        }
+        // The queue is full when the run takes a pipeline with a new b.
+        s.write_sync(|w| register(w, reg("s2", "other", &["x"]), 1, T0))
+            .unwrap();
+        s.write_sync(|w| register(w, with("s1", vec![job("a"), changed("b")]), 1, T0))
+            .unwrap();
+        let run = s
+            .read_sync(|r| get_run(r, "repo_1", "s1"))
+            .unwrap()
+            .unwrap();
+        assert!(run.waiting);
+        s.write_sync(|w| {
+            let x = attempts_of(w, "repo_1", "s2")?;
+            cancel(w, &x[0].id, "ken", T1)
+        })
+        .unwrap();
+        assert_eq!(s.write_sync(|w| admit_waiting(w, 1, T1)).unwrap().len(), 1);
+        let all = s.read_sync(|r| attempts_of(r, "repo_1", "s1")).unwrap();
+        let shape: Vec<(&str, u64, &str)> = all
+            .iter()
+            .map(|a| (a.job.name.as_str(), a.number, a.status.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("a", 1, "completed"),
+                ("b", 1, "completed"),
+                ("b", 2, "queued")
+            ]
         );
     }
 

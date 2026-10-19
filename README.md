@@ -18,9 +18,7 @@ real service from this repository (see "Development"). See
 ## Important Notice (Disclaimer)
 
 - This software is in alpha. Its data format, HTTP API, configuration, and
-  command line will change incompatibly without notice. A data directory or a
-  backup written by another schema version is refused and not converted; start
-  from a new data directory.
+  command line will change incompatibly without notice.
 - The author and distributor assume no responsibility for malfunctions of this
   software or damages caused thereby. Use it at your own risk.
 
@@ -225,9 +223,9 @@ Register-ScheduledTask -TaskName "Branvil tunnel" -Action $action -Trigger $trig
 
 ## CI
 
-Put the pipeline on the default branch as `.branvil/ci.toml` (it changes only
-by a merged pull request, and a pull request's own copy never applies to its
-checks):
+Put the pipeline in the repository as `.branvil/ci.toml`. Every commit runs
+its own copy, so a pull request that changes it runs the changed pipeline as
+its checks; review that change like any other part of the diff:
 
 ```toml
 [[jobs]]
@@ -359,7 +357,12 @@ With the service stopped:
 ```sh
 branvil admin check --data-dir ./data     # redb structure + every index against the records
 branvil admin reindex --data-dir ./data   # rebuild every index from the records
+branvil admin upgrade --data-dir ./data   # after updating Branvil, when the service says so
 ```
+
+A build whose stored format changed refuses the data directory of the version
+before it until `branvil admin upgrade` upgrades it; take a backup first. See
+"Upgrading" in [`docs/backup-restore.md`](docs/backup-restore.md).
 
 Logging goes to stderr; `BRANVIL_LOG` takes a `tracing` filter
 (default `branvil=info`).

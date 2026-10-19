@@ -51,14 +51,17 @@ closure returns `Ok` and aborts otherwise.
 
 ## Schema version
 
-`meta["schema_version"]` is written on creation (currently `7`: members are
+`meta["schema_version"]` is written on creation (currently `8`: members are
 the owner, agents, and runners, whose kind alone decides what they may do, and
 have accounts on upstream hosts, each a token or an app; a ticket has at most one assignee and may name
 an upstream issue; tickets belong to repositories, which hold their labels and
 may have an upstream; repositories belong to workspaces, each with one board;
-a pull request may be published upstream). A
-database of any other version is refused at open; there is no migration, so a
-data directory of another version is not readable by this build.
+a pull request may be published upstream; a CI run holds its commit's own
+pipeline). A database of any other version is refused at open. One of the
+previous version is upgraded by `branvil admin upgrade` or `branvil restore`
+(`src/upgrade.rs`, the only code that reads the previous shapes; it is
+replaced when the version is raised again), which first keeps a copy of the
+database as it was (`docs/backup-restore.md`, "Upgrading").
 
 ## Primary tables
 
@@ -80,7 +83,7 @@ data directory of another version is not readable by this build.
 | `ref_snapshots` | `(repo id, refname)` | last recorded object | `refs::record_refs` | push recording, startup rescan |
 | `ref_journal` | `(journal id)` | repo, ref, expected old/new, operation | merge (before `update-ref`) | completion, startup recovery |
 | `idempotency` | `(fold(member), key)` | request hash, status, response body, time | API middleware | API middleware |
-| `ci_runs` | `(repo id, sha)` | branches that want CI of the commit, pipeline source (branch, tip), pipeline (absent / invalid + message / job definitions), cache scope, waiting, superseded by | ref recording (`Ci::on_ref_changes`), PR open/reopen, reconciler, queue admission | checks, claims, retries |
+| `ci_runs` | `(repo id, sha)` | branches that want CI of the commit, the commit's pipeline (absent / invalid + message / job definitions), cache scope, waiting, superseded by | ref recording (`Ci::on_ref_changes`), PR open/reopen, reconciler, queue admission | checks, claims, retries |
 | `ci_attempts` | `(attempt id)` | job definition (snapshot), number, queue sequence, status, conclusion, details, SHA-256 of the lease, lease expiry, cancel requested, runner, cache scope, network, times, interrupted/superseded flags, artifact names and sizes, files pruned | registration, claim, heartbeat, finish, cancel, retry, sweeps | checks, job API, runner API, artifacts |
 
 Each comment, review, and inline comment is its own record, so adding one never
