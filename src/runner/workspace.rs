@@ -134,11 +134,20 @@ pub fn pack(
 
 // ---------------------------------------------------------------- cache
 
-/// The cache key of a job in a scope: repository, job, image, cached paths,
-/// the content of the key files, and the trust scope.
-pub fn cache_key(repo: &str, job: &JobDef, cache: &CacheDef, scope: &str, work: &Path) -> String {
+/// The cache key of a job in a scope: repository, job, the configuration
+/// digest of the image it runs on (a new version of a tag does not reuse
+/// what the previous one built), cached paths, the content of the key files,
+/// and the trust scope.
+pub fn cache_key(
+    repo: &str,
+    job: &JobDef,
+    image_digest: &str,
+    cache: &CacheDef,
+    scope: &str,
+    work: &Path,
+) -> String {
     let mut h = Vec::new();
-    for part in [repo, &job.name, &job.image, scope] {
+    for part in [repo, &job.name, image_digest, scope] {
         h.extend_from_slice(part.as_bytes());
         h.push(0);
     }
@@ -366,6 +375,8 @@ mod tests {
 
     #[test]
     fn cache_round_trip_and_eviction() {
+        const IMAGE: &str =
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111";
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path().join("work");
         let root = dir.path().join("cache");
@@ -376,9 +387,7 @@ mod tests {
             name: "t".into(),
             image: "alpine".into(),
             commands: vec!["true".into()],
-            timeout_secs: 1,
-            cpus: 1,
-            memory_mib: 128,
+            timeout_secs: None,
             artifacts: vec![],
             cache: None,
         };
@@ -386,18 +395,30 @@ mod tests {
             paths: vec!["target".into()],
             key_files: vec!["Cargo.lock".into()],
         };
-        let k1 = cache_key("acme/demo", &job, &cache, "protected", &work);
+        let k1 = cache_key("acme/demo", &job, IMAGE, &cache, "protected", &work);
         assert_ne!(
             k1,
-            cache_key("acme/demo", &job, &cache, "branch:x", &work),
+            cache_key("acme/demo", &job, IMAGE, &cache, "branch:x", &work),
             "scope is in the key"
+        );
+        assert_ne!(
+            k1,
+            cache_key(
+                "acme/demo",
+                &job,
+                &IMAGE.replace('1', "2"),
+                &cache,
+                "protected",
+                &work
+            ),
+            "the image's digest is in the key"
         );
         save(&root, &k1, &cache, &work, 1 << 20).unwrap();
         let fresh = dir.path().join("fresh");
         fs::create_dir_all(&fresh).unwrap();
         fs::write(fresh.join("Cargo.lock"), "v1").unwrap();
         assert_eq!(
-            cache_key("acme/demo", &job, &cache, "protected", &fresh),
+            cache_key("acme/demo", &job, IMAGE, &cache, "protected", &fresh),
             k1
         );
         assert_eq!(
@@ -409,7 +430,7 @@ mod tests {
             "object"
         );
         fs::write(fresh.join("Cargo.lock"), "v2").unwrap();
-        let k2 = cache_key("acme/demo", &job, &cache, "protected", &fresh);
+        let k2 = cache_key("acme/demo", &job, IMAGE, &cache, "protected", &fresh);
         assert_ne!(k1, k2, "key files are in the key");
         // A limit that fits only one entry keeps the newest.
         save(&root, &k2, &cache, &fresh, 8).unwrap();

@@ -6,8 +6,8 @@
 #   scripts/e2e-flow.sh /path/to/GuildBotics [--keep]
 #
 # Needs: a GuildBotics checkout with the `branvil` provider and its synced
-# environment (.venv); msb 0.6.17 and the pinned alpine image in Branvil's
-# image cache (`branvil runner pull ...`, see docs/ci.md); web/node_modules
+# environment (.venv); msb 0.6.17 and the alpine image its pipeline names in
+# Branvil's image cache (`branvil runner pull ...`, see docs/ci.md); web/node_modules
 # with Playwright; Google Chrome (or BRANVIL_E2E_CHANNEL= for Playwright's
 # Chromium). It starts its own service on a free loopback port and removes
 # its temporary directory afterwards.

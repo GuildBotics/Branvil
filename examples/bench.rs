@@ -684,7 +684,7 @@ fn source_file(rng: &mut Rng, lines: usize) -> String {
     s
 }
 
-const PIPELINE: &str = "version = 1\n\n[[jobs]]\nname = \"test\"\nimage = \"docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8\"\ncommands = [\"./test.sh\"]\n";
+const PIPELINE: &str = "version = 1\n\n[[jobs]]\nname = \"test\"\nimage = \"docker.io/library/alpine:3.22\"\ncommands = [\"./test.sh\"]\n";
 
 /// A fixture repository: `main` with a small tree and a pipeline, `pr/<n>`
 /// branches each one commit ahead, and `spare/<n>` branches the same way.

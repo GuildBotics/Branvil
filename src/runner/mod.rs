@@ -19,8 +19,8 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 
 use crate::ci::config::ExecutorConfig;
-use crate::ci::pipeline::JobDef;
-use executor::{Executor, Health, ImageCheck, JobRun, Microsandbox, Outcome};
+use crate::ci::pipeline::{CacheDef, JobDef};
+use executor::{Executor, Health, JobRun, Microsandbox, Outcome};
 
 #[derive(Subcommand)]
 pub enum RunnerCommand {
@@ -31,7 +31,7 @@ pub enum RunnerCommand {
     },
     /// Pull an image into the runner's image cache (jobs never pull)
     Pull {
-        /// Image reference, preferably pinned by digest
+        /// Image reference by tag, [registry/]name[:tag], as pipelines name it
         image: String,
     },
     /// Show which msb is used and whether the executor is ready
@@ -282,12 +282,13 @@ impl Api {
         c: &Claim,
         conclusion: &str,
         details: Option<String>,
+        image_digest: Option<&str>,
     ) -> Result<(), ApiError> {
         let resp = self
             .http
             .post(self.at(&format!("/runner/attempts/{}/finish", c.attempt_id)))
             .bearer_auth(&self.token)
-            .json(&serde_json::json!({"lease": c.lease, "conclusion": conclusion, "details": details}))
+            .json(&serde_json::json!({"lease": c.lease, "conclusion": conclusion, "details": details, "image_digest": image_digest}))
             .send()
             .await
             .map_err(Self::net)?;
@@ -335,7 +336,7 @@ pub async fn register(url: &str, owner_token: &str, name: &str) -> anyhow::Resul
 
 pub async fn pull(settings: &Settings, image: &str) -> anyhow::Result<()> {
     if !crate::ci::pipeline::valid_image(image) {
-        bail!("'{image}' is not an image reference");
+        bail!("'{image}' is not an image reference by tag ([registry/]name[:tag])");
     }
     let ms = settings.microsandbox("pull");
     let Some(mut cmd) = ms.command() else {
@@ -524,34 +525,6 @@ impl Runner {
         self.work_dir.join("jobs").join(&c.attempt_id)
     }
 
-    /// The job with this runner's limits applied (and notes on what changed).
-    fn bounded(&self, job: &JobDef, notes: &mut Vec<String>) -> JobDef {
-        let mut j = job.clone();
-        let l = &self.limits;
-        if j.cpus > l.max_cpus {
-            notes.push(format!(
-                "cpus {} exceeds the runner limit {}; using {}",
-                j.cpus, l.max_cpus, l.max_cpus
-            ));
-            j.cpus = l.max_cpus;
-        }
-        if j.memory_mib > l.max_memory_mib {
-            notes.push(format!(
-                "memory_mib {} exceeds the runner limit {}; using {}",
-                j.memory_mib, l.max_memory_mib, l.max_memory_mib
-            ));
-            j.memory_mib = l.max_memory_mib;
-        }
-        if j.timeout_secs > l.max_timeout_secs {
-            notes.push(format!(
-                "timeout_secs {} exceeds the runner limit {}; using {}",
-                j.timeout_secs, l.max_timeout_secs, l.max_timeout_secs
-            ));
-            j.timeout_secs = l.max_timeout_secs;
-        }
-        j
-    }
-
     async fn attempt<E: Executor>(
         &self,
         executor: &E,
@@ -580,12 +553,15 @@ impl Runner {
         if lost.load(Ordering::SeqCst) {
             return Err(ApiError::Lost);
         }
-        let (conclusion, details) = result;
-        self.api.finish(c, conclusion, details).await
+        let (conclusion, details, image_digest) = result;
+        self.api
+            .finish(c, conclusion, details, image_digest.as_deref())
+            .await
     }
 
-    /// Everything between the claim and the finish. Returns the conclusion
-    /// and its details.
+    /// Everything between the claim and the finish. Returns the conclusion,
+    /// its details, and the configuration digest of the image the job ran on
+    /// (none when it did not get that far).
     async fn work<E: Executor>(
         &self,
         executor: &E,
@@ -594,7 +570,7 @@ impl Runner {
         log: mpsc::Sender<Vec<u8>>,
         cancel: watch::Receiver<bool>,
         lost: &AtomicBool,
-    ) -> (&'static str, Option<String>) {
+    ) -> (&'static str, Option<String>, Option<String>) {
         let say = |text: String| {
             let log = log.clone();
             async move {
@@ -610,26 +586,29 @@ impl Runner {
             return (
                 "startup_failure",
                 Some(format!("The runner's executor is unavailable: {why}")),
+                None,
             );
         }
-        let mut notes = Vec::new();
-        let job = self.bounded(&c.job, &mut notes);
+        let job = &c.job;
+        let (cpus, memory_mib) = (self.limits.max_cpus, self.limits.max_memory_mib);
+        let max = self.limits.max_timeout_secs;
+        let timeout_secs = job.timeout_secs.map_or(max, |t| t.min(max));
         say(format!(
-            "attempt {} of job {} on {} {} (executor {}, image {}, {} cpu, {} MiB, timeout {} s, network {})",
+            "attempt {} of job {} on {} {} (executor {}, image {}, {cpus} cpu, {memory_mib} MiB, timeout {timeout_secs} s, network {})",
             c.attempt,
             job.name,
             c.repo,
             c.sha,
             executor.name(),
             job.image,
-            job.cpus,
-            job.memory_mib,
-            job.timeout_secs,
             if c.network { "public only" } else { "off" }
         ))
         .await;
-        for n in notes.drain(..) {
-            say(n).await;
+        if let Some(t) = job.timeout_secs.filter(|t| *t > max) {
+            say(format!(
+                "timeout_secs {t} exceeds the runner limit {max}; using {max}"
+            ))
+            .await;
         }
         // Checked before the source is fetched; the lock that comes with the
         // check keeps a load or a pull from re-pointing the checked tag until
@@ -639,223 +618,217 @@ impl Runner {
             checked = executor.resolve_image(&job.image, &log) => checked.map_err(Some),
             Ok(_) = stopping.wait_for(|stop| *stop) => Err(None),
         };
-        let (check, image_lock) = match checked {
+        let (held, image_lock) = match checked {
             Ok(checked) => checked,
             Err(None) => {
                 say("job ended: cancelled while waiting for the image cache".into()).await;
-                return ("cancelled", Some("Stopped on request.".to_string()));
+                return ("cancelled", Some("Stopped on request.".to_string()), None);
             }
             Err(Some(e)) => {
-                return (
-                    "startup_failure",
-                    Some(format!("Checking the image failed: {e}")),
-                );
-            }
-        };
-        let run_image = match check {
-            ImageCheck::Present(reference) => reference,
-            ImageCheck::Missing => {
-                let why = format!(
-                    "The image {} is not in the runner's image cache (jobs never pull); pull or load it under Settings → CI for the runner on the Branvil machine, or run `branvil runner pull {}` on the runner's machine.",
-                    job.image, job.image
-                );
+                let why = format!("Checking the image failed: {e}");
                 say(why.clone()).await;
-                return ("startup_failure", Some(why));
-            }
-            ImageCheck::Other(held) => {
-                let why = format!(
-                    "The runner's image cache holds the tag of {} as an image whose digest is {held}; load the pinned image into the runner's cache (Settings → CI for the runner on the Branvil machine).",
-                    job.image
-                );
-                say(why.clone()).await;
-                return ("startup_failure", Some(why));
+                return ("startup_failure", Some(why), None);
             }
         };
-        // The work directory as the VM will see it: canonical (the runner's
-        // directory may sit behind system links such as macOS's /var), and
-        // with no link anywhere below the runner's directory.
-        let root = match std::fs::create_dir_all(&self.work_dir)
-            .and_then(|_| std::fs::canonicalize(&self.work_dir))
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    "startup_failure",
-                    Some(format!("Cannot use the runner directory: {e}")),
-                );
-            }
-        };
-        let rel = format!("jobs/{}/work", c.attempt_id);
-        let log_rel = format!("jobs/{}/log", c.attempt_id);
-        let dir = root.join("jobs").join(&c.attempt_id);
-        let work = root.join(&rel);
-        let log_dir = root.join(&log_rel);
-        let _ = std::fs::remove_dir_all(&dir);
-        if let Err(e) = std::fs::create_dir_all(&work).and_then(|_| std::fs::create_dir(&log_dir)) {
-            return (
-                "startup_failure",
-                Some(format!("Cannot create the work directory: {e}")),
+        let Some(digest) = held else {
+            let why = format!(
+                "The image {} is not in the runner's image cache (jobs never pull); pull or load it under Settings → CI for the runner on the Branvil machine, or run `branvil runner pull {}` on the runner's machine.",
+                job.image, job.image
             );
-        }
-        match self.api.source(c).await {
-            Ok(tar) => {
-                let w = work.clone();
-                let unpacked =
-                    tokio::task::spawn_blocking(move || workspace::unpack(&tar, &w)).await;
-                if !matches!(unpacked, Ok(Ok(()))) {
+            say(why.clone()).await;
+            return ("startup_failure", Some(why), None);
+        };
+        say(format!("image {} is {digest}", job.image)).await;
+        // The job's own steps; a `return` in the block ends them.
+        let (conclusion, details) = async {
+            // The work directory as the VM will see it: canonical (the runner's
+            // directory may sit behind system links such as macOS's /var), and
+            // with no link anywhere below the runner's directory.
+            let root = match std::fs::create_dir_all(&self.work_dir)
+                .and_then(|_| std::fs::canonicalize(&self.work_dir))
+            {
+                Ok(r) => r,
+                Err(e) => {
                     return (
                         "startup_failure",
-                        Some("Unpacking the source failed.".into()),
+                        Some(format!("Cannot use the runner directory: {e}")),
+                    );
+                }
+            };
+            let rel = format!("jobs/{}/work", c.attempt_id);
+            let log_rel = format!("jobs/{}/log", c.attempt_id);
+            let dir = root.join("jobs").join(&c.attempt_id);
+            let work = root.join(&rel);
+            let log_dir = root.join(&log_rel);
+            let _ = std::fs::remove_dir_all(&dir);
+            if let Err(e) =
+                std::fs::create_dir_all(&work).and_then(|_| std::fs::create_dir(&log_dir))
+            {
+                return (
+                    "startup_failure",
+                    Some(format!("Cannot create the work directory: {e}")),
+                );
+            }
+            match self.api.source(c).await {
+                Ok(tar) => {
+                    let w = work.clone();
+                    let unpacked =
+                        tokio::task::spawn_blocking(move || workspace::unpack(&tar, &w)).await;
+                    if !matches!(unpacked, Ok(Ok(()))) {
+                        return (
+                            "startup_failure",
+                            Some("Unpacking the source failed.".into()),
+                        );
+                    }
+                }
+                Err(ApiError::Lost) => {
+                    lost.store(true, Ordering::SeqCst);
+                    return ("cancelled", None);
+                }
+                Err(e) => {
+                    return (
+                        "startup_failure",
+                        Some(format!("Fetching the source failed: {e}")),
                     );
                 }
             }
-            Err(ApiError::Lost) => {
-                lost.store(true, Ordering::SeqCst);
-                return ("cancelled", None);
-            }
-            Err(e) => {
+            // Re-check right before the VM gets the directories.
+            if let Err(e) = workspace::no_links_below(&root, &rel)
+                .and_then(|_| workspace::no_links_below(&root, &log_rel))
+            {
                 return (
                     "startup_failure",
-                    Some(format!("Fetching the source failed: {e}")),
+                    Some(format!("Unsafe work directory: {e}")),
                 );
             }
-        }
-        // Re-check right before the VM gets the directories.
-        if let Err(e) = workspace::no_links_below(&root, &rel)
-            .and_then(|_| workspace::no_links_below(&root, &log_rel))
-        {
-            return (
-                "startup_failure",
-                Some(format!("Unsafe work directory: {e}")),
-            );
-        }
-        let cache_root = self.work_dir.join("cache");
-        let cache_key = job
-            .cache
-            .as_ref()
-            .map(|cache| workspace::cache_key(&c.repo, &job, cache, &c.cache_scope, &work));
-        if let (Some(cache), Some(key)) = (&job.cache, &cache_key) {
-            let mut keys = vec![key.clone()];
-            if c.cache_scope != "protected" {
-                keys.push(workspace::cache_key(
-                    &c.repo,
-                    &job,
-                    cache,
-                    "protected",
-                    &work,
-                ));
-            }
-            match workspace::restore(&cache_root, &keys, cache, &work) {
-                Ok(Some(k)) if &k == key => say("cache restored".into()).await,
-                Ok(Some(_)) => {
-                    say("cache restored from the protected branches' cache (read only)".into())
-                        .await
-                }
-                Ok(None) => say("no cache entry yet".into()).await,
-                Err(e) => say(format!("cache restore failed: {e}")).await,
-            }
-        }
-        let env = vec![
-            ("CI".to_string(), "true".to_string()),
-            ("BRANVIL_CI".to_string(), "true".to_string()),
-            ("BRANVIL_REPOSITORY".to_string(), c.repo.clone()),
-            ("BRANVIL_SHA".to_string(), c.sha.clone()),
-            ("BRANVIL_JOB".to_string(), job.name.clone()),
-            ("BRANVIL_ATTEMPT_ID".to_string(), c.attempt_id.clone()),
-            ("BRANVIL_ATTEMPT".to_string(), c.attempt.to_string()),
-        ];
-        let outcome = executor
-            .run(
-                JobRun {
-                    attempt_id: &c.attempt_id,
-                    job: &job,
-                    image: &run_image,
-                    image_lock,
-                    work: &work,
-                    log_dir: &log_dir,
-                    network: c.network,
-                    env,
-                },
-                log.clone(),
-                cancel,
-            )
-            .await;
-        if lost.load(Ordering::SeqCst) {
-            return ("cancelled", None);
-        }
-        let (conclusion, details) = match &outcome {
-            Outcome::Exited(0) => ("success", None),
-            Outcome::Exited(code) => (
-                "failure",
-                Some(format!("A command exited with code {code}.")),
-            ),
-            Outcome::TimedOut => (
-                "timed_out",
-                Some(format!(
-                    "The job ran longer than {} s and was stopped.",
-                    job.timeout_secs
-                )),
-            ),
-            Outcome::Cancelled => ("cancelled", Some("Stopped on request.".to_string())),
-            Outcome::StartupFailure(m) => ("startup_failure", Some(m.clone())),
-        };
-        say(format!(
-            "job ended: {conclusion}{}",
-            details
+            let cache_root = self.work_dir.join("cache");
+            let cache_key = |cache: &CacheDef, scope: &str| {
+                workspace::cache_key(&c.repo, job, &digest, cache, scope, &work)
+            };
+            let key = job
+                .cache
                 .as_ref()
-                .map(|d| format!(" ({d})"))
-                .unwrap_or_default()
-        ))
-        .await;
-        if matches!(outcome, Outcome::Exited(_) | Outcome::TimedOut) {
-            let mut budget = self.limits.artifacts_max_mib << 20;
-            for a in &job.artifacts {
-                let mut notes = Vec::new();
-                let packed = workspace::pack(&work, a, &mut budget, &mut notes);
-                for n in notes {
-                    say(n).await;
+                .map(|cache| cache_key(cache, &c.cache_scope));
+            if let (Some(cache), Some(key)) = (&job.cache, &key) {
+                let mut keys = vec![key.clone()];
+                if c.cache_scope != "protected" {
+                    keys.push(cache_key(cache, "protected"));
                 }
-                match packed {
-                    Ok(Some(p)) => match self.api.artifact(c, &p.name, p.data).await {
-                        Ok(()) => {
-                            say(format!(
-                                "artifact {} uploaded ({} file(s))",
-                                p.name, p.files
-                            ))
+                match workspace::restore(&cache_root, &keys, cache, &work) {
+                    Ok(Some(k)) if &k == key => say("cache restored".into()).await,
+                    Ok(Some(_)) => {
+                        say("cache restored from the protected branches' cache (read only)".into())
                             .await
-                        }
-                        Err(ApiError::Lost) => {
-                            lost.store(true, Ordering::SeqCst);
-                            return ("cancelled", None);
-                        }
-                        Err(e) => say(format!("artifact {}: upload failed: {e}", p.name)).await,
+                    }
+                    Ok(None) => say("no cache entry yet".into()).await,
+                    Err(e) => say(format!("cache restore failed: {e}")).await,
+                }
+            }
+            let env = vec![
+                ("CI".to_string(), "true".to_string()),
+                ("BRANVIL_CI".to_string(), "true".to_string()),
+                ("BRANVIL_REPOSITORY".to_string(), c.repo.clone()),
+                ("BRANVIL_SHA".to_string(), c.sha.clone()),
+                ("BRANVIL_JOB".to_string(), job.name.clone()),
+                ("BRANVIL_ATTEMPT_ID".to_string(), c.attempt_id.clone()),
+                ("BRANVIL_ATTEMPT".to_string(), c.attempt.to_string()),
+            ];
+            let outcome = executor
+                .run(
+                    JobRun {
+                        attempt_id: &c.attempt_id,
+                        job,
+                        image_lock,
+                        cpus,
+                        memory_mib,
+                        timeout_secs,
+                        work: &work,
+                        log_dir: &log_dir,
+                        network: c.network,
+                        env,
                     },
-                    Ok(None) => {}
-                    Err(e) => say(format!("artifact {}: {e}", a.name)).await,
+                    log.clone(),
+                    cancel,
+                )
+                .await;
+            if lost.load(Ordering::SeqCst) {
+                return ("cancelled", None);
+            }
+            let (conclusion, details) = match &outcome {
+                Outcome::Exited(0) => ("success", None),
+                Outcome::Exited(code) => (
+                    "failure",
+                    Some(format!("A command exited with code {code}.")),
+                ),
+                Outcome::TimedOut => (
+                    "timed_out",
+                    Some(format!(
+                        "The job ran longer than {timeout_secs} s and was stopped."
+                    )),
+                ),
+                Outcome::Cancelled => ("cancelled", Some("Stopped on request.".to_string())),
+                Outcome::StartupFailure(m) => ("startup_failure", Some(m.clone())),
+            };
+            say(format!(
+                "job ended: {conclusion}{}",
+                details
+                    .as_ref()
+                    .map(|d| format!(" ({d})"))
+                    .unwrap_or_default()
+            ))
+            .await;
+            if matches!(outcome, Outcome::Exited(_) | Outcome::TimedOut) {
+                let mut budget = self.limits.artifacts_max_mib << 20;
+                for a in &job.artifacts {
+                    let mut notes = Vec::new();
+                    let packed = workspace::pack(&work, a, &mut budget, &mut notes);
+                    for n in notes {
+                        say(n).await;
+                    }
+                    match packed {
+                        Ok(Some(p)) => match self.api.artifact(c, &p.name, p.data).await {
+                            Ok(()) => {
+                                say(format!(
+                                    "artifact {} uploaded ({} file(s))",
+                                    p.name, p.files
+                                ))
+                                .await
+                            }
+                            Err(ApiError::Lost) => {
+                                lost.store(true, Ordering::SeqCst);
+                                return ("cancelled", None);
+                            }
+                            Err(e) => say(format!("artifact {}: upload failed: {e}", p.name)).await,
+                        },
+                        Ok(None) => {}
+                        Err(e) => say(format!("artifact {}: {e}", a.name)).await,
+                    }
                 }
             }
-        }
-        if conclusion == "success"
-            && let (Some(cache), Some(key)) = (&job.cache, &cache_key)
-        {
-            match workspace::save(
-                &cache_root,
-                key,
-                cache,
-                &work,
-                self.limits.cache_max_mib << 20,
-            ) {
-                Ok(bytes) => {
-                    say(format!(
-                        "cache saved ({bytes} bytes, scope {})",
-                        c.cache_scope
-                    ))
-                    .await
+            if conclusion == "success"
+                && let (Some(cache), Some(key)) = (&job.cache, &key)
+            {
+                match workspace::save(
+                    &cache_root,
+                    key,
+                    cache,
+                    &work,
+                    self.limits.cache_max_mib << 20,
+                ) {
+                    Ok(bytes) => {
+                        say(format!(
+                            "cache saved ({bytes} bytes, scope {})",
+                            c.cache_scope
+                        ))
+                        .await
+                    }
+                    Err(e) => say(format!("cache save failed: {e}")).await,
                 }
-                Err(e) => say(format!("cache save failed: {e}")).await,
             }
+            (conclusion, details)
         }
-        (conclusion, details)
+        .await;
+        (conclusion, details, Some(digest))
     }
 }
 
@@ -940,8 +913,16 @@ mod tests {
         ready: AtomicBool,
         /// The image cache is held (by a pull or a load): checks wait.
         hold_images: AtomicBool,
-        /// (the reference run, the job's pinned image) of every run.
-        ran: std::sync::Mutex<Vec<(String, String)>>,
+        /// What every run got: (image, cpus, memory MiB, timeout s).
+        ran: std::sync::Mutex<Vec<(String, u32, u64, u64)>>,
+    }
+
+    /// The configuration digest the fake cache holds `image` as.
+    fn digest_of(image: &str) -> String {
+        format!(
+            "sha256:{}",
+            crate::util::hex(&crate::util::sha256(image.as_bytes()))
+        )
     }
 
     impl Executor for Fake {
@@ -959,14 +940,11 @@ mod tests {
             &self,
             image: &str,
             _: &mpsc::Sender<Vec<u8>>,
-        ) -> Result<(ImageCheck, ImageLock), String> {
+        ) -> Result<(Option<String>, ImageLock), String> {
             if self.hold_images.load(Ordering::SeqCst) {
                 std::future::pending::<()>().await;
             }
-            Ok((
-                ImageCheck::Present(format!("{image}#resolved")),
-                ImageLock::default(),
-            ))
+            Ok((Some(digest_of(image)), ImageLock::default()))
         }
         async fn run(
             &self,
@@ -974,10 +952,12 @@ mod tests {
             log: mpsc::Sender<Vec<u8>>,
             mut cancel: watch::Receiver<bool>,
         ) -> Outcome {
-            self.ran
-                .lock()
-                .unwrap()
-                .push((job.image.to_string(), job.job.image.clone()));
+            self.ran.lock().unwrap().push((
+                job.job.image.clone(),
+                job.cpus,
+                job.memory_mib,
+                job.timeout_secs,
+            ));
             for c in &job.job.commands {
                 let words: Vec<&str> = c.split_whitespace().collect();
                 match words.as_slice() {
@@ -1097,7 +1077,7 @@ mod tests {
         std::fs::write(
             work.join(".branvil/ci.toml"),
             "[[jobs]]\nname = \"ok\"\nimage = \"alpine\"\ncommands = [\"echo hello from the job\", \"write out/r.txt report\"]\nartifacts = [{name = \"report\", paths = [\"out/\"]}]\n\n\
-             [[jobs]]\nname = \"slow\"\nimage = \"alpine\"\ncommands = [\"wait\"]\n",
+             [[jobs]]\nname = \"slow\"\nimage = \"alpine\"\ncommands = [\"wait\"]\ntimeout_secs = 5000\n",
         )
         .unwrap();
         git(&work, &["init", "-q", "-b", "main"]);
@@ -1115,7 +1095,12 @@ mod tests {
         let runner = Runner {
             api: Api::new(&url, &runner_token),
             work_dir: dir.path().join("runner"),
-            limits: ExecutorConfig::default(),
+            limits: ExecutorConfig {
+                max_cpus: 3,
+                max_memory_mib: 2048,
+                max_timeout_secs: 100,
+                ..ExecutorConfig::default()
+            },
         };
         let fake = Fake {
             ready: AtomicBool::new(true),
@@ -1145,13 +1130,24 @@ mod tests {
         assert!(runner.once(&fake).await.unwrap());
         let ok = checks().await.into_iter().find(|c| c.name == "ok").unwrap();
         assert_eq!(ok.conclusion.as_deref(), Some("success"), "{ok:?}");
-        // The executor runs the resolved reference; the job (and with it the
-        // cache key) keeps the pinned image.
-        let (run, pinned) = fake.ran.lock().unwrap()[0].clone();
-        assert_eq!(run, format!("{pinned}#resolved"));
+        // The executor runs the tag with the runner's CPUs and memory, and
+        // the runner's time limit for a job that gives none.
+        assert_eq!(
+            fake.ran.lock().unwrap()[0],
+            ("alpine".to_string(), 3, 2048, 100)
+        );
         assert_eq!(ok.artifact_names, vec!["report".to_string()]);
         let id = ok.attempt_id.clone().unwrap();
+        // The attempt records the image it ran on, and the log says so first.
+        let digest = digest_of("alpine");
+        assert_eq!(job(&id).await["image_digest"], digest.as_str());
         let (log, _) = app.ci.log_tail(&id, 1 << 20).await.unwrap();
+        assert!(
+            log.starts_with(&format!(
+                "[branvil] attempt 1 of job ok on acme/demo {sha} (executor fake, image alpine, 3 cpu, 2048 MiB, timeout 100 s, network off)\n[branvil] image alpine is {digest}\n"
+            )),
+            "{log}"
+        );
         assert!(log.contains("hello from the job"), "{log}");
         assert!(
             log.contains("artifact report uploaded (1 file(s))"),
@@ -1204,6 +1200,14 @@ mod tests {
         let (runner, fake, slow_id) = cancel_slow(runner, fake).await;
         let slow = job(&slow_id).await;
         assert_eq!(slow["conclusion"], "cancelled", "{slow}");
+        assert_eq!(slow["image_digest"], digest.as_str());
+        // A larger time limit is lowered to the runner's, and the log says so.
+        assert_eq!(fake.ran.lock().unwrap()[1].3, 100);
+        let (log, _) = app.ci.log_tail(&slow_id, 1 << 20).await.unwrap();
+        assert!(
+            log.contains("[branvil] timeout_secs 5000 exceeds the runner limit 100; using 100\n"),
+            "{log}"
+        );
         fake.hold_images.store(true, Ordering::SeqCst);
         let resp = http
             .post(format!(
@@ -1217,6 +1221,14 @@ mod tests {
         let (runner, fake, waiting_id) = cancel_slow(runner, fake).await;
         let waiting = job(&waiting_id).await;
         assert_eq!(waiting["conclusion"], "cancelled", "{waiting}");
+        assert!(waiting["image_digest"].is_null(), "{waiting}");
+        // Its log still names the attempt it was.
+        let (log, _) = app.ci.log_tail(&waiting_id, 1 << 20).await.unwrap();
+        assert!(
+            log.starts_with("[branvil] attempt 2 of job slow on acme/demo ")
+                && log.contains("job ended: cancelled while waiting for the image cache"),
+            "{log}"
+        );
         assert_eq!(
             fake.ran.lock().unwrap().len(),
             2,

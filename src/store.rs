@@ -23,7 +23,7 @@ pub type Tbl = TableDefinition<'static, &'static [u8], &'static [u8]>;
 /// The schema version this build reads and writes. A database of any other
 /// version is refused instead of being misread; one of the previous version
 /// is upgraded by `upgrade` (`branvil admin upgrade`, `branvil restore`).
-pub const SCHEMA_VERSION: u64 = 8;
+pub const SCHEMA_VERSION: u64 = 9;
 
 pub const META: Tbl = TableDefinition::new("meta");
 pub const COUNTERS: Tbl = TableDefinition::new("counters");
@@ -949,10 +949,11 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("left at schema version 7"), "{err}");
+        let previous = format!("schema version {}", crate::upgrade::FROM);
+        assert!(err.contains(&format!("left at {previous}")), "{err}");
         assert!(err.contains("an unexpected record"), "{err}");
         let err = Store::open(&path, 1 << 20, 1).err().unwrap().to_string();
-        assert!(err.contains("schema version 7"), "{err}");
+        assert!(err.contains(&previous), "{err}");
         let db = Database::open(&path).unwrap();
         let txn = db.begin_read().unwrap();
         assert_eq!(txn.get_raw(CI_RUNS, b"k").unwrap().unwrap(), run);
@@ -965,7 +966,8 @@ mod tests {
             .collect();
         assert_eq!(copies.len(), 1, "{copies:?}");
         assert!(
-            copies[0].starts_with("branvil-schema-7-") && copies[0].ends_with(".redb"),
+            copies[0].starts_with(&format!("branvil-schema-{}-", crate::upgrade::FROM))
+                && copies[0].ends_with(".redb"),
             "{copies:?}"
         );
     }

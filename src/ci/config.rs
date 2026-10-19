@@ -54,14 +54,17 @@ impl Default for CiConfig {
     }
 }
 
-/// Limits the runner applies to every job, whatever the pipeline asks for.
+/// What the runner gives every job.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields, default)]
 pub struct ExecutorConfig {
     /// Per-job work directories and the dependency cache [default: ~/.branvil/runner].
     pub work_dir: Option<PathBuf>,
+    /// The CPUs and memory of every job's microVM.
     pub max_cpus: u32,
     pub max_memory_mib: u64,
+    /// The time limit of a job that gives none, and the cap of a pipeline's
+    /// `timeout_secs`.
     pub max_timeout_secs: u64,
     /// Dependency cache size; least recently used entries are removed beyond it.
     pub cache_max_mib: u64,

@@ -84,7 +84,7 @@ database as it was (`docs/backup-restore.md`, "Upgrading").
 | `ref_journal` | `(journal id)` | repo, ref, expected old/new, operation | merge (before `update-ref`) | completion, startup recovery |
 | `idempotency` | `(fold(member), key)` | request hash, status, response body, time | API middleware | API middleware |
 | `ci_runs` | `(repo id, sha)` | branches that want CI of the commit, the commit's pipeline (absent / invalid + message / job definitions), cache scope, waiting, superseded by | ref recording (`Ci::on_ref_changes`), PR open/reopen, reconciler, queue admission | checks, claims, retries |
-| `ci_attempts` | `(attempt id)` | job definition (snapshot), number, queue sequence, status, conclusion, details, SHA-256 of the lease, lease expiry, cancel requested, runner, cache scope, network, times, interrupted/superseded flags, artifact names and sizes, files pruned | registration, claim, heartbeat, finish, cancel, retry, sweeps | checks, job API, runner API, artifacts |
+| `ci_attempts` | `(attempt id)` | job definition (snapshot), the configuration digest of the image it ran on, number, queue sequence, status, conclusion, details, SHA-256 of the lease, lease expiry, cancel requested, runner, cache scope, network, times, interrupted/superseded flags, artifact names and sizes, files pruned | registration, claim, heartbeat, finish, cancel, retry, sweeps | checks, job API, runner API, artifacts |
 
 Each comment, review, and inline comment is its own record, so adding one never
 rewrites a history; a reaction rewrites only its target entry.

@@ -43,16 +43,12 @@ from urllib.parse import quote
 
 import httpx
 
-IMAGE = (
-    "docker.io/library/alpine@sha256:"
-    "5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8"
-)
+IMAGE = "docker.io/library/alpine:3.22"
 PIPELINE = f"""[[jobs]]
 name = "test"
 image = "{IMAGE}"
 commands = ["sh scripts/test.sh"]
 timeout_secs = 120
-memory_mib = 256
 """
 TEST_SH = """set -e
 if [ -f greeting.txt ]; then grep -qx 'hello' greeting.txt; fi

@@ -230,7 +230,7 @@ its checks; review that change like any other part of the diff:
 ```toml
 [[jobs]]
 name = "test"
-image = "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8"
+image = "docker.io/library/alpine:3.22"
 commands = ["./scripts/test.sh"]
 timeout_secs = 600
 artifacts = [{ name = "report", paths = ["out/"] }]
@@ -239,26 +239,28 @@ artifacts = [{ name = "report", paths = ["out/"] }]
 Then require the job for merging (`PATCH /api/v1/repos/{repo}`
 `{"required_checks": ["test"]}`) and start a runner. The runner is a separate
 process; it needs a runner member's token and the images in its cache (jobs
-never pull):
+never pull; which version of a tag runs is the one the cache holds, so pulling
+or loading the tag again moves the jobs to its new version):
 
 ```sh
 branvil runner register runner1                                # on the Hub: prints runner1's token once
-branvil runner pull docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+branvil runner pull docker.io/library/alpine:3.22
 branvil runner doctor                                          # msb found? executor ready?
 BRANVIL_TOKEN=<runner token> branvil runner                    # runs until stopped
 ```
 
 Or let the service start and supervise one: under Settings → CI in the GUI
-the owner switches the runner on, sets the job limits, and pulls an image or
+the owner switches the runner on, sets the job resources, and pulls an image or
 loads one from a `docker save` archive on the Branvil machine (the page shows
-the reference to write as `image`); a repository's CI tab allows its jobs the
+the tag to write as `image`); a repository's CI tab allows its jobs the
 network. The same settings are `runner = "auto"` and `[ci.executor]` in
 `branvil.toml`.
 
 Each job runs in its own microVM with only the commit's tree mounted at
 `/work`, no network (the owner may allow public destinations per repository
-with `ci_network`), and the job's CPU, memory, and time limits capped by the
-runner's `[ci.executor]` settings. Without a runner, jobs end
+with `ci_network`), the CPUs and memory of the runner's `[ci.executor]`
+settings, and its `timeout_secs` capped by the runner's time limit (which is
+the limit of a job that gives none). Without a runner, jobs end
 `startup_failure` after two minutes; nothing ever runs on the host. Logs,
 artifacts, retry and cancel, states, limits, and the trust model:
 [`docs/ci.md`](docs/ci.md).
@@ -495,8 +497,8 @@ provider's readiness goes from pending to ready; the owner enters the GUI with
 with the installed Google Chrome; `BRANVIL_E2E_CHANNEL=` for Playwright's
 Chromium); the ticket ends closed in the done lane, `closed_since()` lists the
 ticket and the pull request, and `main` is the merged head (the repository has
-no upstream; publishing is covered by `tests/upstream.rs`). It needs msb 0.6.17 with the pinned alpine image in
-Branvil's image cache (see "CI") and `web/node_modules`. It prints the time of
+no upstream; publishing is covered by `tests/upstream.rs`). It needs msb 0.6.17 with the alpine image its pipeline names
+(`docker.io/library/alpine:3.22`) in Branvil's image cache (see "CI") and `web/node_modules`. It prints the time of
 every step ([`docs/performance.md`](docs/performance.md) has measured runs).
 
 ## Documents

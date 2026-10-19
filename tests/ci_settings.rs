@@ -11,7 +11,7 @@ use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-const IMAGE: &str = "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
+const IMAGE: &str = "docker.io/library/alpine:3.22";
 
 /// Lands `.branvil/ci.toml` on main through a merged pull request.
 async fn land_pipeline(w: &World) {
@@ -83,7 +83,7 @@ async fn the_owner_changes_the_runner_and_limits_and_they_survive_a_restart() {
     // No msb in the isolated home, so the image the pipeline names is missing.
     assert_eq!(
         v["images"]["missing"],
-        json!([{"image": IMAGE, "repositories": [{"repository": REPO, "jobs": ["test"]}], "held": null}])
+        json!([{"image": IMAGE, "repositories": [{"repository": REPO, "jobs": ["test"]}]}])
     );
     assert_eq!(v["images"]["cached"], json!([]));
     assert!(v["operation"].is_null());
@@ -171,7 +171,8 @@ async fn image_operations_take_only_image_references_and_regular_files() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.join("image.tar"), dir.join("link.tar")).unwrap();
 
-    for reference in ["", "-x", "alpine@sha256:short", "a b"] {
+    let digest = "alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
+    for reference in ["", "-x", "alpine@sha256:short", digest, "a b"] {
         let (st, v) = w
             .server
             .post(

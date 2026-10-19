@@ -9,7 +9,9 @@ use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-const IMAGE: &str = "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
+const IMAGE: &str = "docker.io/library/alpine:3.22";
+/// The configuration digest the scripted runner reports for the image.
+const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
 fn pipeline(jobs: &[&str]) -> String {
     let mut s = String::new();
@@ -82,7 +84,7 @@ impl Runner {
         self.post(
             c,
             "finish",
-            json!({"lease": c["lease"], "conclusion": conclusion, "details": format!("scripted {conclusion}")}),
+            json!({"lease": c["lease"], "conclusion": conclusion, "details": format!("scripted {conclusion}"), "image_digest": DIGEST}),
         )
         .await
     }
@@ -252,6 +254,10 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
     assert_eq!(c["sha"], head.as_str());
     assert_eq!(c["job"]["name"], "test");
     assert_eq!(c["job"]["commands"], json!(["echo changed"]));
+    assert_eq!(c["job"]["image"], IMAGE);
+    // The runner's limits apply: the pipeline gives no time limit.
+    assert!(c["job"]["timeout_secs"].is_null(), "{c}");
+    assert!(c["job"].get("cpus").is_none(), "{c}");
     assert_eq!(c["repo"], REPO);
     assert_eq!(c["network"], false);
     assert_eq!(c["cache_scope"], "branch:feature");
@@ -323,8 +329,17 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
         409
     );
 
+    let (st, fin) = runner
+        .post(
+            &c,
+            "finish",
+            json!({"lease": c["lease"], "conclusion": "success", "image_digest": "alpine:3.22"}),
+        )
+        .await;
+    assert_eq!(st, 400, "not a digest: {fin}");
     let (st, fin) = runner.finish(&c, "success").await;
     assert_eq!(st, 200, "{fin}");
+    assert_eq!(fin["image_digest"], DIGEST);
     let v = checks(&w, n).await;
     let t = check(&v, "test");
     assert_eq!(
@@ -344,6 +359,7 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
     assert_eq!(job["job"], "test");
     assert_eq!(job["attempt"], 1);
     assert_eq!(job["sha"], head.as_str());
+    assert_eq!(job["image_digest"], DIGEST);
     let log = w
         .server
         .ok(
@@ -420,47 +436,56 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
 }
 
 #[tokio::test]
-async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upgrade() {
+async fn a_version_8_run_takes_its_commits_pipeline_as_now_read_after_the_upgrade() {
     let mut w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;
-    land(
-        &w,
-        "setup",
-        &[(".branvil/ci.toml", &pipeline(&["test"]))],
-        None,
-    )
-    .await;
+    // The default branch's pipeline gives its time limit: it reads the same.
+    let valid = pipeline(&["test"]).replace("commands", "timeout_secs = 600\ncommands");
+    land(&w, "setup", &[(".branvil/ci.toml", &valid)], None).await;
     assert_eq!(runner.drain("success").await, 1);
     set_required(&w, &["test"]).await;
-    sync_main(&w);
-    let changed = pipeline(&["test"]).replace("echo test", "echo changed");
-    std::fs::write(w.work.join(".branvil/ci.toml"), changed).unwrap();
-    git_ok(&w.work, &["add", ".branvil/ci.toml"]);
-    let head = w.push_change("feature", "f.txt", "one\n");
-    let p = w.open_pull("feature", json!([])).await;
+    // Heads of open pull requests, each with a pipeline of its own.
+    let open_head = |branch: &'static str, ci: String| {
+        let w = &w;
+        async move {
+            sync_main(w);
+            std::fs::write(w.work.join(".branvil/ci.toml"), ci).unwrap();
+            git_ok(&w.work, &["add", ".branvil/ci.toml"]);
+            let head = w.push_change(branch, "f.txt", &format!("{branch}\n"));
+            let p = w.open_pull(branch, json!([])).await;
+            (head, p)
+        }
+    };
+    // A head whose job sets its CPUs, as version 8 accepted.
+    let (head, p) = open_head("feature", valid.replace("commands", "cpus = 2\ncommands")).await;
     let n = p["number"].as_u64().unwrap();
     let base = p["base_sha"].as_str().unwrap().to_string();
-    let c = runner.claim().await.unwrap();
-    runner.finish(&c, "success").await;
-    let old_attempt = c["attempt_id"].as_str().unwrap().to_string();
+    // A head whose job pins its image by digest, as version 8 accepted.
+    let pinned_image = format!("docker.io/library/alpine@{DIGEST}");
+    let (pinned, _) = open_head("pinned", valid.replace(IMAGE, &pinned_image)).await;
+    // A head whose job gives no time limit, its attempt still queued:
+    // version 8 recorded the 600 s default.
+    let (untimed, _) = open_head("untimed", pipeline(&["test"])).await;
 
-    // What version 7 recorded for the head: the base's pipeline, and a
-    // successful attempt of the base's job.
+    // What version 8 recorded: jobs with CPUs and memory, attempts without
+    // the image they ran on, and the head's job as its file defined it.
     w.server.stop();
     let db = w.server.data.join("branvil.redb");
+    as_schema_8(&db);
     let base_run = records(&db, "ci_runs")
         .into_iter()
         .find(|r| r["sha"] == base.as_str())
         .unwrap();
-    let base_job = base_run["pipeline"]["jobs"][0].clone();
+    let mut head_pipeline = base_run["pipeline"].clone();
+    head_pipeline["jobs"][0]["cpus"] = json!(2);
+    let mut pinned_pipeline = base_run["pipeline"].clone();
+    pinned_pipeline["jobs"][0]["image"] = json!(pinned_image);
     edit_records(&db, "ci_runs", |r| {
         if r["sha"] == head.as_str() {
-            r["pipeline"] = base_run["pipeline"].clone();
+            r["pipeline"] = head_pipeline.clone();
         }
-    });
-    edit_records(&db, "ci_attempts", |a| {
-        if a["sha"] == head.as_str() {
-            a["job"] = base_job.clone();
+        if r["sha"] == pinned.as_str() {
+            r["pipeline"] = pinned_pipeline.clone();
         }
     });
     // A run of a commit that is no longer in the repository.
@@ -471,7 +496,6 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
     lost["superseded_by"] = json!(base);
     let repo_id = base_run["repo"].as_str().unwrap();
     insert_record(&db, "ci_runs", &key_of(&[repo_id, &gone]), &lost);
-    as_schema_7(&db, |r| (r["sha"] == head.as_str()).then(|| base.clone()));
     let before = tables(&db);
 
     // The service does not open it; `admin upgrade` does, keeping a copy.
@@ -524,7 +548,12 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
     assert_eq!(copies(), 0);
     std::fs::rename(&away, &repos).unwrap();
     let (ok, text) = admin("upgrade");
-    assert!(ok && text.contains("1 could not be verified"), "{text}");
+    assert!(
+        ok && text.contains("the jobs of 2 CI attempt(s) lost their cpus and memory_mib")
+            && text.contains("against its commit: 4 took a new one (1 could not be verified")
+            && text.contains("1 unfinished attempt(s) of another definition were stopped"),
+        "{text}"
+    );
     assert_eq!(copies(), 1);
     let copy = text
         .lines()
@@ -532,49 +561,93 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
         .unwrap();
     let copy = std::path::Path::new(copy);
     assert_eq!(tables(copy), before);
-    // Only the runs and the version changed: each run lost its source, the
-    // head's took its own pipeline, and the gone commit's cannot be verified.
+    // Only the CI records (and the stopped attempt's queue entry) and the
+    // version changed.
     let (mut after, mut expected) = (tables(&db), before.clone());
-    for t in ["ci_runs", "meta"] {
+    for t in ["ci_runs", "ci_attempts", "ix_ci_pending", "meta"] {
         after.remove(t);
         expected.remove(t);
     }
     assert_eq!(after, expected);
+    let without_resources = |job: &mut Value| {
+        let job = job.as_object_mut().unwrap();
+        assert!(job.remove("cpus").is_some() && job.remove("memory_mib").is_some());
+    };
+    assert!(records(&db, "ix_ci_pending").is_empty());
+    // Every attempt's job lost its CPUs and memory and kept its time limit;
+    // no attempt names the image it ran on. The untimed head's queued
+    // attempt is of another definition now (its pipeline gives no time
+    // limit) and was stopped.
+    let attempts = records(&db, "ci_attempts");
+    assert_eq!(attempts.len(), 2);
+    for (mut old, new) in records(copy, "ci_attempts").into_iter().zip(&attempts) {
+        without_resources(&mut old["job"]);
+        old["image_digest"] = Value::Null;
+        if old["sha"] == untimed.as_str() {
+            assert_eq!(old["status"], "queued");
+            assert_eq!(
+                (&new["status"], &new["conclusion"]),
+                (&json!("completed"), &json!("cancelled"))
+            );
+            assert_eq!(
+                new["details"],
+                "Stopped by the upgrade to schema version 9: the commit's pipeline does not define this job so."
+            );
+            for k in ["status", "conclusion", "details", "finished_at"] {
+                old[k] = new[k].clone();
+            }
+        }
+        assert_eq!(&old, new);
+        assert_eq!(new["job"]["timeout_secs"], 600);
+    }
+    // Each run took its commit's pipeline as read now: the base's reads the
+    // same, the head's and the pinned one's are invalid with the reason, the
+    // untimed one's has no time limit, the gone commit's cannot be verified.
     let upgraded = records(&db, "ci_runs");
     let original = records(copy, "ci_runs");
     assert_eq!(upgraded.len(), original.len());
     for (mut old, new) in original.into_iter().zip(upgraded) {
-        assert!(old.as_object_mut().unwrap().remove("source").is_some());
+        let message = new["pipeline"]["message"].as_str().unwrap_or("");
         if old["sha"] == head.as_str() {
-            assert_eq!(
-                new["pipeline"]["jobs"][0]["commands"],
-                json!(["echo changed"])
-            );
-            old["pipeline"] = new["pipeline"].clone();
-        }
-        if old["sha"] == gone.as_str() {
             assert_eq!(new["pipeline"]["state"], "invalid", "{new}");
             assert!(
-                new["pipeline"]["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("could not verify"),
+                message.contains("cpus and memory_mib are not pipeline settings"),
                 "{new}"
             );
             old["pipeline"] = new["pipeline"].clone();
+        } else if old["sha"] == pinned.as_str() {
+            assert_eq!(new["pipeline"]["state"], "invalid", "{new}");
+            assert!(message.contains("without a digest"), "{new}");
+            old["pipeline"] = new["pipeline"].clone();
+        } else if old["sha"] == untimed.as_str() {
+            assert_eq!(old["pipeline"]["jobs"][0]["timeout_secs"], 600);
+            assert!(
+                new["pipeline"]["jobs"][0]["timeout_secs"].is_null(),
+                "{new}"
+            );
+            old["pipeline"] = new["pipeline"].clone();
+        } else if old["sha"] == gone.as_str() {
+            assert_eq!(new["pipeline"]["state"], "invalid", "{new}");
+            assert!(message.contains("could not verify"), "{new}");
+            old["pipeline"] = new["pipeline"].clone();
+        } else {
+            let jobs = old
+                .pointer_mut("/pipeline/jobs")
+                .and_then(Value::as_array_mut);
+            jobs.into_iter().flatten().for_each(without_resources);
         }
         assert_eq!(old, new);
     }
     let (ok, text) = admin("upgrade");
     assert!(
-        ok && text.contains("already has schema version 8"),
+        ok && text.contains("already has schema version 9"),
         "{text}"
     );
     let (ok, text) = admin("check");
     assert!(ok && text.contains("indexes: ok"), "{text}");
 
-    // Started again, the head runs its own pipeline: the base's success is
-    // history, not the check, and the merge waits.
+    // Started again, the head's pipeline is a failing check with the reason,
+    // and the merge waits.
     w.restart(&[]);
     let runner = Runner {
         url: w.server.url.clone(),
@@ -582,8 +655,15 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
         http: reqwest::Client::new(),
     };
     let v = checks(&w, n).await;
-    let t = check(&v, "test");
-    assert_eq!(t["status"], "queued", "{v}");
+    let invalid = check(&v, "pipeline");
+    assert_eq!(invalid["conclusion"], "failure", "{v}");
+    assert!(
+        invalid["details"]
+            .as_str()
+            .unwrap()
+            .contains("cpus and memory_mib are not pipeline settings"),
+        "{v}"
+    );
     let (st, v) = w
         .server
         .post(
@@ -597,23 +677,34 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
         (409, Some("not_mergeable")),
         "{v}"
     );
-    // The reconciler queues it at start.
-    let mut claimed = None;
-    for _ in 0..60 {
-        claimed = runner.claim().await;
-        if claimed.is_some() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    let c = claimed.unwrap();
-    assert_eq!(c["sha"], head.as_str());
-    assert_eq!(c["job"]["commands"], json!(["echo changed"]));
+    // The base's attempt is still its job's current one: it can be retried,
+    // with its time limit.
+    let id = attempts[0]["id"].as_str().unwrap();
     let old = w
         .server
-        .ok(&format!("{}/jobs/{old_attempt}", w.repo_path()), &w.ken)
+        .ok(&format!("{}/jobs/{id}", w.repo_path()), &w.ken)
         .await;
     assert_eq!(old["conclusion"], "success");
+    assert!(old["image_digest"].is_null(), "{old}");
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/jobs/{id}/retry", w.repo_path()),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    // (The reconciler may have queued the untimed head's job again first.)
+    let c = loop {
+        let c = runner.claim().await.unwrap();
+        if c["sha"] == base.as_str() {
+            break c;
+        }
+        assert_eq!(c["sha"], untimed.as_str(), "{c}");
+    };
+    assert_eq!(c["job"]["timeout_secs"], 600);
+    assert!(c["job"].get("cpus").is_none(), "{c}");
 }
 
 #[tokio::test]
