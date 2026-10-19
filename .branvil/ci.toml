@@ -1,0 +1,47 @@
+# Branvil's own CI: the checks of "Development" in README.md, one job each.
+#
+# The image is GuildBotics' development image (Rust, Python 3, Git), named by
+# its tag: the version the runner's cache holds under it runs, and the jobs
+# get the runner's CPUs and memory (Settings → CI).
+#
+# A job's environment holds CI metadata only (no HOME), so Cargo's home is
+# under the work directory, where the cache can keep its registry. The cache
+# restores `target` built from other commits, while the commit's files keep
+# the commit's time: the first command makes them newer than any restored
+# output, so Cargo rebuilds this crate and reuses only the dependencies.
+# As this crate is rebuilt anyway, incremental data would only fill the
+# cache (CARGO_INCREMENTAL=0).
+#
+# Fetching crates needs the repository's network access (`ci_network`).
+
+[[jobs]]
+name = "fmt"
+image = "guildbotics/agent-environment:dev"
+commands = ["CARGO_HOME=/work/.ci/cargo-home cargo fmt --check"]
+timeout_secs = 300
+
+[[jobs]]
+name = "clippy"
+image = "guildbotics/agent-environment:dev"
+commands = [
+  "find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +",
+  "CARGO_HOME=/work/.ci/cargo-home CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings",
+]
+timeout_secs = 1800
+cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.lock"] }
+
+[[jobs]]
+name = "test"
+image = "guildbotics/agent-environment:dev"
+commands = [
+  "find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +",
+  "CARGO_HOME=/work/.ci/cargo-home CARGO_INCREMENTAL=0 cargo test",
+]
+timeout_secs = 1800
+cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.lock"] }
+
+[[jobs]]
+name = "dev-script"
+image = "guildbotics/agent-environment:dev"
+commands = ["python3 -m unittest discover -s tests -p test_dev_script.py -v"]
+timeout_secs = 300
