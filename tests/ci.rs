@@ -500,7 +500,22 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
     };
     let (ok, text) = admin("check");
     assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
-    // A Git failure fails the upgrade before anything is written.
+    // A Git failure fails the upgrade before anything is written: a pipeline
+    // the commit has that Git cannot read, a repository Git cannot open.
+    let repo_dir = data.join("repos/acme/demo.git");
+    let blob = git_ok(
+        &repo_dir,
+        &["rev-parse", &format!("{head}:.branvil/ci.toml")],
+    );
+    let blob = blob.trim();
+    let loose = repo_dir.join("objects").join(&blob[..2]).join(&blob[2..]);
+    let aside = data.join("blob-aside");
+    std::fs::rename(&loose, &aside).unwrap();
+    let (ok, text) = admin("upgrade");
+    assert!(!ok && text.contains(REPO), "{text}");
+    assert_eq!(tables(&db), before);
+    assert_eq!(copies(), 0);
+    std::fs::rename(&aside, &loose).unwrap();
     let (repos, away) = (data.join("repos"), data.join("repos-away"));
     std::fs::rename(&repos, &away).unwrap();
     let (ok, text) = admin("upgrade");

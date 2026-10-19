@@ -735,10 +735,12 @@ mod tests {
                 .unwrap()
                 .contains("No CI run")
         );
-        // Without required checks and without a pipeline there is nothing to expect.
+        // Without required checks, a commit Git cannot read (there is no
+        // repository here) is still expected, never "no checks" (a commit
+        // without a pipeline: `tests/pulls.rs`).
         repo.required_checks.clear();
         let c = ci.head_checks(&repo, "s1").await.unwrap();
-        assert!(!c.checks_expected && c.checks.is_empty());
+        assert!(c.checks_expected && c.checks.is_empty());
     }
 
     #[tokio::test]

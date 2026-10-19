@@ -25,28 +25,39 @@ const MAX_ARTIFACTS: usize = 16;
 const MAX_PATHS: usize = 32;
 const MAX_CACHE_PATHS: usize = 8;
 
-/// Reads the pipeline of commit `sha` in the repository at `dir`. A Git
-/// failure is an error, never a pipeline (the service's registration is
-/// retried by the reconciler). The commit must exist: a missing one reads as
-/// having no pipeline.
+/// Reads the pipeline of commit `sha` in the repository at `dir`. Only a
+/// pipeline path the commit's tree does not have reads as `Absent`; any Git
+/// failure (a missing commit, an unreadable tree or blob) is an error, never a
+/// pipeline (the service's registration is retried by the reconciler).
 pub async fn read(git: &Git, dir: &Path, sha: &str) -> AppResult<PipelineState> {
-    let spec = format!("{sha}:{}", PIPELINE_PATH);
-    let out = git.run(Some(dir), &["cat-file", "-t", &spec]).await?;
-    match out.text().trim() {
-        "blob" if out.ok() => {}
-        _ if out.ok() => {
-            return Ok(PipelineState::Invalid {
-                message: format!("{} is not a file.", PIPELINE_PATH),
-            });
-        }
-        _ => return Ok(PipelineState::Absent),
-    }
-    let out = git.run(Some(dir), &["cat-file", "blob", &spec]).await?;
+    let failed = |what: &str, stderr: &str| {
+        AppError::internal(format!(
+            "{what} {PIPELINE_PATH} of {sha}: {}",
+            stderr.trim()
+        ))
+    };
+    let out = git
+        .run(Some(dir), &["ls-tree", "-z", sha, "--", PIPELINE_PATH])
+        .await?;
     if !out.ok() {
-        return Err(AppError::internal(format!(
-            "reading {spec}: {}",
-            out.stderr.trim()
-        )));
+        return Err(failed("listing", &out.stderr));
+    }
+    // `<mode> <type> <object>\t<path>`, or nothing when the path is not there.
+    let entry = out.text();
+    let mut fields = entry.trim_end_matches('\0').split(['\t', ' ']);
+    let (kind, object) = match (fields.next(), fields.next(), fields.next()) {
+        (None | Some(""), ..) => return Ok(PipelineState::Absent),
+        (Some(_), Some(kind), Some(object)) => (kind, object.to_string()),
+        _ => return Err(failed("listing", &format!("unexpected entry {entry:?}"))),
+    };
+    if kind != "blob" {
+        return Ok(PipelineState::Invalid {
+            message: format!("{} is not a file.", PIPELINE_PATH),
+        });
+    }
+    let out = git.run(Some(dir), &["cat-file", "blob", &object]).await?;
+    if !out.ok() {
+        return Err(failed("reading", &out.stderr));
     }
     if out.stdout.len() > MAX_PIPELINE_BYTES {
         return Ok(PipelineState::Invalid {

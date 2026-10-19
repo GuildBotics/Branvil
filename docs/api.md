@@ -568,8 +568,9 @@ request was published (see "Upstream").
   completed) is `success`, `failure`, `cancelled`, `timed_out`, `skipped`, or
   `startup_failure` (no runner or no usable executor; the details say which).
   Only an attempt of that exact commit can be `success`.
-- `checks_expected` is true when the head has a pipeline (valid or not), or
-  when the repository has required checks: a head without checks is then "not
+- `checks_expected` is true when the head has a pipeline (valid or not) or
+  Branvil cannot read whether it has one, or when the repository has required
+  checks: a head without checks is then "not
   registered yet", never "no checks".
 - `base_checks` counts the checks of the base tip.
 - A published pull request whose head is the commit Branvil pushed also lists
