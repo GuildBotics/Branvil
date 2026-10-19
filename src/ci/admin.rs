@@ -1,5 +1,5 @@
 //! The owner's CI settings (`/api/v1/admin/ci`, Settings → CI): the runner,
-//! the job limits, the runner's image cache, and which repositories let jobs
+//! the job resources, the runner's image cache, and which repositories let jobs
 //! use the network. See `settings.rs` for what is stored where, and
 //! `docs/api.md` ("CI settings").
 
@@ -22,7 +22,7 @@ use crate::auth::Caller;
 use crate::error::{AppError, AppResult};
 use crate::http::J;
 use crate::model::Repo;
-use crate::runner::executor::{ImageCheck, ImageInfo, Microsandbox, Msb};
+use crate::runner::executor::{ImageInfo, Microsandbox, Msb};
 use crate::store::{self, Rd};
 
 #[derive(Serialize)]
@@ -51,8 +51,9 @@ struct ImagesView {
 
 #[derive(Serialize)]
 struct Cached {
+    /// What a pipeline writes as a job's `image`.
     reference: String,
-    pinned: String,
+    /// The configuration digest: which version of the tag it is.
     digest: String,
     size_bytes: u64,
     created_at: String,
@@ -60,13 +61,11 @@ struct Cached {
     used_by: Vec<UsedBy>,
 }
 
-/// An image pipelines name that the cache cannot run.
+/// An image pipelines name that the cache does not hold.
 #[derive(Serialize)]
 struct Missing {
     image: String,
     repositories: Vec<UsedBy>,
-    /// The digest the cache holds under the image's tag, if any.
-    held: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -84,7 +83,6 @@ struct RepoNetwork {
 fn cached(i: &ImageInfo) -> Cached {
     Cached {
         reference: i.reference.clone(),
-        pinned: i.pinned(),
         digest: i.config_digest.clone(),
         size_bytes: i.size_bytes,
         created_at: i.created_at.clone(),
@@ -126,31 +124,26 @@ async fn view(app: &Shared) -> AppResult<View> {
         }
     }
     for (image, repositories) in uses {
-        let held = if msb.is_none() || images.error.is_some() {
-            None
-        } else {
+        if msb.is_some() && images.error.is_none() {
             // Without the lock: a load in progress holds it for minutes.
-            match ms.check_image(&image).await {
-                // Under the image the runner would run.
-                Ok(ImageCheck::Present(run)) => {
-                    if let Some(c) = images.cached.iter_mut().find(|c| c.reference == run) {
+            match ms.inspect(&image).await {
+                Ok(Some(held)) => {
+                    if let Some(c) = images
+                        .cached
+                        .iter_mut()
+                        .find(|c| c.reference == held.reference)
+                    {
                         c.used_by.extend(repositories);
                         continue;
                     }
-                    None
                 }
-                Ok(ImageCheck::Missing) => None,
-                Ok(ImageCheck::Other(d)) => Some(d),
-                Err(e) => {
-                    images.error = Some(e);
-                    None
-                }
+                Ok(None) => {}
+                Err(e) => images.error = Some(e),
             }
-        };
+        }
         images.missing.push(Missing {
             image,
             repositories,
-            held,
         });
     }
     Ok(View {
@@ -215,7 +208,7 @@ async fn pull(State(app): State<Shared>, c: Caller, J(input): J<PullInput>) -> A
     let reference = input.reference.trim().to_string();
     if !valid_image(&reference) {
         return Err(AppError::invalid(format!(
-            "'{reference}' is not an image reference (name[:tag][@sha256:digest])."
+            "'{reference}' is not an image reference by tag ([registry/]name[:tag]): pipelines name an image by its tag."
         )));
     }
     app.ci.settings().begin("pull", &reference)?;
@@ -289,7 +282,6 @@ async fn transfer(
     operation.await?;
     let loaded = |i: &ImageInfo| Loaded {
         reference: i.reference.clone(),
-        pinned: i.pinned(),
     };
     let mut named = Vec::new();
     for name in &names {

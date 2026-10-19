@@ -38,8 +38,8 @@ impl Limits {
         }
     }
 
-    /// The same ranges a pipeline's job may ask for, so a limit never stops a
-    /// job the pipeline accepts from running at all.
+    /// The time limit has the range of a pipeline's `timeout_secs`, so that
+    /// any value a pipeline gives can be the job's own.
     fn check(&self) -> AppResult<()> {
         let out = |what: &str, range: &str| {
             Err(AppError::invalid(format!("{what} must be within {range}.")))
@@ -83,7 +83,6 @@ pub struct Operation {
 #[derive(Serialize, Clone, Debug)]
 pub struct Loaded {
     pub reference: String,
-    pub pinned: String,
 }
 
 pub struct Control {

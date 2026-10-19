@@ -13,13 +13,10 @@ const SHELL = {
 };
 
 const DIGEST = `sha256:${"4".repeat(64)}`;
-const PINNED = `guildbotics/agent-environment:dev@${DIGEST}`;
 const DEBIAN_DIGEST = `sha256:${"d".repeat(64)}`;
-const DEBIAN = `debian:bookworm@${DEBIAN_DIGEST}`;
 
 const CACHED = {
   reference: "guildbotics/agent-environment:dev",
-  pinned: PINNED,
   digest: DIGEST,
   size_bytes: 3701474304,
   created_at: "2026-10-18T12:00:00Z",
@@ -69,8 +66,8 @@ describe("CI settings", () => {
     expect(within(executor).getByText("/Users/u/.guildbotics/data/msb/bin/msb")).toBeInTheDocument();
     expect(within(executor).getByText("/Users/u/.branvil/msb-home")).toBeInTheDocument();
 
-    // The only Save button is the job limits', inside their card.
-    const limits = screen.getByRole("region", { name: "Job limits" });
+    // The only Save button is the job resources', inside their card.
+    const limits = screen.getByRole("region", { name: "Job resources" });
     expect(screen.getAllByRole("button", { name: "Save" })).toEqual([within(limits).getByRole("button", { name: "Save" })]);
     for (const other of ["Runner", "Executor", "Images", "Network"]) expect(screen.getByRole("region", { name: other })).not.toContainElement(within(limits).getByRole("form"));
 
@@ -82,7 +79,7 @@ describe("CI settings", () => {
     expect(within(web).getByText("Allowed")).toBeInTheDocument();
   });
 
-  it("lists the cached images with their size, date, users, and pinned reference to copy", async () => {
+  it("lists the cached images with their size, date, users, and digest, and copies the tag as the reference", async () => {
     fakeApi({ ...SHELL, "GET /api/v1/admin/ci": json(200, CI) });
     const user = userEvent.setup();
     renderApp("/-/settings/ci");
@@ -92,11 +89,11 @@ describe("CI settings", () => {
     expect(within(row).getByText("guildbotics/agent-environment:dev")).toBeInTheDocument();
     expect(row).toHaveTextContent("3.4 GiB · 10/18/2026 · Used by: sandbox/ci-check (tools, long) · acme/demo (test)");
     expect(within(row).queryByText("Added")).not.toBeInTheDocument();
-    // The pinned reference on one line, cut in the middle; the full value in its title.
-    const pinned = within(row).getByText(`guildbotics/agent-environment:dev@sha256:44444444…${"4".repeat(9)}`);
-    expect(pinned).toHaveAttribute("title", PINNED);
+    // The digest of the version the cache holds on one line, cut in the middle; the full value in its title.
+    expect(within(row).getByText(`sha256:44444444…${"4".repeat(9)}`)).toHaveAttribute("title", DIGEST);
+    // A pipeline names the image by its tag.
     await user.click(within(row).getByRole("button", { name: "Copy reference" }));
-    expect(await navigator.clipboard.readText()).toBe(PINNED);
+    expect(await navigator.clipboard.readText()).toBe("guildbotics/agent-environment:dev");
     expect(await within(row).findByRole("button", { name: "Copied" })).toBeInTheDocument();
   });
 
@@ -106,14 +103,6 @@ describe("CI settings", () => {
     const [row] = within(await screen.findByRole("list", { name: "In the cache" })).getAllByRole("listitem") as [HTMLElement];
     expect(row).toHaveTextContent("3.4 GiB · 10/18/2026");
     expect(row).not.toHaveTextContent("Used by");
-  });
-
-  it("names a pulled image without the digest its reference carries", async () => {
-    const alpine = `docker.io/library/alpine@sha256:${"5".repeat(64)}`;
-    fakeApi({ ...SHELL, "GET /api/v1/admin/ci": json(200, withImages({ cached: [{ ...CACHED, reference: alpine, pinned: alpine, used_by: [] }] })) });
-    renderApp("/-/settings/ci");
-    const [row] = within(await screen.findByRole("list", { name: "In the cache" })).getAllByRole("listitem") as [HTMLElement];
-    expect(within(row).getByText("docker.io/library/alpine")).toHaveAttribute("title", alpine);
   });
 
   it("invites to add an image when the cache holds none", async () => {
@@ -126,25 +115,24 @@ describe("CI settings", () => {
     expect(within(images).getByRole("button", { name: "Add image" })).toBeInTheDocument();
   });
 
-  it("warns of each image pipelines name that the cache cannot run", async () => {
+  it("warns of each image pipelines name that the cache does not hold", async () => {
     const missing = [
-      { image: `guildbotics/agent-environment:dev@sha256:${"9".repeat(64)}`, repositories: [{ repository: "GuildBotics/GuildBotics", jobs: ["test", "desktop-quality"] }], held: DIGEST },
+      { image: "guildbotics/agent-environment:next", repositories: [{ repository: "GuildBotics/GuildBotics", jobs: ["test", "desktop-quality"] }] },
       {
         image: "alpine:3.20",
         repositories: [
           { repository: "acme/web", jobs: ["lint"] },
           { repository: "acme/demo", jobs: ["docs"] },
         ],
-        held: null,
       },
     ];
     fakeApi({ ...SHELL, "GET /api/v1/admin/ci": json(200, withImages({ missing })) });
     renderApp("/-/settings/ci");
     const images = await screen.findByRole("region", { name: "Images" });
-    const [held, absent] = within(images).getAllByRole("alert") as [HTMLElement, HTMLElement];
-    expect(held).toHaveTextContent("The image that test, desktop-quality of GuildBotics/GuildBotics use is not in the cache");
-    expect(within(held).getByText(missing[0]!.image)).toBeInTheDocument();
-    expect(within(held).getByText(`The cache holds this tag as another image (sha256:44444444…${"4".repeat(9)}). Add the pinned image with Add image.`)).toBeInTheDocument();
+    const [agent, absent] = within(images).getAllByRole("alert") as [HTMLElement, HTMLElement];
+    expect(agent).toHaveTextContent("The image that test, desktop-quality of GuildBotics/GuildBotics use is not in the cache");
+    expect(within(agent).getByText("guildbotics/agent-environment:next")).toBeInTheDocument();
+    expect(within(agent).getByText("Jobs fail to start until it is added. Add it with Add image.")).toBeInTheDocument();
     expect(absent).toHaveTextContent("The image that lint of acme/web · docs of acme/demo use is not in the cache");
     expect(within(absent).getByText("alpine:3.20")).toBeInTheDocument();
     expect(within(absent).getByText("Jobs fail to start until it is added. Add it with Add image.")).toBeInTheDocument();
@@ -185,8 +173,8 @@ describe("CI settings", () => {
 
   it("pulls an image, follows the running operation to what it added, and marks it in the list", async () => {
     const pulling = { ...RUNNING, kind: "pull", target: "debian:bookworm" };
-    const pulled = { ...pulling, state: "succeeded", finished_at: "2026-10-18T06:01:00Z", loaded: [{ reference: "debian:bookworm", pinned: DEBIAN }] };
-    const debian = { ...CACHED, reference: "debian:bookworm", pinned: DEBIAN, digest: DEBIAN_DIGEST, size_bytes: 123 * 2 ** 20, used_by: [] };
+    const pulled = { ...pulling, state: "succeeded", finished_at: "2026-10-18T06:01:00Z", loaded: [{ reference: "debian:bookworm" }] };
+    const debian = { ...CACHED, reference: "debian:bookworm", digest: DEBIAN_DIGEST, size_bytes: 123 * 2 ** 20, used_by: [] };
     const fake = fakeApi({
       ...SHELL,
       "GET /api/v1/admin/ci": [json(200, CI), json(200, withImages({ cached: [CACHED, debian] }, pulled))],
@@ -212,7 +200,7 @@ describe("CI settings", () => {
     const added = await within(dialog).findByRole("list", { name: "Added images" }, { timeout: 4000 });
     expect(within(added).getByText("Added debian:bookworm")).toBeInTheDocument();
     await user.click(within(added).getByRole("button", { name: "Copy reference" }));
-    expect(await navigator.clipboard.readText()).toBe(DEBIAN);
+    expect(await navigator.clipboard.readText()).toBe("debian:bookworm");
     expect(within(dialog).getByRole("button", { name: "Add" })).toBeEnabled();
 
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
@@ -266,8 +254,12 @@ describe("CI settings", () => {
     expect(await screen.findByText("No runner is connected.")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: /^Run the runner on the Branvil machine/ })).not.toBeChecked();
 
-    const limits = screen.getByRole("form", { name: "Job limits" });
-    expect(screen.getByText("A job that asks for more than a limit gets the limit. Saving restarts the runner (a job it is running is interrupted and queued once more).")).toBeInTheDocument();
+    const limits = screen.getByRole("form", { name: "Job resources" });
+    expect(
+      screen.getByText(
+        "Every job runs with these CPUs and this memory. The time limit caps a pipeline's timeout_secs and is the limit of a job that gives none. Saving restarts the runner (a job it is running is interrupted and queued once more).",
+      ),
+    ).toBeInTheDocument();
     const cpus = within(limits).getByRole("textbox", { name: "CPUs" });
     await user.clear(cpus);
     await user.type(cpus, "8");

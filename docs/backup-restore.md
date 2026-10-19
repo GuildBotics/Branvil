@@ -152,9 +152,9 @@ branvil serve --data-dir /srv/branvil
 
 1. refuses a database that another process has open, and any version other
    than the previous one (a current database is left as it is);
-2. reads what the upgrade needs (records, and Git for 7 → 8), so that a
+2. reads what the upgrade needs (records, and Git for 8 → 9), so that a
    record it does not expect or a Git failure stops it before anything is
-   written (for 7 → 8, every repository needs its Git directory, as
+   written (for 8 → 9, every repository needs its Git directory, as
    `branvil admin check` requires);
 3. writes a copy of the database as it is next to it,
    `branvil-schema-<version>-<time>.redb`, and never overwrites or removes
@@ -171,13 +171,34 @@ new data directory; when the upgrade fails, the restored directory is left
 at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
 it once the cause is fixed).
 
-Version 7 → 8 (`src/upgrade.rs`): every CI run takes the pipeline its own
-commit's `.branvil/ci.toml` reads as (a run of a pull request head held its
-base's), or, when the commit is no longer in its repository, a failing
-"could not verify" pipeline; unfinished attempts of another job definition
-are stopped. Every attempt is kept: one of another definition stays on its
-job page as history and never counts as a check (`docs/ci.md`). Nothing
-outside the CI runs and attempts changes.
+Version 8 → 9 (`src/upgrade.rs`): a job definition no longer has `cpus` and
+`memory_mib` (every job runs with the runner's), and an attempt records the
+image it ran on. Every attempt's job loses `cpus` and `memory_mib` and keeps
+its time limit, with no image recorded. Every CI run takes the pipeline its
+own commit's `.branvil/ci.toml` reads as now (one that names an image by
+digest or gives `cpus` or `memory_mib` is invalid, with the reason), or, when
+the commit is no longer in its repository, a failing "could not verify"
+pipeline; unfinished attempts of another job definition are stopped. Every
+attempt is kept: one of another definition stays on its job page as history
+and never counts as a check (`docs/ci.md`). Nothing outside the CI runs and
+attempts changes.
+
+What this means for the owner after 8 → 9:
+
+- Every pipeline that names an image by digest or writes `cpus` or
+  `memory_mib` is an invalid pipeline, a failing `pipeline` check, open pull
+  request heads included, until a commit with a `.branvil/ci.toml` that names
+  its images by tag and leaves those keys out replaces it.
+- A pipeline that left out `timeout_secs` reads without a time limit now,
+  while version 8 recorded its 600 s default: its runs' attempts become
+  history and their checks start over. The reconciler registers the default
+  branch tips and open pull request heads again at start, which runs their
+  jobs again.
+- An image pulled by digest under version 8 is known to the cache by its
+  digest only, which no pipeline can name: pull it again by tag, or load it,
+  under Settings → CI or with `branvil runner pull`.
+- A runner started by hand on another machine is upgraded together with the
+  service.
 
 ## Tested
 

@@ -20,11 +20,9 @@ version = 1                       # optional; only 1 exists
 
 [[jobs]]
 name = "test"                     # [A-Za-z0-9_.-]{1,64}, not "pipeline", unique
-image = "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8"
+image = "docker.io/library/alpine:3.22"   # [registry/]name[:tag], no digest
 commands = ["./scripts/test.sh", "make lint"]   # 1-64 commands, each run by /bin/sh -c
-timeout_secs = 600                # 1-86400, default 600
-cpus = 1                          # 1-64, default 1
-memory_mib = 1024                 # 128-65536, default 1024
+timeout_secs = 600                # optional, 1-86400; default the runner's time limit
 artifacts = [{ name = "report", paths = ["out/report/", "coverage.xml"] }]   # up to 16
 cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # optional
 ```
@@ -36,31 +34,43 @@ cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # 
   variables.
 - Jobs of one run are queued together and run one after another on a
   runner (there are no dependencies between jobs).
-- Validation is strict: an unknown key, a value out of range, a path that is
-  absolute or contains `..`, an image reference that is not
-  `name[:tag][@sha256:<64 hex>]` makes the whole pipeline invalid. An invalid
-  pipeline is shown as a failing check named `pipeline` whose details give the
-  reason; it never yields success.
-- Pin images by digest. The runner never pulls during a job (pull policy
-  `never`): images enter the runner's cache only through `branvil runner pull`
-  or Settings → CI (pull from a registry, or load a `docker save` / OCI
-  archive from a file on the Branvil machine).
-- An image pulled by digest is pinned as it was pulled (`name@sha256:<digest>`).
-  One loaded from an archive (or pulled by tag) is known to the cache by its
-  tag only, so it is pinned as `name:tag@sha256:<configuration digest>`: the
-  configuration digest survives `docker save` and loading, the manifest digest
-  does not. The runner runs it by the tag once the image the cache holds under
-  that tag has that digest, and concludes `startup_failure` when it holds
-  another one. Pulls and loads (Settings → CI, `branvil runner pull`) hold a
-  lock of the image cache (a file of `MSB_HOME`) exclusively, and a job holds
-  it shared from checking its image until its VM has started, so a load that
-  re-points the tag waits for the jobs that are starting and never changes
-  the image a checked job runs; a job that waits for a pull or a load says
-  so in its log and can be cancelled meanwhile (`msb` used by hand does not
-  take the lock).
-  Settings → CI shows the reference to write for every cached
-  image. (A runner started by hand on another machine loads such an archive
-  with `msb load` under its own `MSB_HOME`.)
+- Validation is strict: an unknown key (`cpus` and `memory_mib` included,
+  with a reason of their own: they are the runner's), a value out of range, a
+  path that is absolute or contains `..`, an image reference that is not
+  `[registry/]name[:tag]` (one with a digest, `@sha256:…`, included) makes the
+  whole pipeline invalid. An invalid pipeline is shown as a failing check
+  named `pipeline` whose details give the reason; it never yields success.
+- What a job does (commands, artifacts, cache, how long it may take) is the
+  repository's; what it runs on (the image's version, the CPUs and memory) is
+  the owner's. A job runs with the runner's CPUs and memory
+  (`ci.executor.max_cpus`, `max_memory_mib`), and with its `timeout_secs`
+  lowered to the runner's time limit (`max_timeout_secs`, noted in the log),
+  or with that limit when it gives none.
+- A pipeline names an image by its tag; which version runs is the image the
+  runner's cache holds under that tag. The runner never pulls during a job
+  (pull policy `never`): images enter the runner's cache only through
+  `branvil runner pull` or Settings → CI (pull a tag from a registry, or load
+  a `docker save` / OCI archive from a file on the Branvil machine). To move
+  the jobs to a new version, pull or load the same tag again; nothing in the
+  pipelines changes. A job whose tag the cache does not hold concludes
+  `startup_failure` with the reason.
+- A job's log starts with the attempt: its job, commit, executor, image tag,
+  CPUs, memory, and time limit (and a note when its `timeout_secs` was
+  lowered). Once the runner has checked the image, it writes the
+  configuration digest of the image the job runs on in a line of its own
+  (`image docker.io/library/alpine:3.22 is sha256:…`) and records it on the
+  attempt: the configuration digest survives `docker save` and loading, the
+  manifest digest does not. An image the cache does not hold, or whose
+  digest `msb` does not report as `sha256:<64 hex>`, ends the job
+  `startup_failure` with the reason. Pulls and
+  loads (Settings → CI, `branvil runner pull`) hold a lock of the image cache
+  (a file of `MSB_HOME`) exclusively, and a job holds it shared from checking
+  its image until its VM has started, so a load that re-points the tag waits
+  for the jobs that are starting and never changes the image a checked job
+  runs; a job that waits for a pull or a load says so in its log and can be
+  cancelled meanwhile (`msb` used by hand does not take the lock). Settings → CI shows the tag to write and the digest of
+  every cached image. (A runner started by hand on another machine loads such
+  an archive with `msb load` under its own `MSB_HOME`.)
 
 ## Trust: where the pipeline comes from
 
@@ -79,8 +89,10 @@ settings, which only the owner changes (`PATCH /api/v1/repos/{repo}`):
   reviewing its diff (below).
 - **Network access** (`ci_network`). Whatever the pipeline says, a job has no
   network unless the owner allows it for the repository.
-- **What a job runs on.** A job runs in a microVM with no secrets, only images
-  already in the runner's cache, and the runner's limits; a pull request's run
+- **What a job runs on.** A job runs in a microVM with no secrets, the
+  runner's CPUs and memory, and its time limit capped by the runner's; its
+  image is the version the owner put in the runner's cache under the tag the
+  pipeline names (a pipeline cannot name a digest), and a pull request's run
   never writes the protected cache ("Dependency cache"). Settings → CI lists
   the images of the default branches' pipelines; a pull request that names
   another image concludes `startup_failure` with the reason until the owner
@@ -113,9 +125,9 @@ What registers a run:
 
 A registration always reads the commit's own pipeline, and queues the jobs
 that have no current attempt: the latest attempt of that very job
-definition. When the run holds another pipeline (one the upgrade to schema
-version 8 could not verify, or one an older parser read from the same file),
-it takes the commit's, and its unfinished attempts of another definition are
+definition. When the run holds another pipeline (one an upgrade could not
+verify, or one an older parser read from the same file), it takes the
+commit's, and its unfinished attempts of another definition are
 stopped. Checks and retries count only
 current attempts; an attempt of a job the pipeline dropped or defined
 differently stays on its job page as history, never counts as a check, and
@@ -171,7 +183,8 @@ definition (the pipeline is not read again).
 | log per attempt | 16 MiB (`ci.log_max_mib`) | then one truncation notice and nothing more; one log request is at most 1 MiB |
 | one artifact | 64 MiB (`ci.artifact_max_mib`) | `413 too_large`; at most 16 artifacts per attempt, zip only, names `[A-Za-z0-9_.-]` declared by the job |
 | artifacts per attempt (before zipping) | 64 MiB (`ci.executor.artifacts_max_mib`) | runner side |
-| job cpus / memory / timeout | 4 / 4096 MiB / 3600 s (`ci.executor.max_*`) | the runner lowers a job's request to these and says so in the log |
+| job cpus / memory | 4 / 4096 MiB (`ci.executor.max_cpus`, `max_memory_mib`) | every job runs with these |
+| job time limit | 3600 s (`ci.executor.max_timeout_secs`) | the limit of a job that gives no `timeout_secs`; a larger `timeout_secs` is lowered to it, and the log says so |
 | dependency cache | 2048 MiB (`ci.executor.cache_max_mib`) | least recently used entries are removed |
 | retention | 30 days (`ci.retention_days`) | logs and artifacts of attempts finished earlier are deleted; the attempt records stay |
 | runners per work directory | 1 | a lock file refuses a second runner |
@@ -193,7 +206,8 @@ is refused, and nothing outside the work directory is read.
 
 `cache.paths` are restored into the work directory before the job and saved
 after a successful job. The key is the SHA-256 of the repository, the job
-name, the image, the cached paths, the content of `cache.key_files`, and the
+name, the configuration digest of the image the job runs on (a new version of
+the tag does not reuse what the previous one built), the cached paths, the content of `cache.key_files`, and the
 **scope**: `protected` for runs a protected branch asked for, `branch:<name>`
 otherwise. A run reads its own scope and, when it is not protected, the
 protected scope too, but writes only its own: a pull request cannot plant a
@@ -218,8 +232,8 @@ by the service with `git archive`).
 # once, on the Hub machine (the owner's token from the data directory): create the runner member, print its token
 branvil runner register runner1 --url http://127.0.0.1:7878
 
-# once per image the pipelines use
-branvil runner pull docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+# once per image the pipelines use, and again to move them to a new version of the tag
+branvil runner pull docker.io/library/alpine:3.22
 
 branvil runner doctor                                          # which msb, executor ready?
 BRANVIL_TOKEN=<runner token> branvil runner --url http://127.0.0.1:7878
@@ -232,7 +246,7 @@ environment; the previous automatic token is revoked) and restart it when it
 exits. The child reads the service's configuration file for its
 `[ci.executor]` and `[ci.microsandbox]` settings.
 
-The owner changes the mode and the job limits under Settings → CI
+The owner changes the mode and the job resources under Settings → CI
 (`docs/api.md`, "CI settings") without restarting the service: they are
 written to `branvil.toml` (the rest of the file is kept as it is), switching
 the mode off stops the child, and new limits start it again; the settings
@@ -243,17 +257,22 @@ child refuses to start when it cannot read the configuration file. The image
 cache Settings → CI
 manages is the supervised runner's (`[ci.microsandbox] home`); a runner
 started by hand on another machine keeps its own, filled with
-`branvil runner pull`.
+`branvil runner pull`. A runner started by hand is upgraded together with
+the service: the runner API carries the job definition and the image digest
+in this version's shapes.
 
 Per job the runner:
 
-1. checks the executor (`msb doctor`, cached) and that the image is cached;
+1. checks the executor (`msb doctor`, cached), logs the attempt with its
+   image tag, CPUs, memory, and time limit, then checks the image the cache
+   holds under the tag and logs its configuration digest;
 2. creates `<work dir>/jobs/<attempt id>/work`, unpacks the source there,
    creates the empty `<work dir>/jobs/<attempt id>/log` and its log file
    `out` (opened once, before the VM exists), and checks that no component
    below the runner's directory is a symbolic link;
 3. restores the cache, then runs
-   `msb run --name bv-job-<attempt> --label branvil.runner=<runner> --label branvil.job=<attempt> --pull never --cpus N --memory NM --mount-dir <work>:/work --mount-dir <log>:/.branvil-log --workdir /work --max-duration <timeout+60>s --no-net <image> -- /bin/sh -c <script>`;
+   `msb run --name bv-job-<attempt> --label branvil.runner=<runner> --label branvil.job=<attempt> --pull never --cpus N --memory NM --mount-dir <work>:/work --mount-dir <log>:/.branvil-log --workdir /work --max-duration <timeout+60>s --no-net <image> -- /bin/sh -c <script>`
+   (`N` and `M` the runner's CPUs and memory);
    the script first sends its stdout and stderr to `/.branvil-log/out`;
 4. streams that file to the log (read every 50 ms through the handle opened
    in step 2, so a link the job puts there is never followed), stops the VM
@@ -261,7 +280,8 @@ Per job the runner:
    ends the VM through its parent watchdog, so every process in it stops),
    keeps what the job wrote up to then, and removes the sandbox;
 5. uploads artifacts, saves the cache after a success, reports the
-   conclusion, and deletes the work directory.
+   conclusion with the image's configuration digest, and deletes the work
+   directory.
 
 At start it removes every sandbox labelled with its own name (leftovers of a
 runner that was killed) and the old job directories.
@@ -325,10 +345,11 @@ On every OS: `msb doctor` (run by `branvil runner doctor`) must pass.
   pushes supersede, late and forged results are refused, required checks are
   never success or "no checks" when unregistered, pending, failed, cancelled,
   invalid, or without a runner; leases expire and re-queue once; a restart
-  interrupts orphaned attempts; a merge needs success on the exact head; a run
-  of schema version 7 that holds its base's pipeline takes the head's own
-  after `branvil admin upgrade`.
+  interrupts orphaned attempts; a merge needs success on the exact head; the
+  runs and attempts of schema version 8 take this version's job definitions
+  after `branvil admin upgrade` (a pipeline that gives `cpus` is invalid).
 - `src/runner/mod.rs`: the runner loop against an in-process service with a
   fake executor that starts no process (results, cancellation, an unusable
-  executor).
+  executor, the runner's CPUs, memory, and time limit, the image's digest on
+  the attempt and in the log).
 - `tests/real_executor.rs` (opt-in, `BRANVIL_REAL_EXECUTOR=1`): real microVMs.

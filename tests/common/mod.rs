@@ -530,17 +530,32 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Makes the database file `db` (the service stopped) look as schema
-/// version 7 wrote it: every CI run records where its pipeline was read
-/// (`source` returns the base it was read from, or `None` for the commit
-/// itself).
-pub fn as_schema_7(db: &Path, source: impl Fn(&Value) -> Option<String>) {
+/// version 8 wrote it: every job definition, of a run's pipeline and of an
+/// attempt, has `cpus` and `memory_mib` and a time limit (600 s when its
+/// pipeline gave none), and no attempt names the image it ran on.
+pub fn as_schema_8(db: &Path) {
+    let v8 = |job: &mut Value| {
+        job["cpus"] = json!(1);
+        job["memory_mib"] = json!(1024);
+        if job["timeout_secs"].is_null() {
+            job["timeout_secs"] = json!(600);
+        }
+    };
     edit_records(db, "ci_runs", |run| {
-        let sha = source(run).unwrap_or_else(|| run["sha"].as_str().unwrap().to_string());
-        run["source"] = json!({"branch": "main", "sha": sha});
+        if let Some(jobs) = run
+            .pointer_mut("/pipeline/jobs")
+            .and_then(Value::as_array_mut)
+        {
+            jobs.iter_mut().for_each(v8);
+        }
+    });
+    edit_records(db, "ci_attempts", |a| {
+        v8(&mut a["job"]);
+        a.as_object_mut().unwrap().remove("image_digest");
     });
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(7);
+            *v = json!(8);
         }
     });
 }

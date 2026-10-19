@@ -383,9 +383,9 @@ export interface CiLimits {
 }
 
 export interface CachedImage {
+  /** The tag: what to write as `image` in `.branvil/ci.toml`. */
   reference: string;
-  /** The reference with its digest: what to write as `image` in `.branvil/ci.toml`. */
-  pinned: string;
+  /** The configuration digest: which version of the tag the cache holds. */
   digest: string;
   size_bytes: number;
   created_at: string;
@@ -399,12 +399,10 @@ export interface ImageUse {
   jobs: string[];
 }
 
-/** An image pipelines name that the cache cannot run. */
+/** An image pipelines name that the cache does not hold. */
 export interface MissingImage {
   image: string;
   repositories: ImageUse[];
-  /** The digest the cache holds under that tag, or null when the image is not there at all. */
-  held: string | null;
 }
 
 export interface ImageOperation {
@@ -416,7 +414,7 @@ export interface ImageOperation {
   started_at: string;
   finished_at: string | null;
   /** The images the operation brought, also those already in the cache. */
-  loaded: { reference: string; pinned: string }[];
+  loaded: { reference: string }[];
 }
 
 export type ChangeKind ="ticket" | "pull" | "board" | "check" | "upstream" | "repo";

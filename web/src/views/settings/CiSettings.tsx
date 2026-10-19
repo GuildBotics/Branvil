@@ -21,12 +21,9 @@ function size(bytes: number): string {
   return gib >= 1 ? `${gib.toFixed(1)} GiB` : `${Math.max(1, Math.round(bytes / 2 ** 20))} MiB`;
 }
 
-/** A reference or digest with its sha256 cut in the middle: up to the first 8 hex digits, then the last 9 characters. */
-function shorten(value: string): string {
-  const at = value.indexOf("sha256:");
-  if (at < 0) return value;
-  const start = value.slice(0, at + "sha256:".length + 8);
-  return start.length + 9 < value.length ? `${start}…${value.slice(-9)}` : value;
+/** A digest cut in the middle: `sha256:` and its first 8 hex digits, then the last 9 characters. */
+function shorten(digest: string): string {
+  return digest.length > 24 ? `${digest.slice(0, 15)}…${digest.slice(-9)}` : digest;
 }
 
 /** Answers of the changes are the new settings: they replace the shown ones (and start polling a running operation). */
@@ -224,7 +221,7 @@ function Images({ settings }: { settings: Settings }) {
   const { images, operation } = settings;
   const [adding, setAdding] = useState(false);
   // The images the latest operation brought, marked in the list.
-  const added = new Set(operation?.state === "succeeded" ? operation.loaded.map((l) => l.pinned) : []);
+  const added = new Set(operation?.state === "succeeded" ? operation.loaded.map((l) => l.reference) : []);
   return (
     <Section
       title={t("ci.settings.images")}
@@ -247,7 +244,7 @@ function Images({ settings }: { settings: Settings }) {
         {images.cached.length > 0 ? (
           <Stack gap="sm" role="list" aria-label={t("ci.settings.cached")}>
             {images.cached.map((c) => (
-              <Cached key={c.pinned} image={c} added={added.has(c.pinned)} />
+              <Cached key={c.reference} image={c} added={added.has(c.reference)} />
             ))}
           </Stack>
         ) : (
@@ -266,7 +263,7 @@ function Images({ settings }: { settings: Settings }) {
   );
 }
 
-/** An image pipelines name that the cache cannot run: not there, or another image under its tag. */
+/** An image pipelines name that the cache does not hold. */
 function Missing({ image: m }: { image: MissingImage }) {
   const t = useT();
   const users = m.repositories.map((r) => t("ci.settings.jobsOf", { jobs: r.jobs.join(", "), repository: r.repository })).join(" · ");
@@ -274,7 +271,7 @@ function Missing({ image: m }: { image: MissingImage }) {
     <Alert color="warning" icon={<TriangleAlert size={18} />} title={t("ci.settings.missingTitle", { users })}>
       <Stack gap={4}>
         <code className="secret">{m.image}</code>
-        <Text size="sm">{m.held ? t("ci.settings.missingHeld", { digest: shorten(m.held) }) : t("ci.settings.missingAbsent")}</Text>
+        <Text size="sm">{t("ci.settings.missingAbsent")}</Text>
       </Stack>
     </Alert>
   );
@@ -286,10 +283,9 @@ function Cached({ image: c, added }: { image: CachedImage; added: boolean }) {
   return (
     <div role="listitem" className="setting-row">
       <div className="setting-row-name">
-        {/* The name alone: a pulled image's reference carries its digest, which the line below shows shortened. */}
         <Group gap="xs" wrap="nowrap">
           <Text size="sm" fw={600} title={c.reference} truncate style={{ minWidth: 0 }}>
-            {c.reference.split("@")[0]}
+            {c.reference}
           </Text>
           {added && <StateBadge tone="success">{t("ci.settings.added")}</StateBadge>}
         </Group>
@@ -297,16 +293,16 @@ function Cached({ image: c, added }: { image: CachedImage; added: boolean }) {
           {size(c.size_bytes)} · <Time value={c.created_at} date />
           {users && ` · ${t("ci.settings.usedBy", { repositories: users })}`}
         </Text>
-        <Text size="xs" c="dimmed" className="mono" title={c.pinned} truncate>
-          {shorten(c.pinned)}
+        <Text size="xs" c="dimmed" className="mono" title={c.digest} truncate>
+          {shorten(c.digest)}
         </Text>
       </div>
-      <CopyReference value={c.pinned} />
+      <CopyReference value={c.reference} />
     </div>
   );
 }
 
-/** Copies a reference with its digest: the value to write as `image` in `.branvil/ci.toml`. */
+/** Copies an image's tag: the value to write as `image` in `.branvil/ci.toml`. */
 function CopyReference({ value }: { value: string }) {
   const t = useT();
   return (
@@ -407,11 +403,11 @@ function Outcome({ operation: op }: { operation: ImageOperation }) {
   return (
     <Stack gap={6} role="list" aria-label={t("ci.settings.loaded")}>
       {op.loaded.map((l) => (
-        <div key={l.pinned} role="listitem" className="setting-row">
+        <div key={l.reference} role="listitem" className="setting-row">
           <span className="setting-row-name">
             <Notice>{t("ci.settings.addedImage", { reference: l.reference })}</Notice>
           </span>
-          <CopyReference value={l.pinned} />
+          <CopyReference value={l.reference} />
         </div>
       ))}
     </Stack>

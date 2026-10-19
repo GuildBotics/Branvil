@@ -582,8 +582,10 @@ request was published (see "Upstream").
 ### CI attempts
 
 - `GET /api/v1/repos/{repo}/jobs/{attempt_id}` →
-  `{"id","url","repository","job","attempt","sha","status","conclusion","details","cancel_requested","created_at","started_at","finished_at","artifact_names","log_bytes"}`.
-  `404 not_found` for an id of another repository.
+  `{"id","url","repository","job","attempt","sha","image_digest","status","conclusion","details","cancel_requested","created_at","started_at","finished_at","artifact_names","log_bytes"}`.
+  `image_digest` is the configuration digest (`sha256:…`) of the image the
+  job ran on, as its runner reported it; `null` when the job did not get that
+  far. `404 not_found` for an id of another repository.
 - `GET /api/v1/repos/{repo}/jobs/{attempt_id}/log?tail_bytes={n}` →
   `{"log": "...", "log_bytes": 12345, "truncated": true, "pruned": false}`; `log`
   is the last `tail_bytes` bytes (default 65536, at most 4194304; decoded as
@@ -615,7 +617,9 @@ kind `runner` (created by `branvil runner register`); any other member gets
 
 - `POST /claim` `{"executor": "microsandbox", "executor_state": "ready"|"unavailable", "executor_detail"?: "..."}`
   → `204` (nothing queued) or
-  `{"attempt_id","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs","cpus","memory_mib","artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false}`.
+  `{"attempt_id","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false}`.
+  `timeout_secs` is `null` when the pipeline gives none; the runner applies its
+  own CPUs, memory, and time limit.
   The executor state is shown in the diagnostics; a runner whose executor is
   unavailable still claims and concludes `startup_failure`.
 - `GET /attempts/{id}/source` → `application/x-tar` of the commit (`git archive`).
@@ -627,7 +631,9 @@ kind `runner` (created by `branvil runner register`); any other member gets
 - `PUT /attempts/{id}/artifacts/{name}` zip bytes → `{"name","bytes"}`. The name
   must be one the job declares; `400 invalid` for anything not starting like a
   zip archive, `413 too_large` above `ci.artifact_max_mib`.
-- `POST /attempts/{id}/finish` `{"lease","conclusion","details"?}` → the
+- `POST /attempts/{id}/finish` `{"lease","conclusion","details"?,"image_digest"?}`
+  → the attempt. `image_digest` is the configuration digest of the image the
+  job ran on (`sha256:<64 hex>`, `400 invalid` otherwise), recorded on the
   attempt. When a cancellation was requested the conclusion is `cancelled`
   whatever was reported.
 
@@ -762,34 +768,35 @@ runner's (`[ci.microsandbox] home`).
    "limits": {"max_cpus": 4, "max_memory_mib": 4096, "max_timeout_secs": 3600, "cache_max_mib": 2048},
    "images": {"error": null,
               "cached": [{"reference": "guildbotics/agent-environment:dev",
-                          "pinned": "guildbotics/agent-environment:dev@sha256:…",
                           "digest": "sha256:…", "size_bytes": 3701474304, "created_at": "…",
                           "used_by": [{"repository": "acme/demo", "jobs": ["test"]}]}],
-              "missing": [{"image": "…", "repositories": [{"repository": "acme/web", "jobs": ["lint"]}],
-                           "held": null}]},
+              "missing": [{"image": "…", "repositories": [{"repository": "acme/web", "jobs": ["lint"]}]}]},
    "operation": null,
    "repositories": [{"path": "acme/demo", "ci_network": false}]}
   ```
 
   `runner` is the diagnostics' runner section (below). `executor.msb` is the
   msb the runner would use (`null` with the reason in `problem`). `cached` are
-  the images of the cache; `pinned` is what a pipeline writes as `image`
-  (`docs/ci.md`); `digest` is the configuration digest; `used_by` are the
-  repositories whose default-branch pipelines run it, with their jobs.
-  `missing` are the images those pipelines name that the cache cannot run:
-  not there (`held: null`), or that tag held as another image (`held`: its
-  digest). `operation` is the latest image pull or load:
+  the images of the cache; `reference` is the tag a pipeline writes as
+  `image` (`docs/ci.md`), and `digest` the configuration digest of the
+  version the cache holds under it; `used_by` are the repositories whose
+  default-branch pipelines run it, with their jobs. `missing` are the images
+  those pipelines name that the cache does not hold. `operation` is the
+  latest image pull or load:
   `{"kind": "pull"|"load", "target", "state": "running"|"succeeded"|"failed",
-  "detail", "started_at", "finished_at", "loaded": [{"reference", "pinned"}]}`.
+  "detail", "started_at", "finished_at", "loaded": [{"reference"}]}`.
 - `PUT /api/v1/admin/ci/runner` (owner) `{"mode": "auto"|"off"}` → the settings.
   `auto` starts the supervised runner, `off` stops it.
 - `PUT /api/v1/admin/ci/limits` (owner) `{"max_cpus", "max_memory_mib",
   "max_timeout_secs", "cache_max_mib"}` → the settings; `400 invalid` outside
-  1–64, 128–65536, 1–86400, 0–1048576. A running supervised runner starts again
+  1–64, 128–65536, 1–86400, 0–1048576. Every job runs with `max_cpus` and
+  `max_memory_mib`; `max_timeout_secs` is the time limit of a job that gives
+  no `timeout_secs` and caps one that does. A running supervised runner starts again
   with them (its attempt in progress is interrupted and queued once more).
 - `POST /api/v1/admin/ci/images/pull` (owner) `{"reference"}` → `202` with the
   settings, `operation` running; `400 invalid` for a reference that is not
-  `name[:tag][@sha256:<64 hex>]`.
+  `[registry/]name[:tag]` (pipelines name an image by its tag, so a digest
+  is refused). Pulling a tag again brings its new version, if any.
 - `POST /api/v1/admin/ci/images/load` (owner) `{"path"}` → `202` likewise. The
   path is absolute and names a regular file (a `docker save` / OCI archive) on
   the service's machine; `400 invalid` otherwise.
@@ -814,7 +821,7 @@ runner's (`[ci.microsandbox] home`).
 
   ```json
   {"service": {"name": "branvil", "version": "0.1.0", "base_url": "http://127.0.0.1:7878"},
-   "storage": {"engine": "redb", "path": "/…/branvil.redb", "file_bytes": 565248, "schema_version": 7,
+   "storage": {"engine": "redb", "path": "/…/branvil.redb", "file_bytes": 565248, "schema_version": 9,
                "cache_size_bytes": 33554432, "cache_used_bytes": 0, "cache_read_hits": 0,
                "cache_read_misses": 0, "pending_ref_operations": 0,
                "queues": {"writes": {"queued": 0, "queue_on_arrival": {...}, "wait_us": {...},

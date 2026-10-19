@@ -397,7 +397,7 @@ What one machine running this fixture carried, from the sections above:
 
 So with one CI job running, the executor needs more memory than the service
 under load; each further concurrent job adds about 170 MiB plus what the job
-itself touches (up to its `memory_mib`).
+itself touches (up to the memory every job gets, `ci.executor.max_memory_mib`).
 
 ## Not measured
 
@@ -443,8 +443,8 @@ Results of seven runs on 2026-10-14:
 
 So one running job costs about 170 MiB of host memory (VM process plus its
 `msb run` parent) for a 512 MiB guest running a shell, on top of the runner's
-20 MiB. A job that touches more guest memory raises the VM figure up to its
-`memory_mib`. Not measured yet: a release build of the runner, other images,
+20 MiB. A job that touches more guest memory raises the VM figure up to the memory
+every job gets (`ci.executor.max_memory_mib`). Not measured yet: a release build of the runner, other images,
 jobs with real workloads, Linux and Windows hosts, and the service's own CPU
 and memory during CI.
 
