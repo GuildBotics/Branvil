@@ -4,12 +4,14 @@ import { enc, get, getAll, newIdempotencyKey, request } from "./client";
 import type {
   AccountCredential,
   Activity,
+  Branch,
   Card,
   Checks,
   CiLimits,
   CiSettings,
   Comment,
   Commit,
+  CommitChecks,
   Diagnostics,
   FileChange,
   IssuedToken,
@@ -94,7 +96,9 @@ export const repos = {
   update: (repo: string, body: RepoPatch) => request<Repository>("PATCH", `/repos/${enc(repo)}`, { body }),
   pulls: (repo: string, state: "open" | "closed" | "all", cursor?: string | null) =>
     get<Page<PullRequest>>(`/repos/${enc(repo)}/pulls`, { state, cursor, limit: 30 }),
+  branch: (repo: string, name: string) => get<Branch>(`/repos/${enc(repo)}/branches/${enc(name)}`),
   commit: (repo: string, sha: string) => get<Commit>(`/repos/${enc(repo)}/commits/${enc(sha)}`),
+  commitChecks: (repo: string, sha: string) => get<CommitChecks>(`/repos/${enc(repo)}/commits/${enc(sha)}/checks`),
   /** `reader`: a member names it, `null` picks again, absent keeps it. */
   setUpstream: (repo: string, body: { provider: string; repository: string; reader?: string | null }) =>
     request<Repository>("PUT", `/repos/${enc(repo)}/upstream`, { body }),

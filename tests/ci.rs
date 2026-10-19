@@ -989,6 +989,68 @@ async fn required_ci_is_never_shown_as_success_or_no_checks() {
 }
 
 #[tokio::test]
+async fn a_commit_shows_its_checks_with_or_without_a_pull_request() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    let commit_checks = |sha: &str| {
+        let (s, path, token) = (
+            &w.server,
+            format!("{}/commits/{sha}/checks", w.repo_path()),
+            w.aiko.clone(),
+        );
+        async move { s.ok(&path, &token).await }
+    };
+    // A commit without a pipeline has no checks, and none are expected.
+    let initial = git_ok(&w.work, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        commit_checks(&initial).await,
+        json!({"sha": initial, "checks": [], "checks_expected": false})
+    );
+
+    // The default branch's new tip is followed from queued to its conclusion.
+    let tip = land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test"]))],
+        None,
+    )
+    .await;
+    let v = commit_checks(&tip).await;
+    assert_eq!(v["sha"], tip.as_str());
+    assert_eq!(v["checks_expected"], true);
+    assert_eq!(check(&v, "test")["status"], "queued");
+    let c = runner.claim().await.unwrap();
+    assert_eq!(c["sha"], tip.as_str());
+    let v = commit_checks(&tip).await;
+    assert_eq!(check(&v, "test")["status"], "in_progress");
+    assert_eq!(check(&v, "test")["attempt_id"], c["attempt_id"]);
+    assert_eq!(runner.finish(&c, "success").await.0, 200);
+    let t = check(&commit_checks(&tip).await, "test").clone();
+    assert_eq!(
+        (t["status"].as_str(), t["conclusion"].as_str()),
+        (Some("completed"), Some("success"))
+    );
+    assert!(
+        t["details_url"].as_str().unwrap().contains("/-/jobs/att_"),
+        "{t}"
+    );
+
+    // Required checks the commit's run lacks are listed as for a pull request.
+    set_required(&w, &["test", "lint"]).await;
+    let v = commit_checks(&tip).await;
+    assert_eq!(check(&v, "lint")["conclusion"], "failure");
+
+    // Only a full sha of a commit of the repository is found.
+    for sha in [&tip[..12], &"0".repeat(40)] {
+        let (st, v) = w
+            .server
+            .get(&format!("{}/commits/{sha}/checks", w.repo_path()), &w.aiko)
+            .await;
+        assert_eq!(st, 404, "{sha}: {v}");
+    }
+}
+
+#[tokio::test]
 async fn no_runner_means_startup_failure_not_waiting_forever() {
     let mut w = World::new().await;
     set_ci_config(&w, &[("runner_absent_secs", 2)]);

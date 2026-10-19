@@ -1,15 +1,15 @@
-// A pull request's checks: rows on the page, and one check's details, actions,
-// and log in a drawer.
+// The checks of a pull request's head or of a commit: rows on the page, and one
+// check's details, actions, and log in a drawer.
 
 import { Anchor, Button, Card, Drawer, Group, Select, Stack, Text } from "@mantine/core";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { ChevronRight, CircleCheck, CircleDashed, CircleX, ExternalLink } from "lucide-react";
 import { useState } from "react";
 import * as api from "../../api/endpoints";
-import type { Check } from "../../api/types";
+import type { Check, CheckSet } from "../../api/types";
 import { ErrorMessage, Loading, Sha, StateBadge, Time, type Tone } from "../../components/common";
 import { useT } from "../../i18n";
-import { useChecks, useJob, useJobLog } from "../../query/hooks";
+import { useChecks, useCommitChecks, useJob, useJobLog } from "../../query/hooks";
 import { keys } from "../../query/keys";
 import { Link } from "../../router/Router";
 import { href } from "../../router/routes";
@@ -48,35 +48,74 @@ const isHosted = (c: Check) => !!c.attempt_id && c.attempt === undefined;
 export function ChecksCard({ repo, number, onOpen }: { repo: string; number: number; onOpen: (check: Check) => void }) {
   const t = useT();
   const checks = useChecks(repo, number);
+  const behind = checks.data?.behind_by ?? 0;
   return (
-    <Card p="lg" component="section" aria-label={t("pull.checks")}>
+    <CheckList repo={repo} title={t("pull.checks")} query={checks} sha={checks.data?.head_sha} onOpen={onOpen}>
+      {behind > 0 && (
+        <Text size="sm" c="var(--color-warning-text)" mb="xs">
+          {t("pull.behindBy", { count: behind })}
+        </Text>
+      )}
+    </CheckList>
+  );
+}
+
+/** The checks of a commit; a row opens its drawer. `linked` links the commit's page. */
+export function CommitChecksCard({ repo, sha, title, linked, onOpen }: { repo: string; sha: string; title: string; linked?: boolean; onOpen: (check: Check) => void }) {
+  const checks = useCommitChecks(repo, sha);
+  return <CheckList repo={repo} title={title} query={checks} sha={checks.data?.sha} linked={linked} onOpen={onOpen} />;
+}
+
+function CheckList({
+  repo,
+  title,
+  query,
+  sha,
+  linked,
+  onOpen,
+  children,
+}: {
+  repo: string;
+  title: string;
+  query: UseQueryResult<CheckSet>;
+  sha: string | undefined;
+  linked?: boolean;
+  onOpen: (check: Check) => void;
+  children?: React.ReactNode;
+}) {
+  const t = useT();
+  return (
+    <Card p="lg" component="section" aria-label={title}>
       <Group gap="xs" mb="xs">
-        <Text fw={700}>{t("pull.checks")}</Text>
-        {checks.data && <StateBadge tone={ROLLUP_TONE[rollup(checks.data)]}>{t(`ci.${rollup(checks.data)}`)}</StateBadge>}
-        {checks.data && (
+        <Text fw={700}>{title}</Text>
+        {query.data && <StateBadge tone={ROLLUP_TONE[rollup(query.data)]}>{t(`ci.${rollup(query.data)}`)}</StateBadge>}
+        {sha !== undefined && (
           <Text size="xs" c="dimmed" ml="auto">
-            {t("pull.checksOn")} <Sha value={checks.data.head_sha} />
+            {t("pull.checksOn")}{" "}
+            {linked && sha ? (
+              <Link to={href.commit(repo, sha)}>
+                <Sha value={sha} />
+              </Link>
+            ) : (
+              <Sha value={sha} />
+            )}
           </Text>
         )}
       </Group>
-      {checks.isPending ? (
+      {query.isPending ? (
         <Loading />
-      ) : checks.isError ? (
-        <ErrorMessage error={checks.error} />
+      ) : query.isError ? (
+        <ErrorMessage error={query.error} />
       ) : (
         <>
-          {checks.data.behind_by !== null && checks.data.behind_by > 0 && (
-            <Text size="sm" c="var(--color-warning-text)" mb="xs">
-              {t("pull.behindBy", { count: checks.data.behind_by })}
-            </Text>
-          )}
-          {checks.data.checks.length === 0 ? (
+          {children}
+          {query.data.checks.length === 0 ? (
             <Text size="sm" c="dimmed">
-              {checks.data.checks_expected ? t("ci.notRegisteredHelp") : t("ci.noneHelp")}
+              {query.data.checks_expected ? t("ci.notRegisteredHelp") : t("ci.noneHelp")}
             </Text>
           ) : (
             <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-              {checks.data.checks.map((c) => (
+              {query.data.checks.map((c) => (
                 <li key={`${c.name}#${c.attempt_id ?? "pending"}`}>
                   <CheckRow check={c} repo={repo} onOpen={onOpen} />
                 </li>
@@ -177,6 +216,7 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
   const settle = () => {
     void client.invalidateQueries({ queryKey: keys.job(repo, attemptId) });
     void client.invalidateQueries({ queryKey: ["repo", repo, "pull"] });
+    if (job.data) void client.invalidateQueries({ queryKey: keys.commitChecks(repo, job.data.sha) });
   };
   const retry = useMutation({ mutationFn: () => api.jobs.retry(repo, attemptId), onSuccess: (j) => onAttempt(j.id), onSettled: settle });
   const cancel = useMutation({ mutationFn: () => api.jobs.cancel(repo, attemptId), onSettled: settle });

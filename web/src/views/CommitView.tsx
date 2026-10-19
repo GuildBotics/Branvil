@@ -1,22 +1,23 @@
 import { Card, Stack, Text, Title } from "@mantine/core";
 import { useState } from "react";
+import type { Check } from "../api/types";
 import { CopyButton, ErrorMessage, Loading, Time } from "../components/common";
 import { PageHeader } from "../components/PageHeader";
 import { useT } from "../i18n";
 import { useCommit } from "../query/hooks";
 import { Link, navigate } from "../router/Router";
 import { href } from "../router/routes";
-import { CheckDrawer } from "./pull/Checks";
+import { CheckDrawer, CommitChecksCard, drawerTarget } from "./pull/Checks";
 
 /**
- * The permanent commit URL: message, author, and parents. The GUI is not a
- * code browser, so there is no tree or diff here. A CI attempt of a commit no
- * open pull request has opens its drawer here.
+ * The permanent commit URL: message, author, parents, and checks. The GUI is
+ * not a code browser, so there is no tree or diff here. A CI attempt of a
+ * commit no open pull request has opens its drawer here.
  */
 export function CommitView({ repo, sha, openJob }: { repo: string; sha: string; openJob?: string }) {
   const t = useT();
   const commit = useCommit(repo, sha);
-  const [job, setJob] = useState(openJob ? { attemptId: openJob, hosted: null } : null);
+  const [job, setJob] = useState<{ attemptId: string; hosted: Check | null } | null>(openJob ? { attemptId: openJob, hosted: null } : null);
   const [subject, ...rest] = (commit.data?.message ?? "").split("\n");
   const workspace = repo.split("/")[0] as string;
   return (
@@ -69,6 +70,7 @@ export function CommitView({ repo, sha, openJob }: { repo: string; sha: string; 
           </Stack>
         </Card>
       )}
+      {commit.isSuccess && <CommitChecksCard repo={repo} sha={commit.data.sha} title={t("pull.checks")} onOpen={(c) => setJob(drawerTarget(c))} />}
       <CheckDrawer
         repo={repo}
         check={job}

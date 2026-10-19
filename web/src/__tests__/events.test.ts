@@ -34,6 +34,9 @@ describe("change events", () => {
   client.setQueryData(keys.pull("acme/demo", 4), { head_sha: "bbb" });
   client.setQueryData(keys.pullPart("acme/demo", 4, "checks"), { head_sha: "bbb" });
   client.setQueryData(keys.commit("acme/demo", "aaa"), {});
+  client.setQueryData(keys.commit("acme/demo", "ccc"), { sha: "ccc" });
+  client.setQueryData(keys.commitChecks("acme/demo", "ccc"), { sha: "ccc" });
+  client.setQueryData(keys.branch("acme/demo", "main"), { name: "main", sha: "ccc" });
   client.setQueryData(keys.repo("acme/other"), {});
 
   it("maps a ticket change to that ticket of that repository and the cards of its workspace's board", () => {
@@ -69,9 +72,22 @@ describe("change events", () => {
     expect(stale(client, { kind: "check", path: "acme/demo", id: "bbb" })).toEqual([k(keys.pullPart("acme/demo", 4, "checks"))]);
   });
 
-  it("maps a repository change (a push) to its pull requests but not diffs, commits, or tickets", () => {
+  it("maps a check change to the checks of that commit, not to the commit itself", () => {
+    expect(stale(client, { kind: "check", path: "acme/demo", id: "ccc" })).toEqual([k(keys.commitChecks("acme/demo", "ccc"))]);
+  });
+
+  it("maps a check change of a commit whose checks are still loading by the sha it was asked for", () => {
+    const loading = new QueryClient();
+    void loading.prefetchQuery({ queryKey: keys.commitChecks("acme/demo", "ddd"), queryFn: () => new Promise(() => {}) });
+    expect(stale(loading, { kind: "check", path: "acme/demo", id: "ddd" })).toEqual([k(keys.commitChecks("acme/demo", "ddd"))]);
+    expect(stale(loading, { kind: "check", path: "acme/demo", id: "eee" })).toEqual([]);
+  });
+
+  it("maps a repository change (a push, new settings) to its pull requests, branch tips, and commits' checks but not diffs, commits, or tickets", () => {
     expect(stale(client, { kind: "repo", path: "acme/demo", id: "" })).toEqual(
       [
+        k(keys.branch("acme/demo", "main")),
+        k(keys.commitChecks("acme/demo", "ccc")),
         k(keys.pull("acme/demo", 3)),
         k(keys.pullPart("acme/demo", 3, "checks")),
         k(keys.pull("acme/demo", 4)),

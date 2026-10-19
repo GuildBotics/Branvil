@@ -579,6 +579,16 @@ request was published (see "Upstream").
   the host's page, and `details` the host's summary. Their log is read through
   the job-log endpoint below; the other job endpoints do not know them.
 
+`GET /api/v1/repos/{repo}/commits/{sha}/checks` →
+`{"sha": "...", "checks": [...], "checks_expected": true}`: the checks of any
+commit of the repository (the default branch's tip, for instance), `checks`
+and `checks_expected` as for a pull request's head above, without the upstream
+host's check runs. Only a commit that is or was the default branch's tip or
+an open pull request's head gets a run (`docs/ci.md`, "What registers a run"):
+with a pipeline or required checks, another commit's checks stay "not
+registered yet". `404 not_found` when `sha`
+is not the full sha of a commit of the repository.
+
 ### CI attempts
 
 - `GET /api/v1/repos/{repo}/jobs/{attempt_id}` →

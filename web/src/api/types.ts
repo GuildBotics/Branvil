@@ -304,14 +304,27 @@ export interface Check {
   artifact_names?: string[];
 }
 
-export interface Checks {
+/** The checks of one commit (docs/api.md, "Checks"). */
+export interface CheckSet {
+  checks: Check[];
+  checks_expected: boolean;
+}
+
+export interface Checks extends CheckSet {
   head_sha: string;
   base_sha: string;
   /** null when a branch is gone. */
   behind_by: number | null;
-  checks: Check[];
-  checks_expected: boolean;
   base_checks: number;
+}
+
+export interface CommitChecks extends CheckSet {
+  sha: string;
+}
+
+export interface Branch {
+  name: string;
+  sha: string;
 }
 
 export interface Job {

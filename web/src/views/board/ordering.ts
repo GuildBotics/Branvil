@@ -1,6 +1,6 @@
 // Pure ordering logic of the kanban board (unit tested).
 
-import { ticketRef, type Card, type Check, type Checks, type Lane } from "../../api/types";
+import { ticketRef, type Card, type Check, type CheckSet, type Lane } from "../../api/types";
 
 // Cards are identified by their ticketRef: a board holds tickets of several repositories.
 
@@ -53,8 +53,8 @@ export type CiRollup = "passing" | "failing" | "pending" | "not_registered" | "n
 
 const FAILED = new Set<Check["conclusion"]>(["failure", "cancelled", "timed_out", "startup_failure"]);
 
-/** One status for a pull request's checks; never reports success for missing checks. */
-export function rollup(checks: Checks): CiRollup {
+/** One status for a commit's checks; never reports success for missing checks. */
+export function rollup(checks: CheckSet): CiRollup {
   if (checks.checks.length === 0) return checks.checks_expected ? "not_registered" : "none";
   if (checks.checks.some((c) => c.status === "completed" && FAILED.has(c.conclusion))) return "failing";
   if (checks.checks.some((c) => c.status !== "completed")) return "pending";

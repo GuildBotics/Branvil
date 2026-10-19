@@ -342,6 +342,14 @@ async fn commit_get(
     Ok(ok(repos::commit(&app, &c, &repo, &sha).await?))
 }
 
+async fn commit_checks(
+    State(app): State<Shared>,
+    c: Caller,
+    P((repo, sha)): P<(String, String)>,
+) -> R {
+    Ok(ok(repos::commit_checks(&app, &c, &repo, &sha).await?))
+}
+
 async fn compare(State(app): State<Shared>, c: Caller, P(repo): P<String>, q: Q) -> R {
     let base = q
         .get("base")
@@ -1155,6 +1163,7 @@ pub fn router(app: Shared) -> Router {
         .route("/repos/{repo}/branches/{branch}", get(branch_get))
         .route("/repos/{repo}/compare", get(compare))
         .route("/repos/{repo}/commits/{sha}", get(commit_get))
+        .route("/repos/{repo}/commits/{sha}/checks", get(commit_checks))
         .route("/repos/{repo}/pulls", get(pulls_list).post(pulls_create))
         .route(
             "/repos/{repo}/pulls/{number}",

@@ -12,7 +12,9 @@ export const keys = {
 
   repo: (repo: string) => ["repo", repo] as const,
   repoPulls: (repo: string, state: string) => ["repo", repo, "pull-list", state] as const,
+  branch: (repo: string, name: string) => ["repo", repo, "branch", name] as const,
   commit: (repo: string, sha: string) => ["repo", repo, "commit", sha] as const,
+  commitChecks: (repo: string, sha: string) => ["repo", repo, "commit", sha, "checks"] as const,
   pull: (repo: string, number: number) => ["repo", repo, "pull", number] as const,
   pullPart: (repo: string, number: number, part: "activity" | "threads" | "files" | "checks" | "publish") =>
     ["repo", repo, "pull", number, part] as const,
