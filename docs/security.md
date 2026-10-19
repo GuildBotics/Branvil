@@ -207,9 +207,11 @@ itself speaks plain HTTP on loopback only).
 - CI artifact names are `[A-Za-z0-9_.-]` names the job declares, stored as
   `ci/artifacts/<attempt id>/<name>.zip` (attempt ids are checked to be
   `att_<ULID>` before they become file names); uploads must be zip archives
-  within the size limit [`tests/ci.rs`]. The runner unpacks the source with
-  the `tar` crate (entries outside the work directory are refused), checks that
-  nothing below its work directory is a link before the VM gets it, collects
+  within the size limit [`tests/ci.rs`]. The runner checks the source out with
+  Git (which writes nothing outside the work tree or through a link; it runs
+  with an empty global configuration, and never in the work directory once
+  the job has had it), checks that nothing below its work directory is a
+  link before the VM gets it, collects
   artifacts without following links, and never writes through a link when it
   restores a cache [unit `artifacts_skip_links_and_stay_inside_the_work_directory`,
   `cache_round_trip_and_eviction`]. See `docs/ci.md`.
@@ -288,10 +290,11 @@ user profile's ACL.
   credential is not on this machine and nothing is sent until it is set again
   (`docs/backup-restore.md`) [`tests/backup.rs`].
 - **CI.** Jobs never receive `secrets/` or these values: the runner gets the
-  commit as a tar from the service and nothing else, and a job's microVM has
-  only its throwaway work and log directories mounted (the runner reads the
-  log through a handle it opened before the VM started), no network unless the owner allows
-  public destinations, and an environment of CI metadata only (no tokens, no
+  commit as a Git bundle from the service and nothing else (its checkout keeps
+  no remote), and a job's microVM runs its commands as a user that is not
+  root, has only its throwaway work and log directories mounted (the runner
+  reads the log through a handle it opened before the VM started), no
+  network unless the owner allows public destinations, and an environment of CI metadata only (no tokens, no
   host variables; `msb` itself runs with an empty `DOCKER_CONFIG`). The runner's
   own token is a runner member's, which every endpoint outside the runner API
   refuses except `/me` and its own tokens (`docs/ci.md`).

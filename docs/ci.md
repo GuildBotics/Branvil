@@ -27,11 +27,12 @@ artifacts = [{ name = "report", paths = ["out/report/", "coverage.xml"] }]   # u
 cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # optional
 ```
 
-- Commands run in order in `/work` (the commit's tree); the first one that
-  fails ends the job with its exit code. The job's environment has only CI
-  metadata: `CI=true`, `BRANVIL_CI=true`, `BRANVIL_REPOSITORY`, `BRANVIL_SHA`,
-  `BRANVIL_JOB`, `BRANVIL_ATTEMPT`, `BRANVIL_ATTEMPT_ID`. No tokens, no host
-  variables.
+- Commands run in order in `/work`; the first one that fails ends the job
+  with its exit code. The job's environment has only CI metadata (besides
+  the image's own variables and `HOME`): `CI=true`, `BRANVIL_CI=true`,
+  `BRANVIL_REPOSITORY`, `BRANVIL_SHA`, `BRANVIL_JOB`, `BRANVIL_ATTEMPT`,
+  `BRANVIL_ATTEMPT_ID`. No tokens, no host variables. See "The job's
+  environment" for `/work`, the user, and `/tmp`.
 - Jobs of one run are queued together and run one after another on a
   runner (there are no dependencies between jobs).
 - Validation is strict: an unknown key (`cpus` and `memory_mib` included,
@@ -71,6 +72,37 @@ cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # 
   cancelled meanwhile (`msb` used by hand does not take the lock). Settings → CI shows the tag to write and the digest of
   every cached image. (A runner started by hand on another machine loads such
   an archive with `msb load` under its own `MSB_HOME`.)
+
+## The job's environment
+
+What a job's commands find, as on common CI services:
+
+- **`/work` is a Git checkout of the commit.** It has `.git` and an index,
+  `HEAD` is the commit (detached), and it holds the commit's history and the
+  tags whose commits it reaches, so `git ls-files`, `git describe --tags`,
+  and version tools that read Git (`hatch-vcs`, `setuptools-scm`) work. It
+  has no remote, no credentials, and no Git configuration besides the
+  repository's own (no reflog of the checkout either). The files have the
+  time of the checkout, not the commit's, and the index compares only times,
+  sizes, and modes (`core.checkStat=minimal`): the VM sees other owners and
+  inodes than the runner's machine wrote, and `git diff-index --quiet HEAD`
+  must not report the checkout modified. Git attributes and ignore rules of
+  the runner's machine do not apply. Being a checkout and not an archive,
+  `export-ignore` and `export-subst` attributes do not apply either.
+- **The commands run as a fixed user that is not root**, uid 1000 and gid
+  1000 (`msb run --user 1000:1000`), without capabilities: a file of mode 0
+  cannot be read. `/work`, the cache paths restored into it, and the log
+  file are presented to the VM as that user's. `HOME` is the home the
+  image's passwd gives uid 1000 when that user can write it, and `/tmp/home`
+  (created) otherwise; the user may not exist in the image's passwd.
+- **`/tmp` is on a disk, not in the VM's memory**: an ext4 disk of 4 GiB of
+  the job's own (mode 1777), a named volume `bv-tmp-<runner>-<attempt id>`
+  the runner removes after the job. (Without it, microsandbox puts `/tmp` in
+  a tmpfs of a quarter of the VM's memory, at most 512 MiB.) The job's disk
+  sizes are microsandbox's 4 GiB default, decided together: the VM's root
+  disk (Branvil passes no `--root-disk`), `/tmp`, and what the job may add to
+  `/work` beyond the checkout and the restored cache (the default quota of a
+  mounted directory). They are the runner's, not the pipeline's.
 
 ## Trust: where the pipeline comes from
 
@@ -209,7 +241,9 @@ is refused, and nothing outside the work directory is read.
 `cache.paths` are restored into the work directory before the job and saved
 after a successful job. The key is the SHA-256 of the repository, the job
 name, the configuration digest of the image the job runs on (a new version of
-the tag does not reuse what the previous one built), the cached paths, the content of `cache.key_files`, and the
+the tag does not reuse what the previous one built), the user the job runs as
+(microsandbox records with each file the job writes the owner the VM saw, and
+the copies keep it), the cached paths, the content of `cache.key_files`, and the
 **scope**: `protected` for runs a protected branch asked for, `branch:<name>`
 otherwise. A run reads its own scope and, when it is not protected, the
 protected scope too, but writes only its own: a pull request cannot plant a
@@ -227,8 +261,9 @@ is removed too.
 
 `branvil runner` is a separate process (the same binary). It talks to the
 service only over the runner API with the token of a member of kind `runner`;
-it never opens the database or a repository (the source arrives as a tar made
-by the service with `git archive`).
+it never opens the database or the service's repositories (the source arrives
+as a Git bundle made by the service, which the runner checks out with the
+Git of its machine).
 
 ```sh
 # once, on the Hub machine (the owner's token from the data directory): create the runner member, print its token
@@ -265,28 +300,38 @@ in this version's shapes.
 
 Per job the runner:
 
-1. checks the executor (`msb doctor`, cached), logs the attempt with its
+1. checks the executor (an accepted `msb`, `git` on `PATH`, `msb doctor`;
+   cached), logs the attempt with its
    image tag, CPUs, memory, and time limit, then checks the image the cache
    holds under the tag and logs its configuration digest;
-2. creates `<work dir>/jobs/<attempt id>/work`, unpacks the source there,
-   creates the empty `<work dir>/jobs/<attempt id>/log` and its log file
-   `out` (opened once, before the VM exists), and checks that no component
-   below the runner's directory is a symbolic link;
+2. creates `<work dir>/jobs/<attempt id>/work`, writes the source's bundle
+   next to it and clones the bundle into it (Git with an empty global
+   configuration and none of the machine's attributes, no reflog,
+   `core.checkStat=minimal`), then removes the clone's remote and the
+   bundle; creates the
+   empty `<work dir>/jobs/<attempt id>/log` and its log file `out` (opened
+   once, before the VM exists), and checks that no component below the
+   runner's directory is a symbolic link. Git never runs in the work
+   directory once the VM has had it;
 3. restores the cache, then runs
-   `msb run --name bv-job-<attempt> --label branvil.runner=<runner> --label branvil.job=<attempt> --pull never --cpus N --memory NM --mount-dir <work>:/work --mount-dir <log>:/.branvil-log --workdir /work --max-duration <timeout+60>s --no-net <image> -- /bin/sh -c <script>`
+   `msb run --name bv-job-<attempt> --label branvil.runner=<runner> --label branvil.job=<attempt> --pull never --cpus N --memory NM --user 1000:1000 --mount-dir <work>:/work:uid=1000,gid=1000 --mount-dir <log>:/.branvil-log:uid=1000,gid=1000 --mount-named bv-tmp-<runner>-<attempt>:/tmp:kind=disk,size=4G --workdir /work --max-duration <timeout+60>s --no-net <image> -- /bin/sh -c <script>`
    (`N` and `M` the runner's CPUs and memory);
-   the script first sends its stdout and stderr to `/.branvil-log/out`;
+   the script first sends its stdout and stderr to `/.branvil-log/out` and
+   sets `HOME` ("The job's environment");
 4. streams that file to the log (read every 50 ms through the handle opened
    in step 2, so a link the job puts there is never followed), stops the VM
    when the timeout passes or the service asks to cancel (killing `msb run`
    ends the VM through its parent watchdog, so every process in it stops),
-   keeps what the job wrote up to then, and removes the sandbox;
+   keeps what the job wrote up to then, and removes the sandbox (by its
+   `branvil.job` label) and then its `/tmp` volume (which outlives the
+   sandbox), warning only about one that exists and could not be removed;
 5. uploads artifacts, saves the cache after a success, reports the
    conclusion with the image's configuration digest, and deletes the work
    directory.
 
-At start it removes every sandbox labelled with its own name (leftovers of a
-runner that was killed) and the old job directories.
+At start it removes every sandbox labelled with its own name and every volume
+named `bv-tmp-<its name>-<attempt id>` (leftovers of a runner that was killed),
+and the old job directories.
 
 ## Executor: microsandbox
 
@@ -319,8 +364,8 @@ a running job's log would stay empty, and a job stopped by its timeout or a
 cancellation would lose all its output.
 
 What a job gets: the work directory at `/work` and its own empty log
-directory at `/.branvil-log` as its only host mounts; no host
-home, no Docker socket, no Branvil data, no secrets. Network: denied
+directory at `/.branvil-log` as its only host mounts, and a disk of its own at
+`/tmp`; no host home, no Docker socket, no Branvil data, no secrets. Network: denied
 (`--no-net`: the guest has an interface, but the host-side network stack
 refuses every connection and DNS answers nothing; verified to a public host
 name, a public IP, and the host gateway). With `ci_network = true` (the owner
@@ -336,7 +381,9 @@ used as a guarantee.
 | Linux | KVM (`/dev/kvm` readable and writable by the runner's user) | unverified |
 | Windows | Windows Hypervisor Platform (microsandbox's Windows support is a preview); the work directory must not be under `%LOCALAPPDATA%\Temp`, and a path containing `:` cannot be mounted by `msb run` today, so jobs conclude `startup_failure` there | unverified |
 
-On every OS: `msb doctor` (run by `branvil runner doctor`) must pass.
+On every OS: `msb doctor` (run by `branvil runner doctor`) must pass, and
+`git` must be on the runner's `PATH` (it checks the source out; the executor
+reports itself unavailable without it, as without `msb`).
 
 ## Testing
 
@@ -351,7 +398,14 @@ On every OS: `msb doctor` (run by `branvil runner doctor`) must pass.
   runs and attempts of schema version 8 take this version's job definitions
   after `branvil admin upgrade` (a pipeline that gives `cpus` is invalid).
 - `src/runner/mod.rs`: the runner loop against an in-process service with a
-  fake executor that starts no process (results, cancellation, an unusable
+  fake executor that starts no VM (results, cancellation, an unusable
   executor, the runner's CPUs, memory, and time limit, the image's digest on
-  the attempt and in the log).
-- `tests/real_executor.rs` (opt-in, `BRANVIL_REAL_EXECUTOR=1`): real microVMs.
+  the attempt and in the log, and a work directory that is a checkout of the
+  commit with the tags it reaches and no remote).
+- `src/runner/executor.rs`: `msb` run as a fake script (the user, the mounts
+  and `/tmp` volume a job gets, their removal, and the sweep of this runner's
+  leftovers only).
+- `tests/real_executor.rs` (opt-in, `BRANVIL_REAL_EXECUTOR=1`): real microVMs
+  (no network or host files; a checkout of the commit at `/work`, a non-root
+  user that cannot read a file of mode 0, `/tmp` on a disk, the cache
+  restored in the next attempt, nothing left behind).

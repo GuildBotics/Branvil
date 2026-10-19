@@ -1,11 +1,12 @@
 //! The real executor, end to end: a real `branvil serve`, a real
 //! `branvil runner` process, and microVMs started by the pinned `msb`.
 //!
-//! Opt-in (it needs the msb 0.6.17 runtime, a hypervisor, and the image
+//! Opt-in (it needs the msb 0.6.17 runtime, a hypervisor, and the images
 //! below already in Branvil's image cache):
 //!
 //! ```sh
 //! branvil runner pull docker.io/library/alpine:3.22
+//! branvil runner pull docker.io/library/node:22.23.2-bookworm
 //! BRANVIL_REAL_EXECUTOR=1 cargo test --test main real_executor:: -- --nocapture
 //! ```
 
@@ -18,6 +19,8 @@ use common::*;
 use serde_json::{Value, json};
 
 const IMAGE: &str = "docker.io/library/alpine:3.22";
+/// An image with Git, for the job that looks at its checkout.
+const GIT_IMAGE: &str = "docker.io/library/node:22.23.2-bookworm";
 
 fn enabled() -> bool {
     std::env::var("BRANVIL_REAL_EXECUTOR").as_deref() == Ok("1")
@@ -51,6 +54,24 @@ fn sandboxes(runner: &str) -> Vec<String> {
         .unwrap()
         .iter()
         .filter_map(|s| s["name"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The `/tmp` volumes of Branvil's MSB_HOME that the runner `runner` named
+/// its own (`bv-tmp-<runner>-<attempt id>`).
+fn volumes(runner: &str) -> Vec<String> {
+    let out = Command::new(msb())
+        .args(["volume", "list", "--format", "json"])
+        .env("MSB_HOME", msb_home())
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(json!([]));
+    v.as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .filter(|n| n.starts_with(&format!("bv-tmp-{runner}-")))
+        .map(str::to_string)
         .collect()
 }
 
@@ -116,9 +137,29 @@ commands = [
   "if nc -z -w 3 1.1.1.1 443; then echo NETWORK-OPEN; exit 91; fi",
   "if wget -q -T 3 -O /dev/null http://host.microsandbox.internal:{port}/; then echo HOST-OPEN; exit 92; fi",
   "env | sort",
+  "touch \"$HOME/x\"",
   "mkdir -p out && echo report > out/report.txt",
 ]
 artifacts = [{{name = "report", paths = ["out/"]}}]
+
+[[jobs]]
+name = "workspace"
+image = "{GIT_IMAGE}"
+timeout_secs = 120
+commands = [
+  "test \"$(git rev-parse HEAD)\" = \"$BRANVIL_SHA\"",
+  "git ls-files | grep -qx README.md",
+  "git diff-index --quiet HEAD",
+  "test \"$(git describe --tags)\" = v-real",
+  "test -z \"$(git remote)\"",
+  "test \"$(id -u):$(id -g)\" = 1000:1000",
+  "echo secret > /tmp/s && chmod 0 /tmp/s && ! cat /tmp/s",
+  "echo secret > s0 && chmod 0 s0 && ! cat s0",
+  "grep -q '^/dev/[a-z]* /tmp ext4 ' /proc/mounts",
+  "touch \"$HOME/x\"",
+  "mkdir -p .ci/cache && echo $BRANVIL_ATTEMPT >> .ci/cache/attempts && echo cached $(cat .ci/cache/attempts)",
+]
+cache = {{ paths = [".ci/cache"], key_files = ["README.md"] }}
 
 [[jobs]]
 name = "exit3"
@@ -165,6 +206,13 @@ async fn jobs_run_in_microvms_without_network_or_host_files() {
     let port = s.url.rsplit(':').next().unwrap().to_string();
     std::fs::create_dir_all(w.work.join(".branvil")).unwrap();
     let head = w.push_change("setup", ".branvil/ci.toml", &pipeline(&port));
+    git_ok(&w.work, &["tag", "v-real", &head]);
+    git_as_ok(
+        &w.work,
+        "aiko",
+        &w.aiko,
+        &["push", "-q", "origin", "refs/tags/v-real"],
+    );
     let p = w.open_pull("setup", json!([])).await;
     let n = p["number"].as_u64().unwrap();
     let base = format!("{}/pulls/{n}", w.repo_path());
@@ -221,7 +269,7 @@ async fn jobs_run_in_microvms_without_network_or_host_files() {
         {
             seen_running = true;
         }
-        if v["checks"].as_array().unwrap().len() == 3
+        if v["checks"].as_array().unwrap().len() == 4
             && v["checks"]
                 .as_array()
                 .unwrap()
@@ -234,15 +282,8 @@ async fn jobs_run_in_microvms_without_network_or_host_files() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let total = started.elapsed();
-    let _ = child.kill();
-    let _ = child.wait();
-    let runner_log = std::fs::read_to_string(w.dir.path().join("runner.log")).unwrap_or_default();
-    assert!(
-        !done.is_null(),
-        "jobs did not finish; runner log:\n{runner_log}"
-    );
-    let by = |name: &str| {
-        done["checks"]
+    let by = |checks: &Value, name: &str| {
+        checks["checks"]
             .as_array()
             .unwrap()
             .iter()
@@ -250,6 +291,39 @@ async fn jobs_run_in_microvms_without_network_or_host_files() {
             .unwrap()
             .clone()
     };
+    // The workspace job again: its second attempt gets the cache the first
+    // saved.
+    let mut cached = Value::Null;
+    if !done.is_null() {
+        let id = by(&done, "workspace")["attempt_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (st, v) = s
+            .post(
+                &format!("{}/jobs/{id}/retry", w.repo_path()),
+                &w.owner,
+                json!({}),
+            )
+            .await;
+        assert_eq!(st, 200, "{v}");
+        while started.elapsed() < Duration::from_secs(420) {
+            let c = by(&s.ok(&format!("{base}/checks"), &w.aiko).await, "workspace");
+            if c["attempt"] == 2 && c["status"] == "completed" {
+                cached = c;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let runner_log = std::fs::read_to_string(w.dir.path().join("runner.log")).unwrap_or_default();
+    assert!(
+        !done.is_null() && !cached.is_null(),
+        "jobs did not finish; runner log:\n{runner_log}"
+    );
+    let by = |name: &str| by(&done, name);
     let probe = by("probe");
     let probe_log = job_log(&w, &probe).await;
     println!("--- probe log ---\n{probe_log}");
@@ -303,6 +377,23 @@ async fn jobs_run_in_microvms_without_network_or_host_files() {
         .unwrap();
     assert!(String::from_utf8_lossy(&listing.stdout).contains("out/report.txt"));
 
+    // The workspace is a checkout of the commit, the job runs as a user that
+    // cannot read a file of mode 0, its /tmp is on a disk, and the cache
+    // comes back, writable, in the next attempt.
+    let workspace = by("workspace");
+    let workspace_log = job_log(&w, &workspace).await;
+    assert_eq!(
+        workspace["conclusion"], "success",
+        "{workspace}\n{workspace_log}\n{runner_log}"
+    );
+    assert!(workspace_log.contains("cache saved"), "{workspace_log}");
+    let cached_log = job_log(&w, &cached).await;
+    assert_eq!(cached["conclusion"], "success", "{cached}\n{cached_log}");
+    assert!(
+        cached_log.contains("[branvil] cache restored\n") && cached_log.contains("cached 1 2\n"),
+        "{cached_log}"
+    );
+
     let exit3 = by("exit3");
     let exit3_log = job_log(&w, &exit3).await;
     assert_eq!(exit3["conclusion"], "failure", "{exit3}\n{exit3_log}");
@@ -335,10 +426,13 @@ async fn jobs_run_in_microvms_without_network_or_host_files() {
         - chrono::DateTime::parse_from_rfc3339(job["started_at"].as_str().unwrap()).unwrap();
     assert!(ran.num_seconds() < 30, "the timeout stopped the job: {ran}");
 
-    // Nothing is left behind: no sandbox record, no VM process.
+    // Nothing is left behind: no sandbox record, no /tmp volume, no VM
+    // process.
     tokio::time::sleep(Duration::from_secs(1)).await;
     let left = sandboxes(&runner_name);
     assert!(left.is_empty(), "sandboxes left: {left:?}");
+    let left = volumes(&runner_name);
+    assert!(left.is_empty(), "volumes left: {left:?}");
     assert!(
         jobs_rss("sandbox", &names).is_empty(),
         "a job VM is still running"

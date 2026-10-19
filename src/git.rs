@@ -43,8 +43,13 @@ impl Output {
     }
 }
 
-/// Builds a Git command with a sanitized environment. Shared with Smart HTTP.
-pub fn base_command(layout: &Layout) -> tokio::process::Command {
+/// Builds a Git command with a sanitized environment and `global_config` (an
+/// empty file) as its global configuration. No attributes or ignore rules of
+/// the machine apply either: none from the system, and `XDG_CONFIG_HOME` is
+/// that file, so no `$XDG_CONFIG_HOME/git/attributes` (or `ignore`) can exist
+/// and `~/.config/git` is not read. Shared with Smart HTTP, the runner API,
+/// and the runner.
+pub fn base_command(global_config: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("git");
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
@@ -52,7 +57,9 @@ pub fn base_command(layout: &Layout) -> tokio::process::Command {
         }
     }
     cmd.env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", layout.git_config())
+        .env("GIT_CONFIG_GLOBAL", global_config)
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("XDG_CONFIG_HOME", global_config)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
@@ -94,7 +101,7 @@ impl Git {
             .acquire()
             .await
             .map_err(|_| AppError::unavailable("Git is shutting down."))?;
-        let mut cmd = base_command(&self.layout);
+        let mut cmd = base_command(&self.layout.git_config());
         if let Some(dir) = dir {
             cmd.arg("--git-dir").arg(dir);
         }

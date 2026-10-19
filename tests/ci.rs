@@ -263,19 +263,28 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
     assert_eq!(c["cache_scope"], "branch:feature");
     assert_eq!(check(&checks(&w, n).await, "test")["status"], "in_progress");
 
-    // The source is the head's tree, as a tar made by the service.
-    let (st, tar) = runner.raw(reqwest::Method::GET, &c, "source", vec![]).await;
+    // The source is a Git bundle made by the service: the head as HEAD,
+    // with its history.
+    let (st, bundle) = runner.raw(reqwest::Method::GET, &c, "source", vec![]).await;
     assert_eq!(st, 200);
-    let tar_path = w.dir.path().join("src.tar");
-    std::fs::write(&tar_path, &tar).unwrap();
-    let listing = std::process::Command::new("tar")
-        .arg("-tf")
-        .arg(&tar_path)
-        .output()
-        .unwrap();
-    let listing = String::from_utf8_lossy(&listing.stdout);
-    assert!(listing.lines().any(|l| l == "f.txt"), "{listing}");
-    assert!(listing.lines().any(|l| l == "README.md"), "{listing}");
+    let bundle_path = w.dir.path().join("src.bundle");
+    std::fs::write(&bundle_path, &bundle).unwrap();
+    git_ok(
+        w.dir.path(),
+        &["clone", "-q", bundle_path.to_str().unwrap(), "src"],
+    );
+    let src = w.dir.path().join("src");
+    assert_eq!(git_ok(&src, &["rev-parse", "HEAD"]), head);
+    let files = git_ok(&src, &["ls-files"]);
+    assert!(files.lines().any(|l| l == "f.txt"), "{files}");
+    assert!(files.lines().any(|l| l == "README.md"), "{files}");
+    assert!(
+        git_ok(&src, &["rev-list", "--count", "HEAD"])
+            .parse::<u32>()
+            .unwrap()
+            > 1,
+        "the history comes along"
+    );
 
     let (st, beat) = runner.heartbeat(&c).await;
     assert_eq!(st, 200, "{beat}");

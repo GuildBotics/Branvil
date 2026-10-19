@@ -1,7 +1,7 @@
-//! The per-job work directory on the runner's machine: unpacking the source,
-//! collecting artifacts, and the dependency cache. Everything inside the
-//! work directory was written by the job, so nothing here follows a symbolic
-//! link: links are skipped (artifacts) or copied as links (cache).
+//! The per-job work directory on the runner's machine: checking out the
+//! source, collecting artifacts, and the dependency cache. Everything inside
+//! the work directory was written by the job, so nothing here follows a
+//! symbolic link: links are skipped (artifacts) or copied as links (cache).
 
 use std::fs;
 use std::io;
@@ -12,14 +12,50 @@ use crate::ci::pipeline::{ArtifactDef, CacheDef, JobDef, check_relative};
 
 use super::zip::ZipWriter;
 
-/// Unpacks a tar archive into `dest` (the tar crate refuses entries that
-/// would land outside it).
-pub fn unpack(tar_bytes: &[u8], dest: &Path) -> io::Result<()> {
-    let mut archive = tar::Archive::new(tar_bytes);
-    archive.set_overwrite(true);
-    archive.set_preserve_mtime(true);
-    archive.set_unpack_xattrs(false);
-    archive.unpack(dest)
+/// Checks the commit out of its Git bundle (`GET …/source`) into the empty
+/// directory `work`: a clone detached at the bundle's `HEAD`, with its
+/// history and tags, and then without the remote that names the bundle. Git
+/// runs with `global_config` (written empty) and writes no reflog, so nothing
+/// of this machine (a path, its user) reaches the job. Git never runs in the
+/// work directory once the job has had it.
+pub async fn checkout(bundle: &Path, work: &Path, global_config: &Path) -> io::Result<()> {
+    fs::write(global_config, "")?;
+    let mut clone = crate::git::base_command(global_config);
+    clone
+        // Inside the VM the files have another owner and other inodes than
+        // the index records: comparing only times, sizes, and modes keeps
+        // the index clean there (`git diff-index --quiet HEAD`).
+        .args([
+            "-c",
+            "core.logAllRefUpdates=false",
+            "clone",
+            "--quiet",
+            "-c",
+            "core.checkStat=minimal",
+            "--",
+        ])
+        .arg(bundle)
+        .arg(work);
+    let mut unlink = crate::git::base_command(global_config);
+    unlink
+        .arg("-C")
+        .arg(work)
+        .args(["remote", "remove", "origin"]);
+    for mut git in [clone, unlink] {
+        let out = git
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| io::Error::other(format!("cannot run git: {e}")))?;
+        if !out.status.success() {
+            return Err(io::Error::other(format!(
+                "git: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Fails when any component of `path` below `root` is a symbolic link or is
@@ -136,8 +172,9 @@ pub fn pack(
 
 /// The cache key of a job in a scope: repository, job, the configuration
 /// digest of the image it runs on (a new version of a tag does not reuse
-/// what the previous one built), cached paths, the content of the key files,
-/// and the trust scope.
+/// what the previous one built), the user it runs as (the files keep the
+/// owner the VM saw), cached paths, the content of the key files, and the
+/// trust scope.
 pub fn cache_key(
     repo: &str,
     job: &JobDef,
@@ -146,8 +183,9 @@ pub fn cache_key(
     scope: &str,
     work: &Path,
 ) -> String {
+    let user = super::executor::JOB_USER_ID.to_string();
     let mut h = Vec::new();
-    for part in [repo, &job.name, image_digest, scope] {
+    for part in [repo, &job.name, image_digest, &user, scope] {
         h.extend_from_slice(part.as_bytes());
         h.push(0);
     }
@@ -334,6 +372,71 @@ fn evict(cache_root: &Path, max_bytes: u64, saved_entry: &Path) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The machine's Git attributes never change the checkout. Git finds
+    /// them through the environment, so the checkout runs in a child test
+    /// process whose `XDG_CONFIG_HOME` and `HOME` hold `* text eol=crlf`.
+    #[tokio::test]
+    async fn the_checkout_ignores_the_machines_git_attributes() {
+        if std::env::var_os("BRANVIL_TEST_CHILD").is_some() {
+            let dir = PathBuf::from(std::env::var_os("BRANVIL_TEST_DIR").unwrap());
+            let work = dir.join("work");
+            checkout(&dir.join("b.bundle"), &work, &dir.join("gitconfig"))
+                .await
+                .unwrap();
+            assert_eq!(fs::read(work.join("f")).unwrap(), b"a\n");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for attributes in ["xdg/git/attributes", "home/.config/git/attributes"] {
+            fs::create_dir_all(d.join(attributes).parent().unwrap()).unwrap();
+            fs::write(d.join(attributes), "* text eol=crlf\n").unwrap();
+        }
+        fs::write(d.join("empty"), "").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(d)
+                .args(["-c", "credential.helper="])
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", d.join("empty"))
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("XDG_CONFIG_HOME", d.join("xdg"))
+                .env("HOME", d.join("home"))
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        fs::create_dir(d.join("r")).unwrap();
+        fs::write(d.join("r/f"), "a\n").unwrap();
+        git(&["-C", "r", "init", "-q"]);
+        git(&["-C", "r", "add", "f"]);
+        git(&["-C", "r", "commit", "-qm", "f"]);
+        git(&["-C", "r", "bundle", "create", "-q", "../b.bundle", "HEAD"]);
+        // Without the isolation, the attributes apply.
+        git(&["clone", "-q", "b.bundle", "plain"]);
+        assert_eq!(fs::read(d.join("plain/f")).unwrap(), b"a\r\n");
+        super::super::pass_in_child(
+            &format!(
+                "{}::the_checkout_ignores_the_machines_git_attributes",
+                module_path!()
+            ),
+            &[
+                ("BRANVIL_TEST_DIR", d.as_os_str()),
+                ("XDG_CONFIG_HOME", d.join("xdg").as_os_str()),
+                ("HOME", d.join("home").as_os_str()),
+            ],
+        );
+    }
 
     #[test]
     fn artifacts_skip_links_and_stay_inside_the_work_directory() {

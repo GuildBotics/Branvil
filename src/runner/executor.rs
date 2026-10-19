@@ -66,6 +66,11 @@ struct Listed {
     reference: String,
 }
 
+#[derive(serde::Deserialize)]
+struct Volume {
+    name: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Health {
     pub ready: bool,
@@ -83,7 +88,7 @@ pub struct JobRun<'a> {
     pub cpus: u32,
     pub memory_mib: u64,
     pub timeout_secs: u64,
-    /// The host directory mounted at `/work`: the commit's tree.
+    /// The host directory mounted at `/work`: a checkout of the commit.
     pub work: &'a Path,
     /// An empty host directory of this job only, mounted at [`LOG_MOUNT`]:
     /// the job's output is written there, so the runner reads it while the
@@ -400,24 +405,106 @@ impl Microsandbox {
         format!("bv-job-{}", id.to_lowercase())
     }
 
-    async fn remove(&self, name: &str) {
-        let _ = self.output(&["remove", "--force", "-q", name]).await;
+    /// The volume of a job's `/tmp`. Volumes carry no labels, so the name
+    /// tells this runner's apart (`sweep`).
+    fn tmp_volume(&self, id: &str) -> String {
+        format!("bv-tmp-{}-{id}", self.runner)
+    }
+
+    /// Why jobs cannot run here, if they cannot: no accepted msb, no Git to
+    /// check the source out with, or what `msb doctor` reports.
+    async fn problem(&self) -> Option<String> {
+        if let Msb::Missing(m) = &self.msb {
+            return Some(m.clone());
+        }
+        let git = tokio::process::Command::new("git")
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+            .await;
+        if !git.is_ok_and(|out| out.status.success()) {
+            return Some(
+                "git is not on the runner's PATH (the runner checks the source out with it)".into(),
+            );
+        }
+        if let Err(e) = std::fs::create_dir_all(&self.home) {
+            return Some(format!("cannot create {}: {e}", self.home.display()));
+        }
+        match self.output(&["doctor"]).await {
+            Ok(out) if out.status.success() => None,
+            Ok(out) => Some(format!(
+                "msb doctor reports a problem: {}{}",
+                tail(&out.stdout, 1024),
+                tail(&out.stderr, 1024)
+            )),
+            Err(e) => Some(e),
+        }
+    }
+
+    /// Removes the `/tmp` volumes whose names `pick` accepts, warning when
+    /// they cannot be listed or removed.
+    async fn remove_volumes(&self, pick: impl Fn(&str) -> bool) {
+        let listed = match self.output(&["volume", "list", "--format", "json"]).await {
+            Ok(out) if out.status.success() => serde_json::from_slice::<Vec<Volume>>(&out.stdout)
+                .map_err(|e| format!("msb answered something unreadable: {e}")),
+            Ok(out) => Err(tail(&out.stderr, 1024)),
+            Err(e) => Err(e),
+        };
+        let names: Vec<String> = match listed {
+            Ok(volumes) => volumes
+                .into_iter()
+                .map(|v| v.name)
+                .filter(|n| pick(n))
+                .collect(),
+            Err(e) => {
+                tracing::warn!("listing /tmp volumes failed: {e}");
+                return;
+            }
+        };
+        if !names.is_empty() {
+            let mut args = vec!["volume", "remove", "-q"];
+            args.extend(names.iter().map(String::as_str));
+            self.clean("/tmp volumes", &args).await;
+        }
+    }
+
+    /// Runs a clean-up command, warning when it fails.
+    async fn clean(&self, what: &str, args: &[&str]) {
+        match self.output(args).await {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => tracing::warn!(
+                "removing {what} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => tracing::warn!("removing {what} failed: {e}"),
+        }
     }
 }
 
 /// Where a job's log directory is mounted in the VM.
 pub const LOG_MOUNT: &str = "/.branvil-log";
 
-/// The shell script a job runs: its output into the log file, a start
-/// marker, then each command in its own `sh -c`, stopping at the first
-/// failure with its exit code.
+/// The uid and gid of the fixed non-root user a job's commands run as. The
+/// work and log directories are presented to the VM as this user's.
+pub const JOB_USER_ID: u32 = 1000;
+
+/// The size of the disk a job's `/tmp` is on: the size of the root disk msb
+/// gives a VM by default, which Branvil keeps.
+const TMP_DISK: &str = "4G";
+
+/// The shell script a job runs: its output into the log file, `HOME` moved
+/// to `/tmp/home` when the user cannot write the one the image gives it (or
+/// it has none), a start marker, then each command in its own `sh -c`,
+/// stopping at the first failure with its exit code.
 ///
 /// The output goes to a file of the log mount, not to `msb run`'s stdout:
 /// msb 0.6.17 hands a command's stdout and stderr over only when the command
 /// exits, so a running job's log would stay empty and a stopped job's output
 /// (a timeout, a cancellation) would be lost.
 pub fn script(commands: &[String]) -> String {
-    let mut s = format!("exec >>{LOG_MOUNT}/out 2>&1\nprintf '\\036branvil:started\\n'\n");
+    let mut s = format!(
+        "exec >>{LOG_MOUNT}/out 2>&1\n[ -w \"$HOME\" ] || {{ export HOME=/tmp/home; mkdir -p \"$HOME\"; }}\nprintf '\\036branvil:started\\n'\n"
+    );
     for c in commands {
         let q = c.replace('\'', "'\\''");
         s.push_str(&format!(
@@ -500,35 +587,10 @@ impl Executor for Microsandbox {
         {
             return h.clone();
         }
-        let h = match &self.msb {
-            Msb::Missing(m) => Health {
-                ready: false,
-                detail: Some(m.clone()),
-            },
-            Msb::Found(_) => match std::fs::create_dir_all(&self.home) {
-                Err(e) => Health {
-                    ready: false,
-                    detail: Some(format!("cannot create {}: {e}", self.home.display())),
-                },
-                Ok(()) => match self.output(&["doctor"]).await {
-                    Ok(out) if out.status.success() => Health {
-                        ready: true,
-                        detail: None,
-                    },
-                    Ok(out) => Health {
-                        ready: false,
-                        detail: Some(format!(
-                            "msb doctor reports a problem: {}{}",
-                            tail(&out.stdout, 1024),
-                            tail(&out.stderr, 1024)
-                        )),
-                    },
-                    Err(e) => Health {
-                        ready: false,
-                        detail: Some(e),
-                    },
-                },
-            },
+        let problem = self.problem().await;
+        let h = Health {
+            ready: problem.is_none(),
+            detail: problem,
         };
         *cached = Some((Instant::now(), h.clone()));
         h
@@ -587,14 +649,22 @@ impl Executor for Microsandbox {
             Err(e) => return Outcome::StartupFailure(format!("cannot create the job log: {e}")),
         };
         let name = Self::sandbox_name(job.attempt_id);
+        let tmp = self.tmp_volume(job.attempt_id);
+        let owner = format!("uid={JOB_USER_ID},gid={JOB_USER_ID}");
         let j = job.job;
         cmd.args(["run", "--name", &name, "--quiet", "--pull", "never"])
             .args(["--label", &format!("branvil.runner={}", self.runner)])
             .args(["--label", &format!("branvil.job={}", job.attempt_id)])
             .args(["--cpus", &job.cpus.to_string()])
             .args(["--memory", &format!("{}M", job.memory_mib)])
-            .args(["--mount-dir", &format!("{work}:/work")])
-            .args(["--mount-dir", &format!("{log_dir}:{LOG_MOUNT}")])
+            .args(["--user", &format!("{JOB_USER_ID}:{JOB_USER_ID}")])
+            .args(["--mount-dir", &format!("{work}:/work:{owner}")])
+            .args(["--mount-dir", &format!("{log_dir}:{LOG_MOUNT}:{owner}")])
+            // On a disk, not in the VM's memory (msb's default /tmp).
+            .args([
+                "--mount-named",
+                &format!("{tmp}:/tmp:kind=disk,size={TMP_DISK}"),
+            ])
             .args(["--workdir", "/work"])
             // Backstop: the VM itself ends shortly after the job's timeout.
             .args(["--max-duration", &format!("{}s", job.timeout_secs + 60)]);
@@ -709,25 +779,36 @@ impl Executor for Microsandbox {
         job_log.read_from(&mut output).await;
         job_log.flush().await;
         err_reader.abort();
-        self.remove(&name).await;
+        // By label and from the list: one that never came to be is not an
+        // error.
+        let label = format!("branvil.job={}", job.attempt_id);
+        self.clean(
+            "the job's sandbox",
+            &["remove", "--force", "-q", "--label", &label],
+        )
+        .await;
+        // The volume outlives its sandbox (msb refuses to remove it while a
+        // running sandbox has it).
+        self.remove_volumes(|n| n == tmp).await;
         outcome
     }
 
     async fn sweep(&self) {
-        if matches!(self.msb, Msb::Found(_)) {
-            let label = format!("branvil.runner={}", self.runner);
-            match self
-                .output(&["remove", "--force", "-q", "--label", &label])
-                .await
-            {
-                Ok(out) if out.status.success() => {}
-                Ok(out) => tracing::warn!(
-                    "removing leftover sandboxes failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-                Err(e) => tracing::warn!("removing leftover sandboxes failed: {e}"),
-            }
+        if !matches!(self.msb, Msb::Found(_)) {
+            return;
         }
+        let label = format!("branvil.runner={}", self.runner);
+        self.clean(
+            "leftover sandboxes",
+            &["remove", "--force", "-q", "--label", &label],
+        )
+        .await;
+        let prefix = self.tmp_volume("");
+        self.remove_volumes(|n| {
+            n.strip_prefix(&prefix)
+                .is_some_and(crate::ci::files::valid_attempt_id)
+        })
+        .await;
     }
 }
 
@@ -743,7 +824,9 @@ mod tests {
     #[test]
     fn the_script_quotes_every_command() {
         let s = script(&["echo 'a b'".into(), "exit 3".into()]);
-        assert!(s.starts_with("exec >>/.branvil-log/out 2>&1\nprintf '\\036branvil:started\\n'\n"));
+        assert!(s.starts_with(
+            "exec >>/.branvil-log/out 2>&1\n[ -w \"$HOME\" ] || { export HOME=/tmp/home; mkdir -p \"$HOME\"; }\nprintf '\\036branvil:started\\n'\n"
+        ));
         assert!(s.contains("/bin/sh -c 'echo '\\''a b'\\''' || exit $?"));
         assert!(s.contains("/bin/sh -c 'exit 3' || exit $?"));
     }
@@ -772,8 +855,10 @@ mod tests {
     }
 
     /// An msb whose cache holds `img:dev` as the digest in `$MSB_HOME/fake/tag`:
-    /// `load` writes the archive's content there, `run` notes the digest it
-    /// started, writes the start marker, and runs until `fake/done` exists.
+    /// `load` writes the archive's content there, `run` notes its arguments
+    /// and the digest it started, writes the start marker, and runs until
+    /// `fake/done` exists. `volume list` answers `fake/volumes`; removals are
+    /// noted in `fake/removed`.
     #[cfg(unix)]
     const FAKE_MSB: &str = r#"#!/bin/sh
 state="$MSB_HOME/fake"
@@ -784,14 +869,22 @@ image)
 load)
   cp "$4" "$state/tag" ;;
 run)
+  printf '%s\n' "$@" > "$state/args"
   prev=""
   for a in "$@"; do
-    [ "$prev" = "--mount-dir" ] && case "$a" in *:/.branvil-log) log="${a%:/.branvil-log}" ;; esac
+    [ "$prev" = "--mount-dir" ] && case "$a" in *:/.branvil-log:*) log="${a%%:/.branvil-log:*}" ;; esac
     prev="$a"
   done
   cat "$state/tag" > "$state/ran"
   printf '\036branvil:started\n' >> "$log/out"
   while [ ! -f "$state/done" ]; do sleep 0.05; done ;;
+remove)
+  echo "$*" >> "$state/removed" ;;
+volume)
+  case "$2" in
+  list) cat "$state/volumes" ;;
+  remove) echo "$*" >> "$state/removed" ;;
+  esac ;;
 esac
 "#;
 
@@ -814,6 +907,12 @@ esac
             format!("sha256:{}", "b".repeat(64)),
         );
         std::fs::write(state.join("tag"), &a).unwrap();
+        // The job's /tmp volume, and another runner's.
+        std::fs::write(
+            state.join("volumes"),
+            r#"[{"name": "bv-tmp-t-a1"}, {"name": "bv-tmp-u-a1"}]"#,
+        )
+        .unwrap();
         let archive = root.join("b.tar");
         std::fs::write(&archive, &b).unwrap();
         // The runner and the service: two users of one cache.
@@ -867,6 +966,35 @@ esac
         assert!(!running.is_finished(), "the job still runs");
         std::fs::write(state.join("done"), "").unwrap();
         assert_eq!(running.await.unwrap(), Outcome::Exited(0));
+        // The job ran as the fixed user, its directories presented as that
+        // user's, its /tmp on a disk volume of its own; the volume is removed
+        // after the sandbox.
+        let args = std::fs::read_to_string(state.join("args")).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        for (flag, value) in [
+            ("--user", "1000:1000".to_string()),
+            (
+                "--mount-dir",
+                format!("{}:/work:uid=1000,gid=1000", root.join("work").display()),
+            ),
+            (
+                "--mount-dir",
+                format!(
+                    "{}:/.branvil-log:uid=1000,gid=1000",
+                    root.join("log").display()
+                ),
+            ),
+            ("--mount-named", "bv-tmp-t-a1:/tmp:kind=disk,size=4G".into()),
+        ] {
+            assert!(
+                args.windows(2).any(|w| w == [flag, value.as_str()]),
+                "{flag} {value} in {args:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(state.join("removed")).unwrap(),
+            "remove --force -q --label branvil.job=a1\nvolume remove -q bv-tmp-t-a1\n"
+        );
 
         // While a load holds the cache, a job's check waits and says so; the
         // wait ends with its future (a cancelled job).
@@ -898,6 +1026,72 @@ esac
         assert!(
             err.contains("'sha256:b' as the configuration digest of img:dev"),
             "{err}"
+        );
+    }
+
+    /// The sweep removes this runner's sandboxes by their label and its
+    /// `/tmp` volumes by their names, and nothing else.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_sweep_removes_only_this_runners_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let msb = dir.path().join("msb");
+        write_script(&msb, FAKE_MSB);
+        let home = dir.path().join("home");
+        let state = home.join("fake");
+        std::fs::create_dir_all(&state).unwrap();
+        let id = format!("att_{}", "0".repeat(26));
+        let volumes: Vec<serde_json::Value> = [
+            format!("bv-tmp-t-{id}"),
+            format!("bv-tmp-t2-{id}"),
+            format!("bv-tmp-t-x-{id}"),
+            "bv-tmp-t-att_short".into(),
+            "data".into(),
+        ]
+        .into_iter()
+        .map(|n| serde_json::json!({"name": n, "kind": "disk"}))
+        .collect();
+        std::fs::write(state.join("volumes"), serde_json::to_vec(&volumes).unwrap()).unwrap();
+        Microsandbox::new(Msb::Found(msb), home, "t").sweep().await;
+        assert_eq!(
+            std::fs::read_to_string(state.join("removed")).unwrap(),
+            format!("remove --force -q --label branvil.runner=t\nvolume remove -q bv-tmp-t-{id}\n")
+        );
+    }
+
+    /// Without Git on `PATH` the executor is not ready, and says why (in a
+    /// child test process whose `PATH` has no Git).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_missing_git_is_reported() {
+        if std::env::var_os("BRANVIL_TEST_CHILD").is_some() {
+            let dir = PathBuf::from(std::env::var_os("BRANVIL_TEST_DIR").unwrap());
+            let ms = Microsandbox::new(Msb::Found(dir.join("msb")), dir.join("home"), "t");
+            let h = ms.health().await;
+            assert!(!h.ready);
+            assert_eq!(
+                h.detail.as_deref(),
+                Some("git is not on the runner's PATH (the runner checks the source out with it)")
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write_script(&dir.path().join("msb"), FAKE_MSB);
+        let ms = Microsandbox::new(
+            Msb::Found(dir.path().join("msb")),
+            dir.path().join("home"),
+            "t",
+        );
+        assert!(
+            ms.health().await.ready,
+            "ready with Git (and msb doctor passing)"
+        );
+        crate::runner::pass_in_child(
+            &format!("{}::a_missing_git_is_reported", module_path!()),
+            &[
+                ("BRANVIL_TEST_DIR", dir.path().as_os_str()),
+                ("PATH", dir.path().join("empty").as_os_str()),
+            ],
         );
     }
 
