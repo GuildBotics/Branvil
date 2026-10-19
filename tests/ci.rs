@@ -463,6 +463,14 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
             a["job"] = base_job.clone();
         }
     });
+    // A run of a commit that is no longer in the repository.
+    let gone = "1".repeat(40);
+    let mut lost = base_run.clone();
+    lost["sha"] = json!(gone);
+    lost["branches"] = json!([]);
+    lost["superseded_by"] = json!(base);
+    let repo_id = base_run["repo"].as_str().unwrap();
+    insert_record(&db, "ci_runs", &key_of(&[repo_id, &gone]), &lost);
     as_schema_7(&db, |r| (r["sha"] == head.as_str()).then(|| base.clone()));
     let before = tables(&db);
 
@@ -481,29 +489,67 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
         );
         (out.status.success(), text)
     };
+    let copies = || {
+        std::fs::read_dir(&data)
+            .unwrap()
+            .filter(|e| {
+                let name = e.as_ref().unwrap().file_name();
+                name.to_string_lossy().starts_with("branvil-schema-")
+            })
+            .count()
+    };
     let (ok, text) = admin("check");
     assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
+    // A Git failure fails the upgrade before anything is written.
+    let (repos, away) = (data.join("repos"), data.join("repos-away"));
+    std::fs::rename(&repos, &away).unwrap();
     let (ok, text) = admin("upgrade");
-    assert!(ok, "{text}");
+    assert!(!ok && text.contains(REPO), "{text}");
+    assert_eq!(tables(&db), before);
+    assert_eq!(copies(), 0);
+    std::fs::rename(&away, &repos).unwrap();
+    let (ok, text) = admin("upgrade");
+    assert!(ok && text.contains("1 could not be verified"), "{text}");
+    assert_eq!(copies(), 1);
     let copy = text
         .lines()
         .find_map(|l| l.strip_prefix("the database as it was: "))
         .unwrap();
     let copy = std::path::Path::new(copy);
     assert_eq!(tables(copy), before);
-    // Only the runs and the version changed: each run lost its source.
+    // Only the runs and the version changed: each run lost its source, the
+    // head's took its own pipeline, and the gone commit's cannot be verified.
     let (mut after, mut expected) = (tables(&db), before.clone());
     for t in ["ci_runs", "meta"] {
         after.remove(t);
         expected.remove(t);
     }
     assert_eq!(after, expected);
-    let mut runs = records(copy, "ci_runs");
-    for r in runs.iter_mut() {
-        assert!(r["source"].is_object(), "{r}");
-        r.as_object_mut().unwrap().remove("source");
+    let upgraded = records(&db, "ci_runs");
+    let original = records(copy, "ci_runs");
+    assert_eq!(upgraded.len(), original.len());
+    for (mut old, new) in original.into_iter().zip(upgraded) {
+        assert!(old.as_object_mut().unwrap().remove("source").is_some());
+        if old["sha"] == head.as_str() {
+            assert_eq!(
+                new["pipeline"]["jobs"][0]["commands"],
+                json!(["echo changed"])
+            );
+            old["pipeline"] = new["pipeline"].clone();
+        }
+        if old["sha"] == gone.as_str() {
+            assert_eq!(new["pipeline"]["state"], "invalid", "{new}");
+            assert!(
+                new["pipeline"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("could not verify"),
+                "{new}"
+            );
+            old["pipeline"] = new["pipeline"].clone();
+        }
+        assert_eq!(old, new);
     }
-    assert_eq!(records(&db, "ci_runs"), runs);
     let (ok, text) = admin("upgrade");
     assert!(
         ok && text.contains("already has schema version 8"),
@@ -522,11 +568,7 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
     };
     let v = checks(&w, n).await;
     let t = check(&v, "test");
-    assert_eq!(
-        (t["status"].as_str(), t["attempt"].as_u64()),
-        (Some("queued"), Some(2)),
-        "{v}"
-    );
+    assert_eq!(t["status"], "queued", "{v}");
     let (st, v) = w
         .server
         .post(
@@ -540,7 +582,16 @@ async fn a_version_7_run_of_the_bases_pipeline_takes_the_heads_own_after_the_upg
         (409, Some("not_mergeable")),
         "{v}"
     );
-    let c = runner.claim().await.unwrap();
+    // The reconciler queues it at start.
+    let mut claimed = None;
+    for _ in 0..60 {
+        claimed = runner.claim().await;
+        if claimed.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let c = claimed.unwrap();
     assert_eq!(c["sha"], head.as_str());
     assert_eq!(c["job"]["commands"], json!(["echo changed"]));
     let old = w

@@ -568,3 +568,27 @@ pub fn tables(db: &Path) -> Tables {
     }
     out
 }
+
+/// Writes one JSON record into `table` of the database file `db` (the
+/// service stopped).
+pub fn insert_record(db: &Path, table: &str, key: &[u8], value: &Value) {
+    let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
+    let database = redb::Database::open(db).unwrap();
+    let txn = database.begin_write().unwrap();
+    txn.open_table(def)
+        .unwrap()
+        .insert(key, serde_json::to_vec(value).unwrap().as_slice())
+        .unwrap();
+    txn.commit().unwrap();
+}
+
+/// The database key of strings `parts` (as Branvil's `Key::s` makes it, for
+/// strings without NUL).
+pub fn key_of(parts: &[&str]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for p in parts {
+        out.extend_from_slice(p.as_bytes());
+        out.extend_from_slice(&[0, 1]);
+    }
+    out
+}

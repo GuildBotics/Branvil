@@ -23,7 +23,7 @@ branvil runner ── runner API (HTTP) ─ ci ─ redb queue · ci/ files      
 | --- | --- |
 | `main.rs`, `cli.rs` | clap commands: `init`, `serve`, `admin check|reindex|upgrade` (offline, on the data directory), and `member`/`workspace`/`repo`/`backup`/`open` (clients of the running API, with the owner's token file by default) |
 | `config.rs` | `branvil.toml`, data directory layout, loopback-only listen, fixed base URL |
-| `store.rs` | redb tables, order-preserving keys, JSON records, bounded blocking executor (`Store::read` / `Store::write`), the schema version and the upgrade frame (copy first, one transaction) |
+| `store.rs` | redb tables, order-preserving keys, JSON records, bounded blocking executor (`Store::read` / `Store::write`), the schema version and the upgrade frame (exclusive open, reads, then a copy and one write transaction) |
 | `upgrade.rs` | what the upgrade from the previous schema version changes in the records (replaced at each version) |
 | `model.rs` | stored records and the one function per record that derives its index entries; consistency check and rebuild |
 | `auth.rs` | tokens (`bvt_<id>_<secret>`, SHA-256 stored, constant-time compare), the owner's token file (`secrets/owner.token`, replaced at start when missing or invalid), sessions with CSRF secret, the checks of what a member's kind may do |
@@ -143,10 +143,10 @@ impl Ci {
 - A background task (started by `serve` after recovery) sweeps every 5 s:
   expired leases are interrupted (re-queued once), queued work fails with
   `startup_failure` when no runner has been seen for `ci.runner_absent_secs`,
-  waiting runs are admitted; at start (before the service listens) and every
-  minute the reconciler registers the default-branch tips and open pull
-  request heads again (a missing run is created; a run recorded with another
-  pipeline than its commit's takes it); every hour
+  waiting runs are admitted; at start and every minute the reconciler
+  registers the default-branch tips and open pull request heads again (a
+  missing run is created, jobs without a current attempt are queued); every
+  hour
   retention deletes old logs and artifacts. At start it removes orphaned files.
 - The runner API (`src/ci/api.rs`) is the runner's only access: the source
   tarball is produced by the service (`git archive`, a Smart HTTP transfer

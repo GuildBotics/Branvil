@@ -554,7 +554,8 @@ request was published (see "Upstream").
   with `details`:
   - a required check when the commit has no run yet: `status: "queued"`,
     `conclusion: null` ("No CI run is registered for this commit yet");
-  - a job of a run that waits for room in the queue: `queued`, `null`;
+  - a job of a run that waits for room in the queue, or that is not queued
+    yet (the reconciler queues it): `queued`, `null`;
   - a required check the run cannot have (no pipeline in the commit, an
     invalid pipeline, no job of that name): `completed`, `failure`;
   - an invalid pipeline: a check named `pipeline`, `completed`, `failure`, the
@@ -590,9 +591,11 @@ request was published (see "Upstream").
   log is read from the host with the upstream's reader (`404` when the host has
   none for it).
 - `POST /api/v1/repos/{repo}/jobs/{attempt_id}/retry` → the new
-  attempt (`200`, `status: "queued"`, `attempt` one higher, the same job
-  definition). Only the latest attempt of its job, once completed, can be
-  retried (`409 conflict`); a full queue is `503 unavailable`.
+  attempt (`200`, `status: "queued"`, the job's next `attempt` number, the
+  same job definition). Only the latest attempt of its job as the commit's
+  pipeline defines it, once completed, can be retried (`409 conflict`
+  otherwise, also for an attempt of another definition); a full queue is
+  `503 unavailable`.
 - `POST /api/v1/repos/{repo}/jobs/{attempt_id}/cancel` → the attempt: a
   queued one is `completed`/`cancelled` at once, a running one gets
   `cancel_requested: true` and is concluded `cancelled` when its runner stops

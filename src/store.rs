@@ -700,7 +700,7 @@ impl Store {
     }
 }
 
-/// What `upgrade` did to `db`, for the command's output.
+/// What an upgrade did to `db`, for the command's output.
 pub fn upgrade_report(db: &Path, done: &Option<Upgraded>) -> String {
     match done {
         None => format!(
@@ -717,80 +717,105 @@ pub fn upgrade_report(db: &Path, done: &Option<Upgraded>) -> String {
     }
 }
 
-/// What `upgrade` did.
+/// What an upgrade did.
 pub struct Upgraded {
     pub from: u64,
     /// The database as it was before the upgrade.
     pub copy: PathBuf,
-    /// What the upgrade changed (`crate::upgrade::apply`).
+    /// What the upgrade changed (`crate::upgrade`).
     pub summary: String,
 }
 
-/// Upgrades the database at `path` from the previous schema version
-/// (`crate::upgrade`). It first writes a copy of the database as it is next
-/// to it (`branvil-schema-<version>-<time>.redb`, never overwritten and never
-/// removed by Branvil); then the upgrade and the new version are one write
-/// transaction, so a failure leaves the database at the previous version.
-/// Returns `None` when the database already has this build's version.
-pub fn upgrade(path: &Path) -> anyhow::Result<Option<Upgraded>> {
-    if !path.exists() {
-        anyhow::bail!("{} does not exist", path.display());
+/// A database of the previous schema version, opened exclusively for its
+/// upgrade (`crate::upgrade`): read it, then `finish`. Nothing is written
+/// before `finish`.
+pub struct Upgrading {
+    db: Database,
+    path: PathBuf,
+}
+
+impl Upgrading {
+    /// Opens the database at `path` for its upgrade, or returns `None` when it
+    /// already has this build's version.
+    pub fn open(path: &Path) -> anyhow::Result<Option<Self>> {
+        if !path.exists() {
+            anyhow::bail!("{} does not exist", path.display());
+        }
+        let db = open_db(path, 16 << 20)?;
+        let version =
+            version_of(&db.begin_read()?).map_err(|e| anyhow::anyhow!("{}", e.message))?;
+        match version {
+            Some(SCHEMA_VERSION) => Ok(None),
+            Some(crate::upgrade::FROM) => Ok(Some(Self {
+                db,
+                path: path.to_path_buf(),
+            })),
+            other => anyhow::bail!(
+                "{} has schema version {}; this build upgrades only version {}",
+                path.display(),
+                other.map_or("none".to_string(), |v| v.to_string()),
+                crate::upgrade::FROM
+            ),
+        }
     }
-    let db = open_db(path, 16 << 20)?;
-    let wtx = Wtx(db.begin_write()?);
-    match version_of(&wtx).map_err(|e| anyhow::anyhow!("{}", e.message))? {
-        Some(SCHEMA_VERSION) => return Ok(None),
-        Some(crate::upgrade::FROM) => {}
-        other => anyhow::bail!(
-            "{} has schema version {}; this build upgrades only version {}",
-            path.display(),
-            other.map_or("none".to_string(), |v| v.to_string()),
-            crate::upgrade::FROM
-        ),
+
+    pub fn read<T>(&self, f: impl FnOnce(&ReadTransaction) -> AppResult<T>) -> anyhow::Result<T> {
+        f(&self.db.begin_read()?).map_err(|e| anyhow::anyhow!("{}", e.message))
     }
-    drop(wtx);
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let name = format!(
-        "branvil-schema-{}-{}.redb",
-        crate::upgrade::FROM,
-        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
-    );
-    let copy = dir.join(&name);
-    let partial = dir.join(format!("{name}.partial"));
-    // The copy gets its name only when complete, and never another's.
-    let copied = copy_tables(&db.begin_read()?, &partial)
-        .map_err(|e| anyhow::anyhow!("{}", e.message))
-        .and_then(|_| {
-            if copy.exists() {
-                anyhow::bail!("{} exists", copy.display());
-            }
-            Ok(std::fs::rename(&partial, &copy)?)
-        });
-    if let Err(e) = copied {
-        let _ = std::fs::remove_file(&partial);
-        anyhow::bail!(
-            "copying {} to {} failed, so it was not upgraded: {e}",
-            path.display(),
-            copy.display()
+
+    /// Writes a copy of the database as it is next to it
+    /// (`branvil-schema-<version>-<time>.redb`, never overwritten and never
+    /// removed by Branvil), then applies `apply` and this build's version in
+    /// one write transaction: when `apply` fails, the database keeps the
+    /// previous version. `apply` returns what it changed.
+    pub fn finish(
+        self,
+        apply: impl FnOnce(&Wtx) -> anyhow::Result<String>,
+    ) -> anyhow::Result<Upgraded> {
+        let path = &self.path;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let name = format!(
+            "branvil-schema-{}-{}.redb",
+            crate::upgrade::FROM,
+            chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
         );
+        let copy = dir.join(&name);
+        let partial = dir.join(format!("{name}.partial"));
+        // The copy gets its name only when complete, and never another's.
+        let copied = copy_tables(&self.db.begin_read()?, &partial)
+            .map_err(|e| anyhow::anyhow!("{}", e.message))
+            .and_then(|_| {
+                if copy.exists() {
+                    anyhow::bail!("{} exists", copy.display());
+                }
+                Ok(std::fs::rename(&partial, &copy)?)
+            });
+        if let Err(e) = copied {
+            let _ = std::fs::remove_file(&partial);
+            anyhow::bail!(
+                "copying {} to {} failed, so it was not upgraded: {e}",
+                path.display(),
+                copy.display()
+            );
+        }
+        let wtx = Wtx(self.db.begin_write()?);
+        create_tables(&wtx)?;
+        let summary = apply(&wtx).map_err(|e| {
+            anyhow::anyhow!(
+                "upgrading {} failed, and it was left at schema version {}: {e}",
+                path.display(),
+                crate::upgrade::FROM
+            )
+        })?;
+        wtx.put(META, &version_key(), &SCHEMA_VERSION)
+            .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+        wtx.0.commit()?;
+        Ok(Upgraded {
+            from: crate::upgrade::FROM,
+            copy,
+            summary,
+        })
     }
-    let wtx = Wtx(db.begin_write()?);
-    create_tables(&wtx)?;
-    let summary = crate::upgrade::apply(&wtx).map_err(|e| {
-        anyhow::anyhow!(
-            "upgrading {} failed, and it was left at schema version {}: {e}",
-            path.display(),
-            crate::upgrade::FROM
-        )
-    })?;
-    wtx.put(META, &version_key(), &SCHEMA_VERSION)
-        .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-    wtx.0.commit()?;
-    Ok(Some(Upgraded {
-        from: crate::upgrade::FROM,
-        copy,
-        summary,
-    }))
 }
 
 fn open_db(path: &Path, cache_bytes: usize) -> anyhow::Result<Database> {
@@ -879,14 +904,24 @@ mod tests {
                 "{err}"
             );
             if other != crate::upgrade::FROM {
-                let err = upgrade(&path).err().unwrap().to_string();
+                let err = Upgrading::open(&path).err().unwrap().to_string();
                 assert!(err.contains("upgrades only version"), "{err}");
             }
             std::fs::remove_file(&path).unwrap();
         }
         Store::open(&path, 1 << 20, 1).unwrap();
         drop(Store::open(&path, 1 << 20, 1).unwrap());
-        assert!(upgrade(&path).unwrap().is_none());
+        assert!(Upgrading::open(&path).unwrap().is_none());
+        // While an upgrade has it open, nothing else opens it.
+        let store = Store::open(&path, 1 << 20, 1).unwrap();
+        store
+            .write_sync(|w| w.put(META, &version_key(), &crate::upgrade::FROM))
+            .unwrap();
+        drop(store);
+        let upgrading = Upgrading::open(&path).unwrap().unwrap();
+        let err = Store::open(&path, 1 << 20, 1).err().unwrap().to_string();
+        assert!(err.contains("already open"), "{err}");
+        drop(upgrading);
     }
 
     #[test]
@@ -894,7 +929,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("branvil.redb");
         let store = Store::open(&path, 1 << 20, 1).unwrap();
-        let run = br#"{"sha":"s1","note":"a run without a source"}"#;
+        let run = br#"{"sha":"s1"}"#;
         store
             .write_sync(|w| {
                 w.put_raw(CI_RUNS, b"k", run)?;
@@ -902,9 +937,20 @@ mod tests {
             })
             .unwrap();
         drop(store);
-        let err = upgrade(&path).err().unwrap().to_string();
+        // The upgrade writes, then fails: nothing of it stays.
+        let err = Upgrading::open(&path)
+            .unwrap()
+            .unwrap()
+            .finish(|w| {
+                w.put_raw(CI_RUNS, b"k", b"changed")
+                    .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+                anyhow::bail!("an unexpected record")
+            })
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("left at schema version 7"), "{err}");
-        assert!(err.contains("no source"), "{err}");
+        assert!(err.contains("an unexpected record"), "{err}");
         let err = Store::open(&path, 1 << 20, 1).err().unwrap().to_string();
         assert!(err.contains("schema version 7"), "{err}");
         let db = Database::open(&path).unwrap();

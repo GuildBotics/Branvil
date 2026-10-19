@@ -105,18 +105,21 @@ What registers a run:
 - a push of the default branch or of the head of an open pull request (after
   the push is recorded, `Ci::on_ref_changes`), opening or reopening a pull
   request, and a merge;
-- the reconciler (at start, before the service listens, and every minute),
-  which registers every default-branch tip and open pull request head again:
+- the reconciler (at start and every minute), which registers every
+  default-branch tip and open pull request head again:
   a crash between recording a push and registering its run, or a Git failure
   while reading its pipeline, is repaired, and until then the checks say "No
   CI run is registered for this commit yet" (`queued`, never `no checks`).
 
-A registration always reads the commit's own pipeline. When a run was recorded
-with another one (a run of schema version 7 read its pull request's base),
-the run takes it: jobs whose definition changed, or that are new, get a new
-attempt. Checks show only attempts of the run's current job definitions; an
-attempt of a job the pipeline dropped or defined differently stays on its job
-page as history and never counts as a check.
+A registration always reads the commit's own pipeline, and queues the jobs
+that have no current attempt: the latest attempt of that very job
+definition. When the run holds another pipeline (one the upgrade to schema
+version 8 could not verify, or one an older parser read from the same file),
+it takes the commit's, and its unfinished attempts of another definition are
+stopped. Checks and retries count only
+current attempts; an attempt of a job the pipeline dropped or defined
+differently stays on its job page as history, never counts as a check, and
+cannot be retried.
 
 Rapid pushes: when a branch moves from commit A to B and no other branch still
 wants A, A is **superseded**: its queued attempts are concluded `cancelled`

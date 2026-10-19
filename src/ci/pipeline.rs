@@ -5,6 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::path::Path;
+
+use super::queue::PipelineState;
+use crate::error::{AppError, AppResult};
+use crate::git::Git;
 use crate::util::valid_name;
 
 /// Where the pipeline lives in a commit.
@@ -19,6 +24,48 @@ const MAX_SCRIPT_BYTES: usize = 64 << 10;
 const MAX_ARTIFACTS: usize = 16;
 const MAX_PATHS: usize = 32;
 const MAX_CACHE_PATHS: usize = 8;
+
+/// Reads the pipeline of commit `sha` in the repository at `dir`. A Git
+/// failure is an error, never a pipeline (the service's registration is
+/// retried by the reconciler). The commit must exist: a missing one reads as
+/// having no pipeline.
+pub async fn read(git: &Git, dir: &Path, sha: &str) -> AppResult<PipelineState> {
+    let spec = format!("{sha}:{}", PIPELINE_PATH);
+    let out = git.run(Some(dir), &["cat-file", "-t", &spec]).await?;
+    match out.text().trim() {
+        "blob" if out.ok() => {}
+        _ if out.ok() => {
+            return Ok(PipelineState::Invalid {
+                message: format!("{} is not a file.", PIPELINE_PATH),
+            });
+        }
+        _ => return Ok(PipelineState::Absent),
+    }
+    let out = git.run(Some(dir), &["cat-file", "blob", &spec]).await?;
+    if !out.ok() {
+        return Err(AppError::internal(format!(
+            "reading {spec}: {}",
+            out.stderr.trim()
+        )));
+    }
+    if out.stdout.len() > MAX_PIPELINE_BYTES {
+        return Ok(PipelineState::Invalid {
+            message: format!(
+                "{} is larger than {} bytes.",
+                PIPELINE_PATH, MAX_PIPELINE_BYTES
+            ),
+        });
+    }
+    Ok(match String::from_utf8(out.stdout) {
+        Ok(text) => match parse(&text) {
+            Ok(jobs) => PipelineState::Jobs { jobs },
+            Err(message) => PipelineState::Invalid { message },
+        },
+        Err(_) => PipelineState::Invalid {
+            message: format!("{} is not UTF-8.", PIPELINE_PATH),
+        },
+    })
+}
 
 /// One job as recorded with its attempts (the snapshot taken when the run was
 /// registered; retries reuse it).

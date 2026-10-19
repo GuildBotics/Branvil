@@ -402,10 +402,6 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
     let layout = Layout::new(data_dir);
     layout.create()?;
     std::fs::copy(inside(from, DB_FILE)?, layout.db()).context("copying the database")?;
-    if manifest.schema_version == crate::upgrade::FROM {
-        let done = store::upgrade(&layout.db())?;
-        println!("{}", store::upgrade_report(&layout.db(), &done));
-    }
     if from.join(CONFIG_FILE).exists() {
         std::fs::copy(from.join(CONFIG_FILE), layout.config_file())?;
     }
@@ -448,6 +444,10 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
             bail!("{}: the restored refs differ from the manifest", repo.path);
         }
         println!("repository {}: {} refs", repo.path, refs.len());
+    }
+    if manifest.schema_version == crate::upgrade::FROM {
+        let done = crate::upgrade::upgrade(&layout, &git).await?;
+        println!("{}", store::upgrade_report(&layout.db(), &done));
     }
     for a in &manifest.account_tokens_excluded {
         println!(

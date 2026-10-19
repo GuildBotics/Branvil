@@ -30,7 +30,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::config::Layout;
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::events::Events;
 use crate::git::{Git, ZERO_SHA};
 use crate::model::Repo;
@@ -276,7 +276,7 @@ impl Ci {
                         Some("cancelled"),
                         format!("Superseded by {by} before it was queued."),
                     ),
-                    None => Check::placeholder(
+                    None if run.waiting => Check::placeholder(
                         &j.name,
                         "queued",
                         None,
@@ -284,6 +284,12 @@ impl Ci {
                             "Waiting for room in the CI queue ({} attempts at most).",
                             self.inner.config.queue_max
                         ),
+                    ),
+                    None => Check::placeholder(
+                        &j.name,
+                        "queued",
+                        None,
+                        "Not queued yet; the reconciler queues it within a minute.".into(),
                     ),
                 });
             }
@@ -316,54 +322,10 @@ impl Ci {
         })
     }
 
-    /// Reads the pipeline of commit `sha`. A Git failure is an error, never a
-    /// pipeline: the registration is retried by the reconciler.
+    /// Reads the pipeline of commit `sha` (`pipeline::read`).
     async fn read_pipeline(&self, repo: &Repo, sha: &str) -> AppResult<PipelineState> {
         let dir = self.inner.git.repo_dir(&repo.path);
-        let spec = format!("{sha}:{}", pipeline::PIPELINE_PATH);
-        let out = self
-            .inner
-            .git
-            .run(Some(&dir), &["cat-file", "-t", &spec])
-            .await?;
-        match out.text().trim() {
-            "blob" if out.ok() => {}
-            _ if out.ok() => {
-                return Ok(PipelineState::Invalid {
-                    message: format!("{} is not a file.", pipeline::PIPELINE_PATH),
-                });
-            }
-            _ => return Ok(PipelineState::Absent),
-        }
-        let out = self
-            .inner
-            .git
-            .run(Some(&dir), &["cat-file", "blob", &spec])
-            .await?;
-        if !out.ok() {
-            return Err(AppError::internal(format!(
-                "reading {spec}: {}",
-                out.stderr.trim()
-            )));
-        }
-        if out.stdout.len() > pipeline::MAX_PIPELINE_BYTES {
-            return Ok(PipelineState::Invalid {
-                message: format!(
-                    "{} is larger than {} bytes.",
-                    pipeline::PIPELINE_PATH,
-                    pipeline::MAX_PIPELINE_BYTES
-                ),
-            });
-        }
-        Ok(match String::from_utf8(out.stdout) {
-            Ok(text) => match pipeline::parse(&text) {
-                Ok(jobs) => PipelineState::Jobs { jobs },
-                Err(message) => PipelineState::Invalid { message },
-            },
-            Err(_) => PipelineState::Invalid {
-                message: format!("{} is not UTF-8.", pipeline::PIPELINE_PATH),
-            },
-        })
+        pipeline::read(&self.inner.git, &dir, sha).await
     }
 
     /// Registers CI of `sha` for `branch` when the branch wants CI: it is the

@@ -212,11 +212,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         report.rescanned_changes
     );
 
-    // Before any check is read: a run recorded with a pipeline that is not
-    // its commit's own takes it (`Ci::reconcile`).
-    if let Err(e) = app.ci.reconcile(&app).await {
-        tracing::warn!("CI: reconcile failed: {e}");
-    }
     crate::ci::Ci::start(app.clone());
     crate::ci::supervise::start(app.clone(), format!("http://{bound}"));
     crate::upstream::start(app.clone());
@@ -271,7 +266,7 @@ async fn shutdown_signal() {
     tracing::info!("shutting down");
 }
 
-pub fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {
+pub async fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {
     let layout = config.layout();
     if !layout.db().exists() {
         bail!(
@@ -282,7 +277,12 @@ pub fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {
     let open = || Store::open(&layout.db(), config.storage.cache_size_mib << 20, 1);
     match command {
         AdminCommand::Upgrade => {
-            let done = store::upgrade(&layout.db())?;
+            let git = crate::git::Git::new(
+                layout.clone(),
+                1,
+                std::time::Duration::from_secs(config.limits.git_command_timeout_secs),
+            );
+            let done = crate::upgrade::upgrade(&layout, &git).await?;
             println!("{}", store::upgrade_report(&layout.db(), &done));
             Ok(0)
         }

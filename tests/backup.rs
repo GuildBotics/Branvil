@@ -300,6 +300,12 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         "{}",
         text(&out)
     );
+    // Its runs were read against the restored repositories.
+    assert!(
+        text(&out).contains("checked the pipeline of") && !text(&out).contains("of 0 CI run"),
+        "{}",
+        text(&out)
+    );
     let out = std::process::Command::new(BIN)
         .args(["admin", "check", "--data-dir"])
         .arg(target.path().join("data"))
