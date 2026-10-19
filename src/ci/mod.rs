@@ -712,9 +712,7 @@ mod tests {
             name: name.into(),
             image: "alpine".into(),
             commands: vec!["true".into()],
-            timeout_secs: 60,
-            cpus: 1,
-            memory_mib: 256,
+            timeout_secs: None,
             artifacts: vec![],
             cache: None,
         }
@@ -765,7 +763,7 @@ mod tests {
             ci.inner.store.write(|w| {
                 let now = util::now();
                 let c = queue::claim(w, "r", 60, &now)?.unwrap();
-                queue::finish(w, &c.attempt.id, &c.lease, "success", None, &now)
+                queue::finish(w, &c.attempt.id, &c.lease, "success", None, None, &now)
             })
         };
         let test = |c: &Checks| c.checks.iter().find(|x| x.name == "test").cloned().unwrap();

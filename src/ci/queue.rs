@@ -83,6 +83,9 @@ pub struct Attempt {
     pub repo_path: String,
     pub sha: String,
     pub job: JobDef,
+    /// The configuration digest of the image the job ran on, as its runner
+    /// reported it (none when it did not get that far).
+    pub image_digest: Option<String>,
     pub number: u64,
     pub seq: u64,
     pub status: String,
@@ -287,6 +290,7 @@ fn new_attempt(w: &Wtx, run: &Run, job: &JobDef, network: bool, now: &str) -> Ap
         repo_path: run.repo_path.clone(),
         sha: run.sha.clone(),
         job: job.clone(),
+        image_digest: None,
         number,
         seq: w.next("ci_seq")?,
         status: "queued".into(),
@@ -599,6 +603,7 @@ pub fn finish(
     lease: &str,
     conclusion: &str,
     details: Option<String>,
+    image_digest: Option<String>,
     now: &str,
 ) -> AppResult<Attempt> {
     if !CONCLUSIONS.contains(&conclusion) {
@@ -607,8 +612,17 @@ pub fn finish(
             CONCLUSIONS.join(", ")
         )));
     }
+    if image_digest
+        .as_deref()
+        .is_some_and(|d| !super::pipeline::valid_digest(d))
+    {
+        return Err(AppError::invalid(
+            "image_digest must be a configuration digest, sha256:<64 hex>.",
+        ));
+    }
     let old = leased(w, id, lease, now)?;
     let mut a = old.clone();
+    a.image_digest = image_digest;
     if a.cancel_requested {
         let why = a.details.clone().unwrap_or_else(|| "Cancelled.".into());
         let reported = details.map(|d| format!(" (the runner reported {conclusion}: {d})"));
@@ -812,9 +826,7 @@ mod tests {
             name: name.into(),
             image: "alpine".into(),
             commands: vec!["true".into()],
-            timeout_secs: 60,
-            cpus: 1,
-            memory_mib: 512,
+            timeout_secs: Some(60),
             artifacts: vec![],
             cache: None,
         }
@@ -844,6 +856,7 @@ mod tests {
     const T1: &str = "2026-10-14T10:00:30.000Z";
     const T2: &str = "2026-10-14T10:02:00.000Z";
     const T3: &str = "2026-10-14T10:05:00.000Z";
+    const DIGEST: &str = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
 
     fn latest_attempts(r: &impl Rd, repo: &str, sha: &str) -> AppResult<Vec<Attempt>> {
         let jobs: Vec<JobDef> = attempts_of(r, repo, sha)?
@@ -872,8 +885,21 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let wrong = s.write_sync(|w| finish(w, &c.attempt.id, "bvl_other", "success", None, T1));
+        let wrong =
+            s.write_sync(|w| finish(w, &c.attempt.id, "bvl_other", "success", None, None, T1));
         assert_eq!(wrong.unwrap_err().code, "conflict");
+        let junk = s.write_sync(|w| {
+            finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "success",
+                None,
+                Some("sha256:x".into()),
+                T1,
+            )
+        });
+        assert_eq!(junk.unwrap_err().code, "invalid");
         let done = s
             .write_sync(|w| {
                 finish(
@@ -882,13 +908,15 @@ mod tests {
                     &c.lease,
                     "failure",
                     Some("exit 1".into()),
+                    Some(DIGEST.into()),
                     T1,
                 )
             })
             .unwrap();
         assert_eq!(done.conclusion.as_deref(), Some("failure"));
+        assert_eq!(done.image_digest.as_deref(), Some(DIGEST));
         // The lease is gone with the conclusion: a late repeat changes nothing.
-        let again = s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, T1));
+        let again = s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, None, T1));
         assert_eq!(again.unwrap_err().code, "conflict");
         assert_eq!(latest(&s, "s1")[0].conclusion.as_deref(), Some("failure"));
         assert!(
@@ -914,7 +942,8 @@ mod tests {
         assert_eq!((l[0].number, l[0].status.as_str()), (2, "queued"));
         assert!(l[0].after_interrupt);
         // The first runner's late result is refused.
-        let late = s.write_sync(|w| finish(w, &c1.attempt.id, &c1.lease, "success", None, T2));
+        let late =
+            s.write_sync(|w| finish(w, &c1.attempt.id, &c1.lease, "success", None, None, T2));
         assert_eq!(late.unwrap_err().code, "conflict");
         // The second interruption is final.
         let c2 = s.write_sync(|w| claim(w, "r", 60, T2)).unwrap().unwrap();
@@ -952,7 +981,17 @@ mod tests {
         );
         // The cancelled runner's success never counts, even for its own commit.
         let fin = s
-            .write_sync(|w| finish(w, &running.attempt.id, &running.lease, "success", None, T1))
+            .write_sync(|w| {
+                finish(
+                    w,
+                    &running.attempt.id,
+                    &running.lease,
+                    "success",
+                    None,
+                    None,
+                    T1,
+                )
+            })
             .unwrap();
         assert_eq!(fin.conclusion.as_deref(), Some("cancelled"));
         // Only the new commit's attempts are queued.
@@ -1048,7 +1087,7 @@ mod tests {
         // The current attempt fails and is retried; the old one is history.
         let c = s.write_sync(|w| claim(w, "r", 60, T2)).unwrap().unwrap();
         assert_eq!(c.attempt.number, 2);
-        s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "failure", None, T2))
+        s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "failure", None, None, T2))
             .unwrap();
         let again = s.write_sync(|w| retry(w, &c.attempt.id, 10, T2)).unwrap();
         assert_eq!((again.number, again.job == changed("test")), (3, true));
@@ -1064,7 +1103,7 @@ mod tests {
     #[test]
     fn taking_the_same_pipeline_stops_only_unfinished_attempts_of_another_definition() {
         let (_d, s) = store();
-        // As version 7 could leave it: an old definition still running beside
+        // As an upgrade can leave it: an old definition still running beside
         // the run's pipeline.
         s.write_sync(|w| register(w, reg("s1", "feature", &["test"]), 10, T0))
             .unwrap();
@@ -1103,7 +1142,7 @@ mod tests {
         s.write_sync(|w| register(w, reg("s1", "feature", &["test"]), 10, T0))
             .unwrap();
         let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
-        s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, T0))
+        s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, None, T0))
             .unwrap();
         // The run takes another definition (as the upgrade does for a run no
         // branch wants now): the old attempt is the newest, and only history.
@@ -1138,7 +1177,7 @@ mod tests {
             .unwrap();
         for _ in 0..2 {
             let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
-            s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, T0))
+            s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, None, T0))
                 .unwrap();
         }
         // The queue is full when the run takes a pipeline with a new b.

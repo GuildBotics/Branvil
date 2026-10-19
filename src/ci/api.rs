@@ -48,6 +48,7 @@ pub struct AttemptView {
     pub job: String,
     pub attempt: u64,
     pub sha: String,
+    pub image_digest: Option<String>,
     pub status: String,
     pub conclusion: Option<String>,
     pub details: Option<String>,
@@ -67,6 +68,7 @@ async fn view(app: &Shared, a: &Attempt) -> AttemptView {
         job: a.job.name.clone(),
         attempt: a.number,
         sha: a.sha.clone(),
+        image_digest: a.image_digest.clone(),
         status: a.status.clone(),
         conclusion: a.conclusion.clone(),
         details: a.details.clone(),
@@ -556,6 +558,8 @@ struct FinishInput {
     conclusion: String,
     #[serde(default)]
     details: Option<String>,
+    #[serde(default)]
+    image_digest: Option<String>,
 }
 
 async fn finish(
@@ -574,7 +578,17 @@ async fn finish(
     let now = util::now();
     let a = app
         .store
-        .write(move |w| queue::finish(w, &id, &input.lease, &input.conclusion, input.details, &now))
+        .write(move |w| {
+            queue::finish(
+                w,
+                &id,
+                &input.lease,
+                &input.conclusion,
+                input.details,
+                input.image_digest,
+                &now,
+            )
+        })
         .await?;
     app.events.publish("check", &a.repo_path, a.sha.clone());
     Ok(ok(view(&app, &a).await))

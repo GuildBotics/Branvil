@@ -5,7 +5,7 @@
 //! below already in Branvil's image cache):
 //!
 //! ```sh
-//! branvil runner pull docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+//! branvil runner pull docker.io/library/alpine:3.22
 //! BRANVIL_REAL_EXECUTOR=1 cargo test --test main real_executor:: -- --nocapture
 //! ```
 
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use serde_json::{Value, json};
 
-const IMAGE: &str = "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
+const IMAGE: &str = "docker.io/library/alpine:3.22";
 
 fn enabled() -> bool {
     std::env::var("BRANVIL_REAL_EXECUTOR").as_deref() == Ok("1")
@@ -107,7 +107,6 @@ fn pipeline(port: &str) -> String {
 name = "probe"
 image = "{IMAGE}"
 timeout_secs = 120
-memory_mib = 512
 commands = [
   "echo stdout-line; echo stderr-line >&2",
   "test -f /work/README.md",
@@ -179,8 +178,17 @@ async fn jobs_run_in_microvms_without_network_or_host_files() {
     assert_eq!(st, 200, "{v}");
 
     let work_dir = w.dir.path().join("runner");
+    // The conditions docs/performance.md records: 1 vCPU, 512 MiB per job.
+    let config = w.dir.path().join("runner.toml");
+    std::fs::write(
+        &config,
+        "[ci.executor]\nmax_cpus = 1\nmax_memory_mib = 512\n",
+    )
+    .unwrap();
     let mut child = Command::new(BIN)
-        .args(["runner", "--url", &s.url, "--work-dir"])
+        .args(["runner", "--url", &s.url, "--config"])
+        .arg(&config)
+        .arg("--work-dir")
         .arg(&work_dir)
         .env("BRANVIL_TOKEN", &token)
         .env("BRANVIL_LOG", "branvil=debug")

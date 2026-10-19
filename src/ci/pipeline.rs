@@ -3,6 +3,7 @@
 //! unknown or out of range makes the whole pipeline invalid, which shows as a
 //! failing `pipeline` check, never as success.
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 use std::path::Path;
@@ -85,9 +86,9 @@ pub struct JobDef {
     pub name: String,
     pub image: String,
     pub commands: Vec<String>,
-    pub timeout_secs: u64,
-    pub cpus: u32,
-    pub memory_mib: u64,
+    /// The job's own time limit, when it gives one; the runner lowers it to
+    /// its limit and runs a job that gives none with its limit.
+    pub timeout_secs: Option<u64>,
     pub artifacts: Vec<ArtifactDef>,
     pub cache: Option<CacheDef>,
 }
@@ -130,25 +131,13 @@ struct JobSchema {
     name: String,
     image: String,
     commands: Vec<String>,
-    #[serde(default = "default_timeout")]
-    timeout_secs: u64,
-    #[serde(default = "default_cpus")]
-    cpus: u32,
-    #[serde(default = "default_memory")]
-    memory_mib: u64,
+    timeout_secs: Option<u64>,
     #[serde(default)]
     artifacts: Vec<ArtifactDef>,
     cache: Option<CacheDef>,
-}
-
-fn default_timeout() -> u64 {
-    600
-}
-fn default_cpus() -> u32 {
-    1
-}
-fn default_memory() -> u64 {
-    1024
+    /// Not pipeline settings (the runner's): read only to say so.
+    cpus: Option<IgnoredAny>,
+    memory_mib: Option<IgnoredAny>,
 }
 
 /// Parses and validates a pipeline. `Err` is the message shown on the
@@ -194,7 +183,7 @@ fn validate_job(j: JobSchema) -> Result<JobDef, String> {
     }
     if !valid_image(&j.image) {
         return Err(at(&format!(
-            "'{}' is not an image reference (name[:tag][@sha256:digest]).",
+            "'{}' is not an image reference ([registry/]name[:tag], without a digest: a job runs the image the runner's cache holds under the tag).",
             j.image
         )));
     }
@@ -217,14 +206,13 @@ fn validate_job(j: JobSchema) -> Result<JobDef, String> {
             "the commands are longer than {MAX_SCRIPT_BYTES} bytes together."
         )));
     }
-    if !(1..=86_400).contains(&j.timeout_secs) {
+    if j.timeout_secs.is_some_and(|t| !(1..=86_400).contains(&t)) {
         return Err(at("timeout_secs must be between 1 and 86400."));
     }
-    if !(1..=64).contains(&j.cpus) {
-        return Err(at("cpus must be between 1 and 64."));
-    }
-    if !(128..=65_536).contains(&j.memory_mib) {
-        return Err(at("memory_mib must be between 128 and 65536."));
+    if j.cpus.is_some() || j.memory_mib.is_some() {
+        return Err(at(
+            "cpus and memory_mib are not pipeline settings: every job runs with the CPUs and memory set for the runner (Settings → CI).",
+        ));
     }
     if j.artifacts.len() > MAX_ARTIFACTS {
         return Err(at(&format!("at most {MAX_ARTIFACTS} artifacts.")));
@@ -266,8 +254,6 @@ fn validate_job(j: JobSchema) -> Result<JobDef, String> {
         image: j.image,
         commands: j.commands,
         timeout_secs: j.timeout_secs,
-        cpus: j.cpus,
-        memory_mib: j.memory_mib,
         artifacts: j.artifacts,
         cache: j.cache,
     })
@@ -295,46 +281,47 @@ pub fn check_relative(path: &str) -> Result<(), String> {
     }
 }
 
-/// An OCI reference: `[registry/]name[:tag][@sha256:<64 hex>]`, conservative
-/// characters only, never starting with `-` (it is passed as an argument).
+/// An OCI reference by tag, `[registry/]name[:tag]` (no digest: which
+/// version runs is the image the runner's cache holds under the tag),
+/// conservative characters only, never starting with `-` (it is passed as an
+/// argument).
 pub fn valid_image(image: &str) -> bool {
-    if image.is_empty() || image.len() > 256 || image.starts_with('-') {
-        return false;
-    }
-    if !image
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"._-/:@".contains(&b))
-    {
-        return false;
-    }
-    match image.split_once('@') {
-        Some((name, digest)) => {
-            !name.is_empty()
-                && digest
-                    .strip_prefix("sha256:")
-                    .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
-        }
-        None => true,
-    }
+    !image.is_empty()
+        && image.len() <= 256
+        && !image.starts_with('-')
+        && image
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-/:".contains(&b))
+}
+
+/// An image's configuration digest as the runner reports it:
+/// `sha256:<64 hex>`.
+pub fn valid_digest(digest: &str) -> bool {
+    digest
+        .strip_prefix("sha256:")
+        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const DIGEST: &str = "docker.io/library/alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
+    const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
     #[test]
-    fn a_minimal_pipeline_gets_defaults() {
-        let jobs = parse(&format!(
-            "[[jobs]]\nname = \"test\"\nimage = \"{DIGEST}\"\ncommands = [\"true\"]\n"
-        ))
+    fn a_minimal_pipeline_leaves_the_limits_to_the_runner() {
+        let jobs = parse(
+            "[[jobs]]\nname = \"test\"\nimage = \"docker.io/library/alpine:3.22\"\ncommands = [\"true\"]\n",
+        )
         .unwrap();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].timeout_secs, 600);
-        assert_eq!(jobs[0].cpus, 1);
-        assert_eq!(jobs[0].memory_mib, 1024);
+        assert_eq!(jobs[0].timeout_secs, None);
         assert!(jobs[0].artifacts.is_empty());
+        let jobs = parse(
+            "[[jobs]]\nname = \"test\"\nimage = \"alpine\"\ncommands = [\"true\"]\ntimeout_secs = 86400\n",
+        )
+        .unwrap();
+        assert_eq!(jobs[0].timeout_secs, Some(86_400));
     }
 
     #[test]
@@ -346,8 +333,7 @@ mod tests {
         assert!(parse("version = 2\n[[jobs]]\nname=\"t\"\nimage=\"a\"\ncommands=[\"x\"]").is_err());
         assert!(parse(&job("privileged = true\n")).is_err(), "unknown key");
         assert!(parse(&job("timeout_secs = 0\n")).is_err());
-        assert!(parse(&job("cpus = 0\n")).is_err());
-        assert!(parse(&job("memory_mib = 64\n")).is_err());
+        assert!(parse(&job("timeout_secs = 86401\n")).is_err());
         assert!(
             parse(&job("artifacts = [{name = \"r\", paths = [\"../etc\"]}]\n")).is_err(),
             "artifact path escapes"
@@ -377,13 +363,41 @@ mod tests {
     }
 
     #[test]
-    fn image_references() {
+    fn the_runner_s_settings_are_refused_with_the_reason() {
+        for extra in [
+            "cpus = 1\n",
+            "memory_mib = 1024\n",
+            "cpus = 2\nmemory_mib = 512\n",
+        ] {
+            let err = parse(&format!(
+                "[[jobs]]\nname = \"t\"\nimage = \"alpine\"\ncommands = [\"true\"]\n{extra}"
+            ))
+            .unwrap_err();
+            assert_eq!(
+                err,
+                "Job t: cpus and memory_mib are not pipeline settings: every job runs with the CPUs and memory set for the runner (Settings → CI).",
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_image_is_named_by_its_tag_only() {
+        let err = parse(&format!(
+            "[[jobs]]\nname = \"t\"\nimage = \"docker.io/library/alpine@{DIGEST}\"\ncommands = [\"true\"]\n"
+        ))
+        .unwrap_err();
+        assert!(err.contains("without a digest"), "{err}");
         assert!(valid_image("alpine"));
         assert!(valid_image("docker.io/library/alpine:3.22"));
-        assert!(valid_image(DIGEST));
-        assert!(!valid_image("alpine@sha256:abc"));
+        assert!(valid_image("registry:5000/a/b:1"));
+        assert!(!valid_image(&format!("alpine@{DIGEST}")));
+        assert!(!valid_image(&format!("alpine:3@{DIGEST}")));
         assert!(!valid_image("alpine latest"));
         assert!(!valid_image("--privileged"));
         assert!(!valid_image(""));
+        assert!(valid_digest(DIGEST));
+        assert!(!valid_digest("sha256:abc"));
+        assert!(!valid_digest(&DIGEST.replace("sha256", "sha512")));
     }
 }

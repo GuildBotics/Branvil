@@ -26,29 +26,11 @@ pub struct ImageInfo {
     pub reference: String,
     /// The manifest digest, which `docker save` and `msb load` re-encode.
     pub digest: String,
-    /// The configuration digest, which survives saving and loading.
+    /// The configuration digest, which survives saving and loading: it
+    /// tells which version of a tag a job ran on.
     pub config_digest: String,
     pub size_bytes: u64,
     pub created_at: String,
-}
-
-impl ImageInfo {
-    /// What a pipeline names it by: the reference when it carries a digest
-    /// (a pulled image), else the tag pinned to the configuration digest
-    /// (a loaded image, which the cache knows by its tag only).
-    pub fn pinned(&self) -> String {
-        if self.reference.contains('@') {
-            self.reference.clone()
-        } else {
-            format!("{}@{}", self.reference, self.config_digest)
-        }
-    }
-
-    /// Whether `digest` names this image (hex compares case-insensitively).
-    pub fn is(&self, digest: &str) -> bool {
-        digest.eq_ignore_ascii_case(&self.config_digest)
-            || digest.eq_ignore_ascii_case(&self.digest)
-    }
 }
 
 #[derive(serde::Deserialize)]
@@ -64,7 +46,6 @@ struct Inspected {
 
 #[derive(serde::Deserialize)]
 struct InspectedConfig {
-    #[serde(default)]
     digest: String,
 }
 
@@ -85,31 +66,23 @@ struct Listed {
     reference: String,
 }
 
-/// `name:tag@sha256:…` split into the tag and the digest it is pinned to.
-/// The cache knows a loaded image by its tag only, so a job pinning one is
-/// run by the tag once the digest is confirmed.
-pub fn tagged_pin(image: &str) -> Option<(&str, &str)> {
-    let (name, digest) = image.split_once('@')?;
-    let last = name.rsplit('/').next().unwrap_or(name);
-    last.contains(':').then_some((name, digest))
-}
-
 #[derive(Clone, Debug)]
 pub struct Health {
     pub ready: bool,
     pub detail: Option<String>,
 }
 
-/// One job, with limits already applied.
+/// One job, with the CPUs, memory, and time limit the runner gives it.
 pub struct JobRun<'a> {
     pub attempt_id: &'a str,
+    /// Run by its `image`, the tag `Executor::resolve_image` checked.
     pub job: &'a JobDef,
-    /// The reference the image is run by (`Executor::resolve_image`); the
-    /// job's own `image` stays the pinned one (the cache key holds it).
-    pub image: &'a str,
     /// The lock that came with the image's check, held until the VM has
     /// picked the image.
     pub image_lock: ImageLock,
+    pub cpus: u32,
+    pub memory_mib: u64,
+    pub timeout_secs: u64,
     /// The host directory mounted at `/work`: the commit's tree.
     pub work: &'a Path,
     /// An empty host directory of this job only, mounted at [`LOG_MOUNT`]:
@@ -131,16 +104,6 @@ pub enum Outcome {
     StartupFailure(String),
 }
 
-/// What the image cache holds for a job's image.
-#[derive(Debug, PartialEq)]
-pub enum ImageCheck {
-    /// It is there; run it by this reference.
-    Present(String),
-    Missing,
-    /// The cache holds the pinned name as another image (its digest).
-    Other(String),
-}
-
 /// A lock of the image cache ([`Microsandbox::lock_images`]), released when
 /// dropped (closing the file).
 #[derive(Default)]
@@ -151,15 +114,16 @@ pub struct ImageLock {
 pub trait Executor: Send + Sync {
     fn name(&self) -> &'static str;
     fn health(&self) -> impl Future<Output = Health> + Send;
-    /// Checks the job's image (telling `log` when it waits for a pull or a
-    /// load). The lock that comes with the answer keeps the cache from
-    /// re-pointing what was checked until `run` has started the job, which
-    /// runs a loaded image by its tag.
+    /// The configuration digest of the image the cache holds under the
+    /// job's `image`, or `None` when it holds none (telling `log` when it
+    /// waits for a pull or a load). The lock that comes with the answer keeps
+    /// the cache from re-pointing the tag until `run` has started the job, so
+    /// that the job runs the image of that digest.
     fn resolve_image(
         &self,
         image: &str,
         log: &mpsc::Sender<Vec<u8>>,
-    ) -> impl Future<Output = Result<(ImageCheck, ImageLock), String>> + Send;
+    ) -> impl Future<Output = Result<(Option<String>, ImageLock), String>> + Send;
     /// Runs the job; output goes to `log`, `cancel` turning true stops it.
     fn run(
         &self,
@@ -341,8 +305,8 @@ impl Microsandbox {
         let listed: Vec<Listed> = serde_json::from_slice(&out.stdout)
             .map_err(|e| format!("msb image list answered something unreadable: {e}"))?;
         let mut images = Vec::new();
-        // The list leaves out the configuration digest, which is what a
-        // loaded image is pinned by.
+        // The list leaves out the configuration digest, which tells the
+        // versions of a tag apart.
         for l in listed {
             if let Some(i) = self.inspect(&l.reference).await? {
                 images.push(i);
@@ -389,22 +353,6 @@ impl Microsandbox {
                 Err(std::fs::TryLockError::Error(e)) => return Err(fail(e)),
             }
         }
-    }
-
-    /// What the cache holds for `image`, without the lock (an answer to
-    /// show: a job checks through `Executor::resolve_image`).
-    pub async fn check_image(&self, image: &str) -> Result<ImageCheck, String> {
-        if self.inspect(image).await?.is_some() {
-            return Ok(ImageCheck::Present(image.to_string()));
-        }
-        let Some((name, pin)) = tagged_pin(image) else {
-            return Ok(ImageCheck::Missing);
-        };
-        Ok(match self.inspect(name).await? {
-            Some(held) if held.is(pin) => ImageCheck::Present(name.to_string()),
-            Some(held) => ImageCheck::Other(held.config_digest),
-            None => ImageCheck::Missing,
-        })
     }
 
     /// Pulls `reference` into the cache; the caller holds
@@ -590,14 +538,20 @@ impl Executor for Microsandbox {
         &self,
         image: &str,
         log: &mpsc::Sender<Vec<u8>>,
-    ) -> Result<(ImageCheck, ImageLock), String> {
+    ) -> Result<(Option<String>, ImageLock), String> {
         let lock = self
             .lock_images(false, || {
                 let note = "[branvil] waiting for an image pull or load to finish\n";
                 let _ = log.try_send(note.as_bytes().to_vec());
             })
             .await?;
-        Ok((self.check_image(image).await?, lock))
+        match self.inspect(image).await? {
+            Some(i) if !crate::ci::pipeline::valid_digest(&i.config_digest) => Err(format!(
+                "msb image inspect reports '{}' as the configuration digest of {image}, not sha256:<64 hex>",
+                i.config_digest
+            )),
+            held => Ok((held.map(|i| i.config_digest), lock)),
+        }
     }
 
     async fn run(
@@ -637,13 +591,13 @@ impl Executor for Microsandbox {
         cmd.args(["run", "--name", &name, "--quiet", "--pull", "never"])
             .args(["--label", &format!("branvil.runner={}", self.runner)])
             .args(["--label", &format!("branvil.job={}", job.attempt_id)])
-            .args(["--cpus", &j.cpus.to_string()])
-            .args(["--memory", &format!("{}M", j.memory_mib)])
+            .args(["--cpus", &job.cpus.to_string()])
+            .args(["--memory", &format!("{}M", job.memory_mib)])
             .args(["--mount-dir", &format!("{work}:/work")])
             .args(["--mount-dir", &format!("{log_dir}:{LOG_MOUNT}")])
             .args(["--workdir", "/work"])
             // Backstop: the VM itself ends shortly after the job's timeout.
-            .args(["--max-duration", &format!("{}s", j.timeout_secs + 60)]);
+            .args(["--max-duration", &format!("{}s", job.timeout_secs + 60)]);
         if job.network {
             // Admin-approved: public destinations only (never the host or
             // private networks). Hostname rules are best effort.
@@ -654,7 +608,7 @@ impl Executor for Microsandbox {
         for (k, v) in &job.env {
             cmd.args(["--env", &format!("{k}={v}")]);
         }
-        cmd.arg(job.image)
+        cmd.arg(&j.image)
             .args(["--", "/bin/sh", "-c", &script(&j.commands)])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -682,7 +636,7 @@ impl Executor for Microsandbox {
         });
         let mut stderr_tail: Vec<u8> = Vec::new();
         let mut out_buf = vec![0u8; 16 << 10];
-        let deadline = tokio::time::sleep(Duration::from_secs(j.timeout_secs));
+        let deadline = tokio::time::sleep(Duration::from_secs(job.timeout_secs));
         tokio::pin!(deadline);
         let mut tail = tokio::time::interval(Duration::from_millis(50));
         let mut out_open = true;
@@ -794,40 +748,6 @@ mod tests {
         assert!(s.contains("/bin/sh -c 'exit 3' || exit $?"));
     }
 
-    #[test]
-    fn a_tagged_pin_splits_and_an_untagged_one_does_not() {
-        assert_eq!(
-            tagged_pin("guildbotics/agent-environment:dev@sha256:ab"),
-            Some(("guildbotics/agent-environment:dev", "sha256:ab"))
-        );
-        assert_eq!(
-            tagged_pin("registry:5000/a/b:1@sha256:ab"),
-            Some(("registry:5000/a/b:1", "sha256:ab"))
-        );
-        assert_eq!(tagged_pin("registry:5000/a/b@sha256:ab"), None);
-        assert_eq!(tagged_pin("docker.io/library/alpine@sha256:ab"), None);
-        assert_eq!(tagged_pin("alpine:3"), None);
-    }
-
-    #[test]
-    fn a_loaded_image_is_pinned_by_its_configuration_digest() {
-        let mut i = ImageInfo {
-            reference: "guildbotics/agent-environment:dev".into(),
-            digest: "sha256:manifest".into(),
-            config_digest: "sha256:config".into(),
-            size_bytes: 1,
-            created_at: String::new(),
-        };
-        assert_eq!(
-            i.pinned(),
-            "guildbotics/agent-environment:dev@sha256:config"
-        );
-        assert!(i.is("sha256:config") && i.is("sha256:manifest") && !i.is("sha256:x"));
-        assert!(i.is("SHA256:CONFIG"));
-        i.reference = "docker.io/library/alpine@sha256:index".into();
-        assert_eq!(i.pinned(), "docker.io/library/alpine@sha256:index");
-    }
-
     /// Writes an executable script. On Unix a child process writes it: a
     /// descriptor of it open for writing here could pass into a process that
     /// another test forks meanwhile, and running the script would then fail
@@ -875,9 +795,10 @@ run)
 esac
 "#;
 
-    /// msb runs a loaded image by its tag, so a load that re-points the tag
-    /// waits for a job that checked it until the job's VM has started (and
-    /// not for the rest of the job), and a job's check waits for a load.
+    /// msb runs an image by its tag, so a load that re-points the tag waits
+    /// for a job that checked it until the job's VM has started (and not for
+    /// the rest of the job): the job runs the image whose digest it checked.
+    /// A job's check waits for a load.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_load_waits_until_a_job_that_checked_the_tag_has_started() {
@@ -888,19 +809,20 @@ esac
         let home = root.join("home");
         let state = home.join("fake");
         std::fs::create_dir_all(&state).unwrap();
-        std::fs::write(state.join("tag"), "sha256:a").unwrap();
+        let (a, b) = (
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+        );
+        std::fs::write(state.join("tag"), &a).unwrap();
         let archive = root.join("b.tar");
-        std::fs::write(&archive, "sha256:b").unwrap();
+        std::fs::write(&archive, &b).unwrap();
         // The runner and the service: two users of one cache.
         let cache = |name: &str| Microsandbox::new(Msb::Found(msb.clone()), home.clone(), name);
         let (runner, service) = (cache("t"), cache("service"));
 
         let (log, _logs) = mpsc::channel(64);
-        let (check, image_lock) = runner
-            .resolve_image("img:dev@sha256:a", &log)
-            .await
-            .unwrap();
-        assert_eq!(check, ImageCheck::Present("img:dev".into()));
+        let (digest, image_lock) = runner.resolve_image("img:dev", &log).await.unwrap();
+        assert_eq!(digest, Some(a.clone()));
         let loading = tokio::spawn(async move {
             let _lock = service.lock_images(true, || {}).await?;
             service.load(&archive).await
@@ -913,11 +835,9 @@ esac
         std::fs::create_dir_all(&log_dir).unwrap();
         let job = JobDef {
             name: "j".into(),
-            image: "img:dev@sha256:a".into(),
+            image: "img:dev".into(),
             commands: vec![],
-            timeout_secs: 60,
-            cpus: 1,
-            memory_mib: 256,
+            timeout_secs: None,
             artifacts: vec![],
             cache: None,
         };
@@ -926,8 +846,10 @@ esac
             let job = JobRun {
                 attempt_id: "a1",
                 job: &job,
-                image: "img:dev",
                 image_lock,
+                cpus: 1,
+                memory_mib: 256,
+                timeout_secs: 60,
                 work: &work,
                 log_dir: &log_dir,
                 network: false,
@@ -940,14 +862,8 @@ esac
             .expect("the load goes ahead once the VM has started")
             .unwrap()
             .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(state.join("ran")).unwrap(),
-            "sha256:a"
-        );
-        assert_eq!(
-            std::fs::read_to_string(state.join("tag")).unwrap(),
-            "sha256:b"
-        );
+        assert_eq!(std::fs::read_to_string(state.join("ran")).unwrap(), a);
+        assert_eq!(std::fs::read_to_string(state.join("tag")).unwrap(), b);
         assert!(!running.is_finished(), "the job still runs");
         std::fs::write(state.join("done"), "").unwrap();
         assert_eq!(running.await.unwrap(), Outcome::Exited(0));
@@ -971,8 +887,18 @@ esac
             b"[branvil] waiting for an image pull or load to finish\n"
         );
         drop(load);
-        let (check, _lock) = runner.resolve_image("img:dev", &log).await.unwrap();
-        assert_eq!(check, ImageCheck::Present("img:dev".into()));
+        let (digest, _lock) = runner.resolve_image("img:dev", &log).await.unwrap();
+        assert_eq!(digest, Some(b));
+        let (digest, _lock) = runner.resolve_image("img:other", &log).await.unwrap();
+        assert_eq!(digest, None, "an image the cache does not hold");
+        // An answer without a readable configuration digest is an error, not
+        // an image to run.
+        std::fs::write(state.join("tag"), "sha256:b").unwrap();
+        let err = runner.resolve_image("img:dev", &log).await.err().unwrap();
+        assert!(
+            err.contains("'sha256:b' as the configuration digest of img:dev"),
+            "{err}"
+        );
     }
 
     #[test]
