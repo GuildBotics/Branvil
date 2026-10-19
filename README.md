@@ -273,11 +273,11 @@ four jobs: `fmt` (`cargo fmt --check`), `clippy` (`cargo clippy --all-targets
 tests). Their image is GuildBotics' development image
 (`guildbotics/agent-environment:dev`, built by GuildBotics'
 `scripts/build-agent-environment-image.sh`): the owner loads its `docker save`
-archive under Settings → CI, and the pipeline names it by the reference that
-page shows. When the image is rebuilt, load the new archive and write its
-reference into the pipeline. `clippy` and `test` fetch crates from crates.io,
-so the repository's CI tab must allow its jobs the network; they cache Cargo's
-registry and `target`, keyed by `Cargo.lock`.
+archive under Settings → CI, and the pipeline names it by its tag. When the
+image is rebuilt, loading the new archive is all it takes (GuildBotics' script
+does so itself); the pipeline stays as it is. `clippy` and `test` fetch crates
+from crates.io, so the repository's CI tab must allow its jobs the network;
+they cache Cargo's registry and `target`, keyed by `Cargo.lock`.
 
 ## Upstream (GitHub)
 
