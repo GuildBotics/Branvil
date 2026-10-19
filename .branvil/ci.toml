@@ -16,13 +16,13 @@
 
 [[jobs]]
 name = "fmt"
-image = "guildbotics/agent-environment:dev@sha256:a404beda28cc3aef8b24fb05af507c591b6545a33936deed3cbd158ee5b8f5d9"
+image = "guildbotics/agent-environment:dev@sha256:4584a4699d683a7eb1402362206c110b6f8272567f5084d00cb11c17275f6b25"
 commands = ["CARGO_HOME=/work/.ci/cargo-home cargo fmt --check"]
 timeout_secs = 300
 
 [[jobs]]
 name = "clippy"
-image = "guildbotics/agent-environment:dev@sha256:a404beda28cc3aef8b24fb05af507c591b6545a33936deed3cbd158ee5b8f5d9"
+image = "guildbotics/agent-environment:dev@sha256:4584a4699d683a7eb1402362206c110b6f8272567f5084d00cb11c17275f6b25"
 commands = [
   "find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +",
   "CARGO_HOME=/work/.ci/cargo-home CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings",
@@ -34,7 +34,7 @@ cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.loc
 
 [[jobs]]
 name = "test"
-image = "guildbotics/agent-environment:dev@sha256:a404beda28cc3aef8b24fb05af507c591b6545a33936deed3cbd158ee5b8f5d9"
+image = "guildbotics/agent-environment:dev@sha256:4584a4699d683a7eb1402362206c110b6f8272567f5084d00cb11c17275f6b25"
 commands = [
   "find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +",
   "CARGO_HOME=/work/.ci/cargo-home CARGO_INCREMENTAL=0 cargo test",
@@ -46,6 +46,6 @@ cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.loc
 
 [[jobs]]
 name = "dev-script"
-image = "guildbotics/agent-environment:dev@sha256:a404beda28cc3aef8b24fb05af507c591b6545a33936deed3cbd158ee5b8f5d9"
+image = "guildbotics/agent-environment:dev@sha256:4584a4699d683a7eb1402362206c110b6f8272567f5084d00cb11c17275f6b25"
 commands = ["python3 -m unittest discover -s tests -p test_dev_script.py -v"]
 timeout_secs = 300
