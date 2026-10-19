@@ -57,6 +57,12 @@ export const useWorkspaces = () => useQuery({ queryKey: keys.workspaces(), query
 export const useCommit = (repo: string, sha: string) =>
   useQuery({ queryKey: keys.commit(repo, sha), queryFn: () => api.repos.commit(repo, sha), staleTime: Infinity });
 
+export const useCommitChecks = (repo: string, sha: string) =>
+  useQuery({ queryKey: keys.commitChecks(repo, sha), queryFn: () => api.repos.commitChecks(repo, sha) });
+
+export const useBranch = (repo: string, name: string, enabled = true) =>
+  useQuery({ queryKey: keys.branch(repo, name), queryFn: () => api.repos.branch(repo, name), enabled });
+
 export const useRepo = (repo: string) => useQuery({ queryKey: keys.repo(repo), queryFn: () => api.repos.get(repo) });
 
 export const useRepoPulls = (repo: string, state: "open" | "closed" | "all") =>

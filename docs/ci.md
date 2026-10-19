@@ -106,7 +106,9 @@ merging or publishing, as with any other change.
 
 A **run** is the CI of one commit of one repository; an **attempt** is one try
 of one job (`att_<ULID>`, numbered 1, 2, … per job). Checks show the latest
-attempt of each job.
+attempt of each job: a pull request's page shows its head's, a commit's page
+that commit's, and a repository's page its default branch's tip
+(`GET …/pulls/{number}/checks`, `GET …/commits/{sha}/checks`).
 
 | Attempt status | Conclusion (when completed) |
 | --- | --- |

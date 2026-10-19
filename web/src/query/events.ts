@@ -67,7 +67,10 @@ export function predicatesFor(event: ChangeEvent, client: QueryClient): Predicat
         (q) => {
           if (!isRepo(q, path)) return false;
           const k = keyOf(q);
-          if (k[2] === "job") return id === "" || (q.state.data as { sha?: string } | undefined)?.sha === id;
+          const sha = (q.state.data as { sha?: string } | undefined)?.sha;
+          if (k[2] === "job") return id === "" || sha === id;
+          // Before its first answer, a commit's checks are known by the sha in the key.
+          if (k[2] === "commit" && k[4] === "checks") return id === "" || (sha ?? k[3]) === id;
           if (k[2] !== "pull" || k[4] !== "checks") return false;
           if (id === "") return true;
           const checks = q.state.data as Checks | undefined;
@@ -76,11 +79,14 @@ export function predicatesFor(event: ChangeEvent, client: QueryClient): Predicat
         },
       ];
     case "repo":
-      // A push moves branch tips, so the pull requests of the repository are re-read too;
-      // its tickets do not change.
+      // A push moves branch tips, so the pull requests of the repository are re-read too,
+      // and new required checks change every commit's checks; its tickets and commits do not change.
       return [
         (q) => keyOf(q)[0] === "repos",
-        (q) => isRepo(q, path) && keyOf(q)[4] !== "files" && !["commit", "ticket"].includes(keyOf(q)[2] as string),
+        (q) => {
+          const k = keyOf(q);
+          return isRepo(q, path) && k[4] !== "files" && k[2] !== "ticket" && (k[2] !== "commit" || k[4] === "checks");
+        },
       ];
     case "upstream":
       return [

@@ -134,12 +134,89 @@ describe("pages", () => {
         authored_at: "2026-10-14T10:00:00.000Z",
         parents: [parent],
       }),
+      [`GET /api/v1/repos/acme/demo/commits/${sha}/checks`]: json(200, { sha, checks: [], checks_expected: false }),
     });
     renderApp(`/acme/demo/-/commits/${sha}`);
     expect(await screen.findByRole("heading", { name: "Fix login" })).toBeInTheDocument();
     expect(screen.getByText("Handle an empty token.")).toBeInTheDocument();
     expect(screen.getByText("Aiko <aiko@example.com>")).toBeInTheDocument();
     expect(screen.getByTitle(parent).closest("a")).toHaveAttribute("href", `/acme/demo/-/commits/${parent}`);
+    const checks = await screen.findByRole("region", { name: "Checks" });
+    expect(await within(checks).findByText("This repository runs no checks for this commit.")).toBeInTheDocument();
+  });
+
+  it("shows a commit's checks on its page and opens a job from them", async () => {
+    const sha = "d".repeat(40);
+    const fake = fakeApi({
+      ...SHELL,
+      [`GET /api/v1/repos/acme/demo/commits/${sha}`]: json(200, { sha, message: "Fix login", author: "Aiko", authored_at: "2026-10-14T10:00:00.000Z", parents: [] }),
+      [`GET /api/v1/repos/acme/demo/commits/${sha}/checks`]: json(200, {
+        sha,
+        checks: [
+          { name: "test", status: "completed", conclusion: "failure", attempt_id: "att_1", attempt: 1, artifact_names: [] },
+          { name: "lint", status: "queued", conclusion: null },
+        ],
+        checks_expected: true,
+      }),
+      "GET /api/v1/repos/acme/demo/jobs/att_1": json(200, { id: "att_1", job: "test", attempt: 1, sha, status: "completed", conclusion: "failure", details: "exit code 101", artifact_names: ["report"] }),
+      "GET /api/v1/repos/acme/demo/jobs/att_1/log": json(200, { log: "test login ... FAILED", log_bytes: 20, truncated: false }),
+    });
+    const user = userEvent.setup();
+    renderApp(`/acme/demo/-/commits/${sha}`);
+    const checks = await screen.findByRole("region", { name: "Checks" });
+    expect(await within(checks).findByText("failing")).toBeInTheDocument();
+    expect(within(checks).getByText("queued")).toBeInTheDocument();
+    expect(await within(checks).findByText("Reason: exit code 101")).toBeInTheDocument();
+    // The commit's own page does not link to itself.
+    expect(within(checks).getByTitle(sha).closest("a")).toBeNull();
+
+    await user.click(within(checks).getByRole("button", { name: "Open check test" }));
+    const job = await screen.findByRole("dialog", { name: /test/ });
+    expect(await within(job).findByText("test login ... FAILED")).toBeInTheDocument();
+    expect(within(job).getByRole("link", { name: "report" })).toHaveAttribute("href", `/api/v1/repos/acme%2Fdemo/commits/${sha}/artifacts/report`);
+    expect(fake.calls("GET", `/api/v1/repos/acme/demo/commits/${sha}/checks`)).toHaveLength(1);
+  });
+
+  it("shows the checks of the default branch's tip on a repository's page", async () => {
+    const tip = "f".repeat(40);
+    const fake = fakeApi({
+      ...SHELL,
+      "GET /api/v1/repos": page([repo("acme/demo")]),
+      "GET /api/v1/repos/acme/demo": json(200, { ...repo("acme/demo"), default_branch: "trunk" }),
+      "GET /api/v1/repos/acme/demo/branches/trunk": json(200, { name: "trunk", sha: tip }),
+      [`GET /api/v1/repos/acme/demo/commits/${tip}/checks`]: json(200, {
+        sha: tip,
+        checks: [{ name: "test", status: "in_progress", conclusion: null, attempt_id: "att_2", attempt: 1 }],
+        checks_expected: true,
+      }),
+      "GET /api/v1/repos/acme/demo/pulls": page([]),
+    });
+    renderApp("/acme/demo");
+    const checks = await screen.findByRole("region", { name: "Checks of trunk" });
+    expect(await within(checks).findByText("pending")).toBeInTheDocument();
+    expect(within(checks).getByText("in progress")).toBeInTheDocument();
+    expect(within(checks).getByTitle(tip).closest("a")).toHaveAttribute("href", `/acme/demo/-/commits/${tip}`);
+    expect(within(checks).getByRole("button", { name: "Open check test" })).toBeInTheDocument();
+    expect(await screen.findByText("No open pull requests.")).toBeInTheDocument();
+    expect(fake.calls("GET", "/api/v1/repos/acme/demo/branches/trunk")).toHaveLength(1);
+  });
+
+  it("says so on a repository's page when its default branch has no commit yet", async () => {
+    fakeApi({
+      ...SHELL,
+      "GET /api/v1/repos": page([repo("acme/demo")]),
+      "GET /api/v1/repos/acme/demo": json(200, repo("acme/demo")),
+      "GET /api/v1/repos/acme/demo/pulls": page([]),
+    });
+    renderApp("/acme/demo");
+    expect(await screen.findByText("main has no commits yet.")).toBeInTheDocument();
+  });
+
+  it("shows no default branch's checks on a workspace's list of pull requests", async () => {
+    const fake = fakeApi({ ...SHELL, "GET /api/v1/repos": page([repo("acme/demo")]), "GET /api/v1/repos/acme/demo/pulls": page([]) });
+    renderApp("/acme/-/pulls");
+    expect(await screen.findByText("No open pull requests.")).toBeInTheDocument();
+    expect(fake.calls("GET", "/api/v1/repos/acme/demo")).toHaveLength(0);
   });
 
   it("warns only when CI cannot run or an upstream cannot be followed, and a dismissed warning stays away", async () => {

@@ -2,16 +2,18 @@ import { Card, Group, Select, Text, TextInput } from "@mantine/core";
 import { useQueries } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
+import { isApiError } from "../api/client";
 import * as api from "../api/endpoints";
-import type { PullRequest } from "../api/types";
+import type { Check, PullRequest } from "../api/types";
 import { ErrorMessage, Loading, MemberAvatar, StateBadge, Time, type Tone } from "../components/common";
 import { PageHeader } from "../components/PageHeader";
 import { useT } from "../i18n";
-import { useChecks, useMemberKinds, useRepos } from "../query/hooks";
+import { useBranch, useChecks, useMemberKinds, useRepo, useRepos } from "../query/hooks";
 import { keys } from "../query/keys";
 import { Link, navigate } from "../router/Router";
 import { href } from "../router/routes";
 import { rollup, type CiRollup } from "./board/ordering";
+import { CheckDrawer, CommitChecksCard, drawerTarget } from "./pull/Checks";
 
 type State = "open" | "closed" | "all";
 const ALL_REPOS = "*";
@@ -28,9 +30,39 @@ function CiCell({ pull, load }: { pull: PullRequest; load: boolean }) {
   return <StateBadge tone={CI_TONE[rollup(checks.data)]}>{t(`ci.${rollup(checks.data)}`)}</StateBadge>;
 }
 
+/** The checks of the tip of a repository's default branch, which follow the branch as it moves. */
+function TipChecks({ repo }: { repo: string }) {
+  const t = useT();
+  const repository = useRepo(repo);
+  const branch = repository.data?.default_branch ?? "";
+  const tip = useBranch(repo, branch, branch !== "");
+  const [check, setCheck] = useState<{ attemptId: string; hosted: Check | null } | null>(null);
+  // The list of pull requests below says what is wrong with the repository.
+  if (repository.isError) return null;
+  if (tip.isError) {
+    // An empty repository has no branch yet.
+    if (!isApiError(tip.error, undefined, 404)) return <ErrorMessage error={tip.error} />;
+    return (
+      <Card p="lg">
+        <Text size="sm" c="dimmed">
+          {t("repo.noTip", { branch })}
+        </Text>
+      </Card>
+    );
+  }
+  if (!tip.data) return <Loading />;
+  return (
+    <>
+      <CommitChecksCard repo={repo} sha={tip.data.sha} title={t("repo.tipChecks", { branch })} linked onOpen={(c) => setCheck(drawerTarget(c))} />
+      <CheckDrawer repo={repo} check={check} onClose={() => setCheck(null)} />
+    </>
+  );
+}
+
 /**
  * The pull requests of a workspace's repositories; a repository's page
- * (`/{repo}`) is this list for that repository.
+ * (`/{repo}`) is the checks of its default branch and this list for that
+ * repository.
  */
 export function PullsView({ workspace, repo }: { workspace: string; repo: string | null }) {
   const t = useT();
@@ -65,6 +97,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
           </Text>
         }
       />
+      {repo && <TipChecks key={repo} repo={repo} />}
       <Card p="lg">
         <Group gap="sm" mb={14} role="search" aria-label={t("pulls.filters")}>
           <TextInput

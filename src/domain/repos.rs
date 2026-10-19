@@ -285,7 +285,10 @@ pub struct CommitView {
 }
 
 pub async fn commit(app: &App, caller: &Caller, path: &str, sha: &str) -> AppResult<CommitView> {
-    let repo = visible(app, caller, path).await?;
+    commit_of(app, &visible(app, caller, path).await?, sha).await
+}
+
+async fn commit_of(app: &App, repo: &Repo, sha: &str) -> AppResult<CommitView> {
     let not_found = || AppError::not_found(format!("Commit {sha} was not found in {}.", repo.path));
     if !util::is_sha(sha) {
         return Err(not_found());
@@ -301,6 +304,29 @@ pub async fn commit(app: &App, caller: &Caller, path: &str, sha: &str) -> AppRes
         author,
         authored_at: util::parse_time(&date).unwrap_or(date),
         parents,
+    })
+}
+
+#[derive(Serialize, Debug)]
+pub struct CommitChecksView {
+    pub sha: String,
+    #[serde(flatten)]
+    pub checks: crate::ci::Checks,
+}
+
+/// The checks of a commit, as a pull request's head has them (`docs/api.md`,
+/// "Checks").
+pub async fn commit_checks(
+    app: &App,
+    caller: &Caller,
+    path: &str,
+    sha: &str,
+) -> AppResult<CommitChecksView> {
+    let repo = visible(app, caller, path).await?;
+    let sha = commit_of(app, &repo, sha).await?.sha;
+    Ok(CommitChecksView {
+        checks: app.ci.head_checks(&repo, &sha).await?,
+        sha,
     })
 }
 
