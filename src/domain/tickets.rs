@@ -1,8 +1,10 @@
 //! Tickets of a repository, ticket comments and reactions, and the board of
 //! a workspace with its cards.
 
+use std::collections::HashSet;
 use std::ops::Bound;
 
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
@@ -34,18 +36,180 @@ pub struct TicketView {
     pub upstream_issue: Option<String>,
     pub lane: Option<String>,
     pub rank: Option<String>,
+    /// The ticket this one is a part of.
+    pub parent: Option<TicketRef>,
+    /// The tickets that are a part of this one.
+    pub children: Vec<TicketRef>,
+    /// The tickets that must be closed before this one is started.
+    pub blocked_by: Vec<TicketRef>,
+    /// The tickets this one must be closed before.
+    pub blocks: Vec<TicketRef>,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub revision: u64,
 }
 
+impl TicketView {
+    /// The tickets whose views show this one.
+    fn related(&self) -> impl Iterator<Item = &TicketRef> {
+        self.parent
+            .iter()
+            .chain(&self.children)
+            .chain(&self.blocked_by)
+            .chain(&self.blocks)
+    }
+}
+
+/// A ticket another ticket is related to.
+#[derive(Serialize, Debug, Clone)]
+pub struct TicketRef {
+    pub url: String,
+    pub repository: String,
+    pub key: String,
+    pub title: String,
+    pub state: String,
+    pub state_reason: Option<String>,
+}
+
+/// A ticket by its (repository id, number).
+pub type TicketId = (String, u64);
+
+fn id_of(t: &Ticket) -> TicketId {
+    (t.repo.clone(), t.number)
+}
+
+fn ticket_by_id(r: &impl Rd, id: &TicketId) -> AppResult<Ticket> {
+    r.get(store::TICKETS, &Ticket::key(&id.0, id.1))?
+        .ok_or_else(|| AppError::internal("a relation names a missing ticket"))
+}
+
+/// The tickets that name `id` as their `kind`: its children (`parent`), or
+/// the tickets it blocks (`blocked_by`).
+fn referrers(r: &impl Rd, id: &TicketId, kind: &str) -> AppResult<Vec<TicketId>> {
+    r.prefix_keys(store::IX_TICKET_REFS, &Ticket::refs_prefix(id, kind))?
+        .iter()
+        .map(|k| {
+            let parts = store::decode_key(k, "sussu")
+                .ok_or_else(|| AppError::internal("bad relation index"))?;
+            Ok((parts[3].s().to_string(), parts[4].u()))
+        })
+        .collect()
+}
+
+fn ticket_ref(r: &impl Rd, base_url: &str, id: &TicketId) -> AppResult<TicketRef> {
+    let t = ticket_by_id(r, id)?;
+    let repo = repo_by_id(r, &t.repo)?;
+    Ok(TicketRef {
+        url: ticket_url(base_url, &repo, t.number),
+        repository: repo.path,
+        key: t.number.to_string(),
+        title: t.title,
+        state: t.state,
+        state_reason: t.state_reason,
+    })
+}
+
+/// Whether one of `ids` is an open ticket.
+fn any_open(r: &impl Rd, ids: &[TicketId]) -> AppResult<bool> {
+    for id in ids {
+        if ticket_by_id(r, id)?.state == "open" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn has_open_children(r: &impl Rd, id: &TicketId) -> AppResult<bool> {
+    any_open(r, &referrers(r, id, "parent")?)
+}
+
+/// Refuses to complete `t` while one of its children is open.
+fn check_children_closed(r: &impl Rd, t: &Ticket) -> AppResult<()> {
+    if has_open_children(r, &id_of(t))? {
+        return Err(AppError::new(
+            StatusCode::CONFLICT,
+            "children_open",
+            format!(
+                "Ticket {} has open child tickets; close them before completing it.",
+                t.number
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether ticket `from` reaches `to` over the edges "must be closed before
+/// the other proceeds": from a child to its parent, from a blocker to the
+/// tickets it blocks. A relation closing such a path would make tickets wait
+/// on each other forever.
+fn reaches(r: &impl Rd, from: &TicketId, to: &TicketId) -> AppResult<bool> {
+    let mut seen = HashSet::new();
+    let mut next = vec![from.clone()];
+    while let Some(id) = next.pop() {
+        if &id == to {
+            return Ok(true);
+        }
+        if seen.insert(id.clone()) {
+            next.extend(ticket_by_id(r, &id)?.parent);
+            next.extend(referrers(r, &id, "blocked_by")?);
+        }
+    }
+    Ok(false)
+}
+
+/// Tells the GUI that the tickets of `views` changed, and so did the views of
+/// the tickets related to them.
+fn publish_tickets<'a>(app: &App, views: impl IntoIterator<Item = &'a TicketView>) {
+    let mut seen = HashSet::new();
+    for v in views {
+        let related = v.related().map(|r| (&r.repository, &r.key));
+        for (repo, key) in std::iter::once((&v.repository, &v.key)).chain(related) {
+            if seen.insert((repo, key)) {
+                app.events.publish("ticket", repo, key.clone());
+            }
+        }
+    }
+}
+
+/// Tells the GUI that the tickets merged pull request `p` closes changed
+/// (`publish_tickets`).
+pub async fn publish_closed_by(app: &App, p: &Pull) {
+    let ids: Vec<TicketId> = p
+        .tickets
+        .iter()
+        .filter(|l| l.closes)
+        .filter_map(|l| l.local.clone())
+        .collect();
+    let base_url = app.base_url.clone();
+    let views = app
+        .store
+        .read(move |r| {
+            let mut views = Vec::new();
+            for id in &ids {
+                if let Some(t) = r.get::<Ticket>(store::TICKETS, &Ticket::key(&id.0, id.1))? {
+                    views.push(ticket_view(r, &base_url, &repo_by_id(r, &t.repo)?, &t)?);
+                }
+            }
+            Ok(views)
+        })
+        .await;
+    match views {
+        Ok(views) => publish_tickets(app, &views),
+        Err(e) => tracing::warn!("reading the tickets a merge closed: {}", e.message),
+    }
+}
+
 pub fn ticket_url(base_url: &str, repo: &Repo, number: u64) -> String {
     format!("{base_url}/{}/-/tickets/{number}", repo.path)
 }
 
-pub fn ticket_view(base_url: &str, repo: &Repo, t: &Ticket) -> TicketView {
-    TicketView {
+pub fn ticket_view(r: &impl Rd, base_url: &str, repo: &Repo, t: &Ticket) -> AppResult<TicketView> {
+    let refs = |ids: &[TicketId]| -> AppResult<Vec<TicketRef>> {
+        ids.iter().map(|id| ticket_ref(r, base_url, id)).collect()
+    };
+    let id = id_of(t);
+    Ok(TicketView {
         url: ticket_url(base_url, repo, t.number),
         repository: repo.path.clone(),
         key: t.number.to_string(),
@@ -59,11 +223,19 @@ pub fn ticket_view(base_url: &str, repo: &Repo, t: &Ticket) -> TicketView {
         upstream_issue: t.upstream_issue.clone(),
         lane: t.lane.clone(),
         rank: t.rank.clone(),
+        parent: t
+            .parent
+            .as_ref()
+            .map(|p| ticket_ref(r, base_url, p))
+            .transpose()?,
+        children: refs(&referrers(r, &id, "parent")?)?,
+        blocked_by: refs(&t.blocked_by)?,
+        blocks: refs(&referrers(r, &id, "blocked_by")?)?,
         created_at: t.created_at.clone(),
         updated_at: t.updated_at.clone(),
         closed_at: t.closed_at.clone(),
         revision: t.revision,
-    }
+    })
 }
 
 /// Parses a ticket number as it appears in paths and URLs: decimal, from 1,
@@ -194,6 +366,8 @@ pub async fn create_ticket(
                 upstream_issue,
                 lane: None,
                 rank: None,
+                parent: None,
+                blocked_by: Vec::new(),
                 created_at: now.clone(),
                 updated_at: now,
                 closed_at: None,
@@ -204,7 +378,7 @@ pub async fn create_ticket(
                 None => t,
             };
             write_ticket(w, None, &t)?;
-            Ok(ticket_view(&base_url, &repo, &t))
+            ticket_view(w, &base_url, &repo, &t)
         })
         .await?;
     app.events
@@ -290,7 +464,7 @@ pub async fn list_tickets(
                                 AppError::internal("label index names a missing ticket")
                             })?;
                         Ok(if matches(&t, &q, &me) {
-                            Some(ticket_view(&base_url, &repo, &t))
+                            Some(ticket_view(r, &base_url, &repo, &t)?)
                         } else {
                             None
                         })
@@ -301,7 +475,7 @@ pub async fn list_tickets(
                     page.scan(r, store::TICKETS, &prefix, |_, v| {
                         let t: Ticket = store::decode(v)?;
                         Ok(if matches(&t, &q, &me) {
-                            Some(ticket_view(&base_url, &repo, &t))
+                            Some(ticket_view(r, &base_url, &repo, &t)?)
                         } else {
                             None
                         })
@@ -325,7 +499,7 @@ pub async fn get_ticket(
     app.store
         .read(move |r| {
             let t = ticket_by_key(r, &repo, &key)?;
-            Ok(ticket_view(&base_url, &repo, &t))
+            ticket_view(r, &base_url, &repo, &t)
         })
         .await
 }
@@ -345,6 +519,14 @@ pub struct TicketPatch {
     /// The issue it stands for on the upstream host, or `null` for none.
     #[serde(default, deserialize_with = "domain::double_option")]
     pub upstream_issue: Option<Option<String>>,
+    /// The URL of the ticket this one is a part of, or `null` for none.
+    #[serde(default, deserialize_with = "domain::double_option")]
+    pub parent: Option<Option<String>>,
+    /// URLs of tickets that must be closed before this one is started.
+    #[serde(default)]
+    pub add_blocked_by: Vec<String>,
+    #[serde(default)]
+    pub remove_blocked_by: Vec<String>,
     pub revision: Option<u64>,
 }
 
@@ -405,11 +587,12 @@ pub async fn update_ticket(
     };
     let key = key.to_string();
     let base_url = app.base_url.clone();
-    let result = app
+    let (result, before) = app
         .store
         .write(move |w| {
             let repo = repo_by_id(w, &repo.id)?;
             let old = ticket_by_key(w, &repo, &key)?;
+            let before = ticket_view(w, &base_url, &repo, &old)?;
             if let Some(rev) = patch.revision
                 && rev != old.revision
             {
@@ -428,6 +611,38 @@ pub async fn update_ticket(
             }
             if let Some(issue) = upstream_issue {
                 t.upstream_issue = issue;
+            }
+            // Related tickets are of the same workspace, as its board is.
+            let related = |url: &str| -> AppResult<TicketId> {
+                let other = match resolve_ticket_url(w, &base_url, url) {
+                    Some(Ok((_, other))) => other,
+                    Some(Err(e)) if e.code != "not_found" => return Err(e),
+                    _ => {
+                        return Err(AppError::invalid(format!(
+                            "{url} is not a ticket of this Branvil."
+                        )));
+                    }
+                };
+                if other.workspace != t.workspace {
+                    return Err(AppError::invalid(format!(
+                        "{url} is not a ticket of workspace {}.",
+                        workspace_of(&repo.path)
+                    )));
+                }
+                Ok(id_of(&other))
+            };
+            if let Some(parent) = &patch.parent {
+                t.parent = parent.as_deref().map(related).transpose()?;
+            }
+            for url in &patch.add_blocked_by {
+                let id = related(url)?;
+                if !t.blocked_by.contains(&id) {
+                    t.blocked_by.push(id);
+                }
+            }
+            for url in &patch.remove_blocked_by {
+                let id = related(url)?;
+                t.blocked_by.retain(|b| b != &id);
             }
             // Labels change against the stored set, so concurrent changes of
             // other labels are kept.
@@ -456,6 +671,12 @@ pub async fn update_ticket(
                 }
                 _ => {}
             }
+            let completed = |x: &Ticket| {
+                x.state == "closed" && x.state_reason.as_deref() == Some("completed")
+            };
+            if completed(&t) && !completed(&old) {
+                check_children_closed(w, &t)?;
+            }
             // A ticket closed on the board leaves its lane for done, as one
             // closed by a merge does.
             if state_changed
@@ -469,18 +690,33 @@ pub async fn update_ticket(
                 t.revision += 1;
                 t.updated_at = now;
                 write_ticket(w, Some(&old), &t)?;
+                // Checked on the written relations, so that the new ones
+                // are checked together.
+                let id = id_of(&t);
+                let new_parent = t.parent.as_ref().filter(|_| t.parent != old.parent);
+                let new_blockers = t.blocked_by.iter().filter(|b| !old.blocked_by.contains(b));
+                for (from, to) in new_parent
+                    .map(|p| (p, &id))
+                    .into_iter()
+                    .chain(new_blockers.map(|b| (&id, b)))
+                {
+                    if reaches(w, from, to)? {
+                        return Err(AppError::invalid(format!(
+                            "Ticket {key} cannot have that relation: the tickets would wait on each other."
+                        )));
+                    }
+                }
             }
-            Ok(TicketUpdated {
-                ticket: ticket_view(&base_url, &repo, &t),
-                state_changed,
-            })
+            Ok((
+                TicketUpdated {
+                    ticket: ticket_view(w, &base_url, &repo, &t)?,
+                    state_changed,
+                },
+                before,
+            ))
         })
         .await?;
-    app.events.publish(
-        "ticket",
-        &result.ticket.repository,
-        result.ticket.key.clone(),
-    );
+    publish_tickets(app, [&before, &result.ticket]);
     Ok(result)
 }
 
@@ -512,7 +748,7 @@ pub async fn set_assignee(
             let old = ticket_by_key(w, &repo, &key)?;
             let mut t = old.clone();
             if t.assignee.as_ref().map(|a| fold(&a.name)) == assignee.as_deref().map(fold) {
-                return Ok((ticket_view(&base_url, &repo, &t), false));
+                return Ok((ticket_view(w, &base_url, &repo, &t)?, false));
             }
             let now = util::now();
             t.assignee = assignee.map(|name| Assignee {
@@ -522,7 +758,7 @@ pub async fn set_assignee(
             t.revision += 1;
             t.updated_at = now;
             write_ticket(w, Some(&old), &t)?;
-            Ok((ticket_view(&base_url, &repo, &t), true))
+            Ok((ticket_view(w, &base_url, &repo, &t)?, true))
         })
         .await?;
     if changed {
@@ -697,6 +933,18 @@ pub async fn put_on_board(
         .store
         .write(move |w| {
             let old = ticket_by_key(w, &repo, &key)?;
+            if p.lane.as_deref() == Some("in_progress")
+                && old.lane.as_deref() != Some("in_progress")
+                && any_open(w, &old.blocked_by)?
+            {
+                return Err(AppError::new(
+                    StatusCode::CONFLICT,
+                    "blocked",
+                    format!(
+                        "Ticket {key} is blocked by open tickets; close them before starting it."
+                    ),
+                ));
+            }
             let mut t = match &p.lane {
                 Some(lane) => place(w, &old, lane, p.before.as_deref(), p.after.as_deref())?,
                 None => {
@@ -709,6 +957,7 @@ pub async fn put_on_board(
             let now = util::now();
             match p.lane.as_deref() {
                 Some("done") if owner && t.state == "open" => {
+                    check_children_closed(w, &t)?;
                     set_state(&mut t, "closed", Some("completed".into()), &now);
                 }
                 Some(lane) if owner && lane != "done" && t.state == "closed" => {
@@ -719,11 +968,10 @@ pub async fn put_on_board(
             t.revision += 1;
             t.updated_at = now;
             write_ticket(w, Some(&old), &t)?;
-            Ok(ticket_view(&base_url, &repo, &t))
+            ticket_view(w, &base_url, &repo, &t)
         })
         .await?;
-    app.events
-        .publish("ticket", &view.repository, view.key.clone());
+    publish_tickets(app, [&view]);
     app.events
         .publish("board", workspace_of(&view.repository), "");
     Ok(view)
@@ -830,7 +1078,7 @@ pub async fn add_comment(
             let mut t = old.clone();
             t.updated_at = c.created_at.clone();
             write_ticket(w, Some(&old), &t)?;
-            let tv = ticket_view(&base_url, &repo, &t);
+            let tv = ticket_view(w, &base_url, &repo, &t)?;
             Ok((comment_view(&c, &tv.url), tv.repository, tv.key))
         })
         .await?;
@@ -1045,7 +1293,7 @@ pub async fn cards(
                     if !matches(&t, &filter, caller.name()) {
                         return Ok(None);
                     }
-                    let view = ticket_view(&base_url, &repo, &t);
+                    let view = ticket_view(r, &base_url, &repo, &t)?;
                     let comments = if with_comments {
                         comments_of(r, &ticket_target(&t))?
                             .iter()
@@ -1185,13 +1433,16 @@ pub async fn closed(
         .await
 }
 
-/// Closes the tickets a merged pull request `closes` and moves them to `done`
-/// (inside the merge's write transaction).
-pub fn close_by_merge(w: &Wtx, ticket: (&str, u64), at: &str) -> AppResult<()> {
-    let key = Ticket::key(ticket.0, ticket.1);
-    let Some(old) = w.get::<Ticket>(store::TICKETS, &key)? else {
-        return Ok(());
+/// Closes a ticket a merged pull request `closes` and moves it to `done`
+/// (inside the merge's write transaction). A ticket with an open child is
+/// left as it is (`false`): it completes once its children are closed.
+pub fn close_by_merge(w: &Wtx, ticket: &TicketId, at: &str) -> AppResult<bool> {
+    let Some(old) = w.get::<Ticket>(store::TICKETS, &Ticket::key(&ticket.0, ticket.1))? else {
+        return Ok(true);
     };
+    if has_open_children(w, ticket)? {
+        return Ok(false);
+    }
     let mut t = match old.lane.as_deref() {
         Some(lane) if lane != "done" => place(w, &old, "done", None, None)?,
         _ => old.clone(),
@@ -1199,7 +1450,8 @@ pub fn close_by_merge(w: &Wtx, ticket: (&str, u64), at: &str) -> AppResult<()> {
     set_state(&mut t, "closed", Some("completed".into()), at);
     t.revision += 1;
     t.updated_at = at.to_string();
-    write_ticket(w, Some(&old), &t)
+    write_ticket(w, Some(&old), &t)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1260,6 +1512,8 @@ mod tests {
             upstream_issue: None,
             lane: None,
             rank: None,
+            parent: None,
+            blocked_by: Vec::new(),
             created_at: util::now(),
             updated_at: util::now(),
             closed_at: None,

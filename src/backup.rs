@@ -446,7 +446,7 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
         println!("repository {}: {} refs", repo.path, refs.len());
     }
     if manifest.schema_version == crate::upgrade::FROM {
-        let done = crate::upgrade::upgrade(&layout, &git).await?;
+        let done = crate::upgrade::upgrade(&layout)?;
         println!("{}", store::upgrade_report(&layout.db(), &done));
     }
     for a in &manifest.account_tokens_excluded {

@@ -118,6 +118,8 @@ serves each of them.
 | 409 | `head_moved` | The pull request head is no longer the `commit` sent. Nothing was written. |
 | 409 | `base_moved` | The base moved during a merge. Nothing was written. |
 | 409 | `not_mergeable` | Merge preconditions are not met (message says which). |
+| 409 | `children_open` | A ticket is closed as completed while one of its children is open. |
+| 409 | `blocked` | A ticket is moved into `in_progress` while one of its blockers is open. |
 | 409 | `idempotency_conflict` | See conventions. |
 | 413 | `too_large` | Body, log, or artifact above its limit. |
 | 421 | `misdirected` | Wrong `Host`. |
@@ -318,6 +320,11 @@ ticket is on it, in a lane, or not on it.
   "upstream_issue": "https://github.com/acme/demo/issues/12",
   "lane": "ready",
   "rank": "0|hzzzzz",
+  "parent": {"url": "http://127.0.0.1:7878/acme/demo/-/tickets/1", "repository": "acme/demo",
+             "key": "1", "title": "Sign-in", "state": "open", "state_reason": null},
+  "children": [],
+  "blocked_by": [ ...the same shape... ],
+  "blocks": [],
   "created_at": "...",
   "updated_at": "...",
   "closed_at": null,
@@ -332,12 +339,40 @@ ticket is not on its workspace's board. `upstream_issue` is the issue the
 ticket stands for on its repository's upstream host, or `null`; publishing a
 pull request that links the ticket writes a line about it there.
 
+Tickets of one workspace relate in two ways, each shown from both sides with
+the other ticket's title and state:
+
+- **Parent and children.** A ticket has at most one `parent` and any number of
+  `children`. A parent is not closed as `completed` while one of its children
+  is open (a child closed as `not_planned` is closed): `PATCH` to `closed` /
+  `completed` (also from `not_planned`) and the owner's move into `done` are
+  refused with `409 children_open`. A merge whose pull request closes such a
+  parent leaves it as it is; a merge that closes the children too closes the
+  parent after them, whatever the order of the links. Closing as
+  `not_planned` and an agent's move into `done` are not refused.
+- **Blockers.** A ticket is `blocked_by` any number of tickets (and `blocks`
+  the tickets that name it). It is not started while one of them is open: a
+  move into `in_progress` from another lane or from off the board is refused
+  with `409 blocked` (moving within `in_progress` is not).
+
+The rules hold at those moves only: reopening a child or a blocker, or adding
+a relation to a closed or started ticket, is not refused and is shown as it
+is. A relation that would make tickets wait on each other forever (a ticket
+its own ancestor or blocker, a child blocked by its ancestor, a cycle of
+blockers, …) is refused with `400 invalid`, as is one to a ticket of another
+workspace.
+
 - `POST /api/v1/repos/{repo}/tickets` `{"title","body","labels","lane"?,"upstream_issue"?}` → `201` ticket with the repository's next number; with `lane` the ticket is put on the workspace's board in the same transaction. Labels must be defined by the repository (`400 label_undefined`).
 - `GET /api/v1/repos/{repo}/tickets?state=open|closed|all&lane=...&assignee=...&label=...` → items in number order
   (`state` defaults to `open`; `assignee=me` is the requesting member).
 - `GET /api/v1/repos/{repo}/tickets/{number}` → ticket.
 - `PATCH /api/v1/repos/{repo}/tickets/{number}` — every field optional:
-  `{"title", "body", "add_labels": [], "remove_labels": [], "state", "state_reason", "upstream_issue", "revision"}`.
+  `{"title", "body", "add_labels": [], "remove_labels": [], "state", "state_reason", "upstream_issue", "parent", "add_blocked_by": [], "remove_blocked_by": [], "revision"}`.
+  `parent` is the URL of a ticket of the same workspace, or `null` for none;
+  `add_blocked_by` / `remove_blocked_by` are such URLs, changed against the
+  stored set as labels are. A child names its parent and a blocked ticket its
+  blockers, so a ticket's `children` and `blocks` change by patching those
+  tickets.
   `upstream_issue` is an issue URL of the repository's upstream host (`400
   invalid` otherwise, and for a repository without an upstream), or `null` to
   clear it.
@@ -366,7 +401,9 @@ pull request that links the ticket writes a line about it there.
   the board (`before`/`after` are not read then). The owner's move also sets
   the state: into `done` closes an open ticket as `completed`, into another
   lane reopens a closed one. An agent's move leaves the state alone (closing a
-  ticket is a person's decision).
+  ticket is a person's decision). A move into `in_progress` of a blocked
+  ticket (`409 blocked`) and the owner's move into `done` of a parent with an
+  open child (`409 children_open`) are refused, as under "Ticket shape".
 
 ### Comments (tickets and pull requests alike)
 

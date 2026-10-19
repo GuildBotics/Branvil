@@ -255,14 +255,14 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(!text(&out).contains("upgraded"), "{}", text(&out));
 
-    // A backup of the previous schema version: what version 8 wrote.
+    // A backup of the previous schema version: what version 9 wrote.
     let previous = out_dir.path().join("previous");
     copy_backup(&backup, &previous, &manifest);
     let db = previous.join("branvil.redb");
-    as_schema_8(&db);
+    as_schema_9(&db);
     let bytes = std::fs::read(&db).unwrap();
     let mut old = manifest.clone();
-    old["schema_version"] = json!(8);
+    old["schema_version"] = json!(9);
     for f in old["files"].as_array_mut().unwrap() {
         if f["path"] == "branvil.redb" {
             f["bytes"] = json!(bytes.len());
@@ -296,13 +296,12 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         text(&out)
     );
     assert!(
-        text(&out).contains("from schema version 8 to 9"),
+        text(&out).contains("from schema version 9 to 10"),
         "{}",
         text(&out)
     );
-    // Its runs were read against the restored repositories.
     assert!(
-        text(&out).contains("checked the pipeline of") && !text(&out).contains("of 0 CI run"),
+        text(&out).contains("ticket(s) got no parent") && !text(&out).contains(" 0 ticket(s)"),
         "{}",
         text(&out)
     );

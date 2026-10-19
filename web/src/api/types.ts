@@ -140,10 +140,27 @@ export interface Ticket {
   /** The lane on its workspace's board; null when it is not on the board. */
   lane: Lane | null;
   rank: string;
+  /** The ticket this one is a part of: it completes only once its children are closed. */
+  parent: TicketRef | null;
+  children: TicketRef[];
+  /** The tickets that must be closed before this one is started (moved into in_progress). */
+  blocked_by: TicketRef[];
+  /** The tickets this one must be closed before. */
+  blocks: TicketRef[];
   created_at: string;
   updated_at: string;
   closed_at: string | null;
   revision: number;
+}
+
+/** A ticket another ticket is related to (same workspace). */
+export interface TicketRef {
+  url: string;
+  repository: string;
+  key: string;
+  title: string;
+  state: "open" | "closed";
+  state_reason: "completed" | "not_planned" | null;
 }
 
 /**

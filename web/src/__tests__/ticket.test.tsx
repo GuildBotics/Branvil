@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { choose, pickFromMenu } from "../test/mantine";
+import { ticketNamed } from "../views/ticket/Relations";
 import { card } from "./fixtures";
 
 const TICKET = "/api/v1/repos/acme/demo/tickets/1";
@@ -253,5 +254,93 @@ describe("ticket view", () => {
     await waitFor(() => expect(fake.calls("PATCH", TICKET)).toHaveLength(1));
     expect(fake.calls("PATCH", TICKET)[0]?.body).toEqual({ upstream_issue: issue });
     expect(await screen.findByRole("link", { name: "octo/demo#7" })).toHaveAttribute("href", issue);
+  });
+
+  it("shows the relations from both sides and changes each on the ticket that stores it", async () => {
+    const ref = (key: string, state: "open" | "closed" = "open", repository = "acme/demo") => ({
+      ...card(key, null, { repository }),
+      state,
+      state_reason: null,
+    });
+    const shown = card("1", null, {
+      parent: ref("9"),
+      children: [ref("2", "closed"), ref("3")],
+      blocked_by: [ref("4", "open", "acme/web")],
+      blocks: [],
+    });
+    const done = json(200, { ticket: shown, state_changed: false });
+    const fake = fakeApi(
+      ticketRoutes({
+        [`GET ${TICKET}`]: json(200, shown),
+        [`PATCH ${TICKET}`]: done,
+        "PATCH /api/v1/repos/acme/demo/tickets/3": done,
+        "PATCH /api/v1/repos/acme/demo/tickets/5": done,
+        "PATCH /api/v1/repos/acme/web/tickets/6": done,
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/tickets/1");
+    const group = async (name: string) => within(await screen.findByRole("group", { name }));
+    expect((await group("Parent ticket")).getByRole("link", { name: "#9 Title of 9" })).toHaveAttribute("href", "/acme/demo/-/tickets/9");
+    // A parent is set already: only taking it off is offered.
+    expect((await group("Parent ticket")).queryByRole("button", { name: "Add to Parent ticket" })).not.toBeInTheDocument();
+    expect((await group("Child tickets")).getByText("1/2 closed")).toBeInTheDocument();
+    expect((await group("Blocked by")).getByRole("link", { name: "acme/web#4 Title of 4" })).toBeInTheDocument();
+    expect(screen.getByText("It can be moved to In progress once every ticket it is blocked by is closed.")).toBeInTheDocument();
+    expect((await group("Blocks")).getByText("none")).toBeInTheDocument();
+
+    // A child names its parent: adding and removing one writes the child.
+    await user.click((await group("Child tickets")).getByRole("button", { name: "Add to Child tickets" }));
+    await user.type(screen.getByLabelText("Ticket to add to Child tickets"), "nope");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    expect(await screen.findByText("Name a ticket as #12, repository#12, or its URL.")).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Ticket to add to Child tickets"));
+    await user.type(screen.getByLabelText("Ticket to add to Child tickets"), "#5");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(fake.calls("PATCH", "/api/v1/repos/acme/demo/tickets/5")).toHaveLength(1));
+    expect(fake.calls("PATCH", "/api/v1/repos/acme/demo/tickets/5")[0]?.body).toEqual({ parent: shown.url });
+    await user.click(screen.getByRole("button", { name: "Remove #3 from Child tickets" }));
+    await waitFor(() => expect(fake.calls("PATCH", "/api/v1/repos/acme/demo/tickets/3")).toHaveLength(1));
+    expect(fake.calls("PATCH", "/api/v1/repos/acme/demo/tickets/3")[0]?.body).toEqual({ parent: null });
+
+    // This ticket names its parent and its blockers; a ticket it blocks names it.
+    await user.click(screen.getByRole("button", { name: "Remove #9 from Parent ticket" }));
+    await user.click(screen.getByRole("button", { name: "Remove acme/web#4 from Blocked by" }));
+    await waitFor(() => expect(fake.calls("PATCH", TICKET)).toHaveLength(2));
+    expect(fake.calls("PATCH", TICKET).map((c) => c.body)).toEqual([{ parent: null }, { remove_blocked_by: [shown.blocked_by[0]?.url] }]);
+    await user.click((await group("Blocks")).getByRole("button", { name: "Add to Blocks" }));
+    await user.type(screen.getByLabelText("Ticket to add to Blocks"), "acme/web#6");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(fake.calls("PATCH", "/api/v1/repos/acme/web/tickets/6")).toHaveLength(1));
+    expect(fake.calls("PATCH", "/api/v1/repos/acme/web/tickets/6")[0]?.body).toEqual({ add_blocked_by: [shown.url] });
+  });
+
+  it("says why a parent with open children is not closed as completed", async () => {
+    fakeApi(
+      ticketRoutes({
+        [`GET ${TICKET}`]: json(200, card("1", null)),
+        [`PATCH ${TICKET}`]: apiError(409, "children_open", "Ticket 1 has open child tickets."),
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/tickets/1");
+    await user.click(await screen.findByRole("button", { name: "Close" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("It can be closed as completed once every child ticket is closed.");
+  });
+});
+
+describe("naming a related ticket", () => {
+  const ticket = card("1", null);
+  const base = window.location.origin;
+  it("takes #number, repository#number, or a URL of this Branvil", () => {
+    expect(ticketNamed(" #12 ", ticket)).toEqual({ repo: "acme/demo", key: "12", url: `${base}/acme/demo/-/tickets/12` });
+    expect(ticketNamed("12", ticket)?.key).toBe("12");
+    expect(ticketNamed("acme/web#3", ticket)).toEqual({ repo: "acme/web", key: "3", url: `${base}/acme/web/-/tickets/3` });
+    expect(ticketNamed(`${base}/acme/web/-/tickets/3`, ticket)?.url).toBe(`${base}/acme/web/-/tickets/3`);
+  });
+  it("names nothing else", () => {
+    for (const text of ["", "#0", "#012", "acme/demo#", "https://github.com/acme/demo/issues/3", `${base}/acme/demo/-/pulls/3`, "acme demo#3"]) {
+      expect(ticketNamed(text, ticket), text).toBeNull();
+    }
   });
 });

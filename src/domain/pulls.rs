@@ -1690,6 +1690,7 @@ pub async fn merge(
         .await?;
     refs::record_refs_locked(app, &repo).await?;
     app.events.publish("pull", &repo.path, number.to_string());
+    tickets::publish_closed_by(app, &merged).await;
     let tips = self::tips(app, &repo).await?;
     pull_view(app, &repo, &merged, &tips).await
 }
@@ -1729,11 +1730,27 @@ pub fn mark_merged(
     p.updated_at = now.clone();
     p.revision += 1;
     write_pull(w, Some(&old), &p)?;
-    // A link closes only a ticket of this repository (`resolve_links`).
-    for link in p.tickets.iter().filter(|l| l.closes) {
-        if let Some((repo_id, n)) = &link.local {
-            tickets::close_by_merge(w, (repo_id, *n), &now)?;
+    // A link closes only a ticket of this repository (`resolve_links`). A
+    // parent closes after the children the merge closes, whatever the order
+    // of the links.
+    let mut left: Vec<_> = p
+        .tickets
+        .iter()
+        .filter(|l| l.closes)
+        .filter_map(|l| l.local.clone())
+        .collect();
+    loop {
+        let before = left.len();
+        let mut open = Vec::new();
+        for t in left {
+            if !tickets::close_by_merge(w, &t, &now)? {
+                open.push(t);
+            }
         }
+        if open.len() == before {
+            break;
+        }
+        left = open;
     }
     Ok(p)
 }

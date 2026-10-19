@@ -223,6 +223,35 @@ describe("kanban board", () => {
     expect(within(lane(/^Done/)).queryByText("Title of 1")).not.toBeInTheDocument();
   });
 
+  it("marks a card blocked by an open ticket and counts its closed children, and says why a start is refused", async () => {
+    const ref = (key: string, state: "open" | "closed") => ({ ...card(key, null), state, state_reason: null });
+    fakeApi(
+      boardRoutes({
+        "GET /api/v1/workspaces/acme/board/cards": json(200, {
+          items: [
+            card("1", "ready", { blocked_by: [ref("2", "open")], children: [ref("3", "closed"), ref("4", "open")] }),
+            card("5", "ready", { blocked_by: [ref("2", "closed")] }),
+          ],
+          next_cursor: null,
+        }),
+        "PUT /api/v1/repos/acme/demo/tickets/1/board": apiError(409, "blocked", "Ticket 1 is blocked by open tickets."),
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp("/acme");
+    const one = await screen.findByRole("article", { name: "acme/demo#1 Title of 1" });
+    expect(within(one).getByText("Blocked")).toBeInTheDocument();
+    expect(within(one).getByText("Children 1/2")).toBeInTheDocument();
+    const five = screen.getByRole("article", { name: "acme/demo#5 Title of 5" });
+    expect(within(five).queryByText("Blocked")).not.toBeInTheDocument();
+    expect(within(five).queryByText(/Children/)).not.toBeInTheDocument();
+
+    await pickFromMenu(user, "Actions of acme/demo#1", "In progress");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not move acme/demo#1; it is back where it was. It can be moved to In progress once every ticket it is blocked by is closed.",
+    );
+  });
+
   it("refetches the board after a concurrent change (409)", async () => {
     const fake = fakeApi(boardRoutes({ "PUT /api/v1/repos/acme/web/tickets/2/board": apiError(409, "conflict", "Changed.") }));
     const user = userEvent.setup();

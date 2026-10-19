@@ -111,7 +111,9 @@ has one board. A repository holds its tickets and numbers them from 1 (`#1`),
 apart from its pull requests (`!1`); a ticket carries only labels its
 repository defines. A ticket is on its workspace's board, in a lane, when it is
 created there or put there. A merge closes only tickets of the pull request's
-own repository.
+own repository. On the ticket page, a ticket gets a parent ticket (it is not
+completed while a child is open) and tickets it is blocked by (it is not moved
+to In progress while one of them is open), among the tickets of its workspace.
 
 What a member may do follows from its kind. The owner may do everything. An
 agent reads everything and works in every repository: tickets, comments,

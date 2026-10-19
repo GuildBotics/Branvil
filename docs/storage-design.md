@@ -74,7 +74,7 @@ database as it was (`docs/backup-restore.md`, "Upgrading").
 | `sessions` | `(sha256(session id))` | member, CSRF secret, expiry | entry-code exchange (expired rows pruned there); all deleted when the owner's token file is replaced | cookie auth |
 | `workspaces` | `(workspace id)` | name | workspace API | repository creation, cards, closed |
 | `repos` | `(repo id)` | path, workspace id, default branch, protected branches, required checks, `ci_network`, labels, upstream (provider, repository), revision | repo API | everything under a repository |
-| `tickets` | `(repo id, n)` | ticket incl. its workspace id, its one assignee with `assigned_at` (or none), labels, upstream issue (or none), lane/rank on the workspace's board (or none), state, revision | ticket API, merge | `read(tickets)`, candidates |
+| `tickets` | `(repo id, n)` | ticket incl. its workspace id, its one assignee with `assigned_at` (or none), labels, upstream issue (or none), lane/rank on the workspace's board (or none), its parent (or none) and the tickets it is blocked by, as (repo id, n), state, revision | ticket API, merge | `read(tickets)`, candidates |
 | `comments` | `("ticket", repo id, n, seq)` / `("pull", repo id, n, seq)` | comment with its reactions | comment and reaction API | comments, cards, activity |
 | `pulls` | `(repo id, n)` | pull request record (links, reviewers, reviewed_by, draft, state, merge data, and once published: the host's pull request, what was last sent to it, the host's checks of the pushed head) | PR API, merge, publish, the upstream poller, push recording (`updated_at`) | PR reads, patrol, the upstream poller |
 | `reviews` | `(repo id, n, seq)` | review with reactions | review API | reviews, activity |
@@ -102,6 +102,7 @@ Every index entry of a record comes from one function in `src/model.rs`
 | `ix_member_tokens` | `(member, token id)` | token list/revoke |
 | `ix_cards` | `(workspace id, lane index, rank, repo id, n)` | `candidates` (`GET workspaces/{w}/board/cards?lane=…`), card order, `place` neighbours |
 | `ix_ticket_labels` | `(repo id, label, n)` | `?label=` lists; consistency check for concurrent label changes |
+| `ix_ticket_refs` | `(repo id, n, "parent"|"blocked_by", repo id, n)`: the ticket named, then the one naming it | a ticket's `children` and `blocks`; the open-children check of a completion; the "wait on each other" check of a new relation |
 | `ix_closed_tickets` | `(workspace id, closed_at, repo id, n)` | `closed_since` for tickets |
 | `ix_entries` | `(entry id)` → `{kind, owner, record key}` | reactions, replies: an id is used only with its owning item (`owner` must match) |
 | `ix_open_pulls` | `(repo id, head, base)` → number | unique open (head, base) on create and reopen; `open_pull_requests`; pushes → PR activity; the owner's `GET /pulls?involves=me` |

@@ -394,9 +394,7 @@ reports itself unavailable without it, as without `msb`).
   pushes supersede, late and forged results are refused, required checks are
   never success or "no checks" when unregistered, pending, failed, cancelled,
   invalid, or without a runner; leases expire and re-queue once; a restart
-  interrupts orphaned attempts; a merge needs success on the exact head; the
-  runs and attempts of schema version 8 take this version's job definitions
-  after `branvil admin upgrade` (a pipeline that gives `cpus` is invalid).
+  interrupts orphaned attempts; a merge needs success on the exact head.
 - `src/runner/mod.rs`: the runner loop against an in-process service with a
   fake executor that starts no VM (results, cancellation, an unusable
   executor, the runner's CPUs, memory, and time limit, the image's digest on

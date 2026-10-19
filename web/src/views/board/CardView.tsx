@@ -157,6 +157,12 @@ export const CardView = memo(function CardView({
           {ref}
         </Link>
         {card.state === "closed" && <StateBadge>{t("ticket.closed")}</StateBadge>}
+        {card.state === "open" && card.blocked_by.some((b) => b.state === "open") && <StateBadge tone="warning">{t("board.blocked")}</StateBadge>}
+        {card.children.length > 0 && (
+          <Text span size="xs" c="dimmed">
+            {t("board.children", { closed: card.children.filter((c) => c.state === "closed").length, total: card.children.length })}
+          </Text>
+        )}
         {busy && (
           <Text span size="xs" c="dimmed">
             {t("board.moving")}

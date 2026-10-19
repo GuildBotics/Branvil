@@ -429,8 +429,9 @@ Mantine version and theme (`web/src/theme.ts`), and GuildBotics' design tokens
 and component overrides copied into `web/src/styles.css` (kept identical), so
 it can sit beside or inside Desktop. Its pages: a sidebar (the workspace, its
 board and pull requests, settings), the board (lanes as tall as the window, a
-ticket added at the foot of a lane), a ticket (body and comments, its lane,
-labels, upstream issue, and assignee), a pull request (body, conversation,
+ticket added at the foot of a lane, a card marked when a blocker is open and
+counting its closed children), a ticket (body and comments, its lane, labels,
+upstream issue, relations to other tickets, and assignee), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
 settings (the shown workspace with its repositories, and Branvil's members).
 The service's state is not a page: the GUI warns at the top of every page only
