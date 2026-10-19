@@ -263,6 +263,20 @@ runner's `[ci.executor]` settings. Without a runner, jobs end
 artifacts, retry and cancel, states, limits, and the trust model:
 [`docs/ci.md`](docs/ci.md).
 
+### This repository's pipeline
+
+[`.branvil/ci.toml`](.branvil/ci.toml) runs the checks of "Development" as
+four jobs: `fmt` (`cargo fmt --check`), `clippy` (`cargo clippy --all-targets
+-- -D warnings`), `test` (`cargo test`), and `dev-script` (the Python launcher
+tests). Their image is GuildBotics' development image
+(`guildbotics/agent-environment:dev`, built by GuildBotics'
+`scripts/build-agent-environment-image.sh`): the owner loads its `docker save`
+archive under Settings → CI, and the pipeline names it by the reference that
+page shows. When the image is rebuilt, load the new archive and write its
+reference into the pipeline. `clippy` and `test` fetch crates from crates.io,
+so the repository's CI tab must allow its jobs the network; they cache Cargo's
+registry and `target`, keyed by `Cargo.lock`.
+
 ## Upstream (GitHub)
 
 Branvil is where agents try things — many pushes, review rounds, and CI runs,

@@ -82,7 +82,8 @@ hold across modules:
 
 ## Checks (as in CI)
 
-The same checks as CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+The same checks as CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+and [`.branvil/ci.toml`](.branvil/ci.toml)):
 
 ```sh
 cargo fmt --check
