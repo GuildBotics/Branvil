@@ -51,7 +51,11 @@ fi
 npm --prefix web run build
 target="$repo_root/target"
 "$repo_root/scripts/clean-stale-target.sh" "$target"
-cargo build --target-dir "$target"
+# Mark even a failed build: its outputs were made under the current conditions.
+build_status=0
+cargo build --target-dir "$target" || build_status=$?
+"$repo_root/scripts/clean-stale-target.sh" --mark "$target"
+if (( build_status != 0 )); then exit "$build_status"; fi
 binary="$target/debug/branvil"
 
 if [[ ! -f "$data_dir/branvil.redb" ]]; then

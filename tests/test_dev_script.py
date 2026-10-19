@@ -32,15 +32,21 @@ event = {
     "token_present": "BRANVIL_TOKEN" in os.environ,
     "url_present": "BRANVIL_URL" in os.environ,
 }
+if tool == "cargo":
+    target = Path(args[args.index("--target-dir") + 1])
+    event["marked"] = (target / ".build-conditions").exists()
 with open(os.environ["DEV_TEST_EVENTS"], "a", encoding="utf-8") as out:
     out.write(json.dumps(event) + "\n")
 if tool == "rustc":
     print(os.environ["DEV_TEST_RUSTC"])
 if tool == "cargo":
-    target = Path(args[args.index("--target-dir") + 1])
     if args[0] == "clean":
         shutil.rmtree(target)
     elif args[0] == "build":
+        # Like Cargo, tag the target directory as a cache only when creating it.
+        if not target.exists():
+            target.mkdir(parents=True)
+            (target / "CACHEDIR.TAG").touch()
         binary = target / "debug/branvil"
         binary.parent.mkdir(parents=True, exist_ok=True)
         binary.write_text(
@@ -48,6 +54,7 @@ if tool == "cargo":
             encoding="utf-8",
         )
         binary.chmod(0o755)
+        sys.exit(int(os.environ.get("DEV_TEST_BUILD_EXIT", "0")))
 if tool == "npm" and args[-1] == "ci":
     marker = Path("web/node_modules/.package-lock.json")
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -141,16 +148,20 @@ class ScriptTestCase(unittest.TestCase):
 
 
 class CleanStaleTargetTests(ScriptTestCase):
-    def clean(self):
+    def clean(self, *args):
         subprocess.run(
-            ["bash", str(self.repo / "scripts/clean-stale-target.sh"), str(self.target)],
+            ["bash", str(self.repo / "scripts/clean-stale-target.sh"), *args, str(self.target)],
             cwd=self.root,
             env=self.env,
             check=True,
             capture_output=True,
         )
 
-    def test_target_without_a_mark_is_cleaned_and_marked(self):
+    def build(self):
+        self.target.mkdir()
+        self.clean("--mark")
+
+    def test_target_without_a_mark_is_cleaned_away(self):
         (self.target / "debug").mkdir(parents=True)
         (self.target / "debug/stale").touch()
         self.clean()
@@ -158,16 +169,22 @@ class CleanStaleTargetTests(ScriptTestCase):
         clean = self.events("cargo")[0]["args"]
         self.assertEqual(clean[clean.index("--target-dir") + 1], str(self.target))
         self.assertEqual(clean[clean.index("--manifest-path") + 1], str(self.manifest))
-        self.assertFalse((self.target / "debug/stale").exists())
+        self.assertFalse(self.target.exists(), "Cargo has to create the target")
+
+    def test_missing_target_is_left_to_cargo(self):
+        for args in [(), ("--mark",)]:
+            with self.subTest(args=args):
+                self.clean(*args)
+                self.assertEqual(self.cargo_commands(), [])
+                self.assertFalse(self.target.exists(), "Cargo has to create the target")
+
+    def test_mark_records_the_conditions(self):
+        self.build()
+        self.assertEqual(self.cargo_commands(), [])
         mark = (self.target / ".build-conditions").read_text(encoding="utf-8")
         self.assertIn("rustc 1.96.0 (test)", mark)
         self.assertIn('[profile.dev.package."*"]\ndebug = false', mark)
         self.assertNotIn("[dependencies]", mark)
-
-    def test_missing_target_is_marked_without_cleaning(self):
-        self.clean()
-        self.assertEqual(self.cargo_commands(), [])
-        self.assertTrue((self.target / ".build-conditions").is_file())
 
     def test_conditions_decide_whether_to_clean(self):
         for change, should_clean in [
@@ -180,7 +197,7 @@ class CleanStaleTargetTests(ScriptTestCase):
                 shutil.rmtree(self.target, ignore_errors=True)
                 self.manifest.write_text(CARGO_TOML, encoding="utf-8")
                 self.env["DEV_TEST_RUSTC"] = "rustc 1.96.0 (test)\nrelease: 1.96.0"
-                self.clean()
+                self.build()
                 (self.target / "kept").touch()
                 if change == "rustc":
                     self.env["DEV_TEST_RUSTC"] = "rustc 1.97.0 (test)\nrelease: 1.97.0"
@@ -201,6 +218,8 @@ class CleanStaleTargetTests(ScriptTestCase):
                     ["clean"] if should_clean else [],
                 )
                 self.assertEqual((self.target / "kept").exists(), not should_clean)
+                if should_clean:
+                    self.build()
                 self.clean()
                 self.assertEqual(
                     len(self.events("cargo")),
@@ -269,14 +288,37 @@ class DevScriptTests(ScriptTestCase):
     def opens(self):
         return [event for event in self.events("branvil") if event["args"][0] == "open"]
 
-    def test_stale_target_is_cleaned_before_the_build(self):
-        (self.target / "debug").mkdir(parents=True)
-        (self.target / "debug/stale").touch()
-        self.finish(self.start("--no-open"))
-        self.assertEqual(self.cargo_commands(), ["clean", "build"])
-        self.assertFalse((self.target / "debug/stale").exists())
-        self.finish(self.start("--no-open"))
-        self.assertEqual(self.cargo_commands(), ["clean", "build", "build"])
+    def test_stale_target_is_cleaned_before_the_build_and_marked_after_it(self):
+        for state in ["stale", "missing"]:
+            with self.subTest(state=state):
+                shutil.rmtree(self.target, ignore_errors=True)
+                if state == "stale":
+                    (self.target / "debug").mkdir(parents=True)
+                    (self.target / "debug/stale").touch()
+                before = len(self.events("cargo"))
+                self.finish(self.start("--no-open"))
+                self.finish(self.start("--no-open"))
+                self.assertEqual(
+                    [(e["args"][0], e["marked"]) for e in self.events("cargo")[before:]],
+                    ([("clean", False)] if state == "stale" else [])
+                    + [("build", False), ("build", True)],
+                    "Clean before the first build only, and mark after each build",
+                )
+                self.assertFalse((self.target / "debug/stale").exists())
+                self.assertTrue((self.target / "CACHEDIR.TAG").exists())
+                self.assertTrue((self.target / ".build-conditions").is_file())
+
+    def test_failed_build_is_marked_and_ends_the_launcher(self):
+        result = subprocess.run(
+            ["bash", str(self.repo / "scripts/dev.sh"), "--no-open"],
+            cwd=self.root,
+            env={**self.env, "DEV_TEST_BUILD_EXIT": "101"},
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 101)
+        self.assertEqual(self.cargo_commands(), ["build"])
+        self.assertTrue((self.target / ".build-conditions").is_file())
+        self.assertEqual(self.events("branvil"), [])
 
     def test_dependency_installation_tracks_the_lockfile(self):
         modules = self.repo / "web/node_modules"

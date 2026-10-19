@@ -385,10 +385,14 @@ changes. It does not watch files.
 
 Cargo builds everything again under new names when the build conditions
 change, and leaves the old outputs in `target`. Before building, the script
-runs `scripts/clean-stale-target.sh target`, which records `rustc -vV` and the
-`[profile.*]` tables of `Cargo.toml` in `target/.build-conditions` and runs
-`cargo clean` when they differ from the record, or when `target` has none. The
-same script can be run on any other target directory.
+runs `scripts/clean-stale-target.sh target`, which runs `cargo clean` when
+`target` exists and its record of `rustc -vV` and the `[profile.*]` tables of
+`Cargo.toml` (`target/.build-conditions`) is missing or differs from the
+current ones. After building, even when the build fails, it runs
+`scripts/clean-stale-target.sh --mark target` to record the current ones.
+Neither creates `target`: Cargo marks only a directory it creates itself as a
+cache to leave out of backups (`CACHEDIR.TAG`, and on macOS the Time Machine
+exclusion). The same script can be run on any other target directory.
 
 Use a different data directory and initial owner, or skip opening the browser:
 
