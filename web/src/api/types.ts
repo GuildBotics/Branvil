@@ -137,8 +137,8 @@ export interface Ticket {
   labels: string[];
   /** The issue it stands for on its repository's upstream host. */
   upstream_issue: string | null;
-  /** The lane on its workspace's board; null when it is not on the board. */
-  lane: Lane | null;
+  /** The lane on its workspace's board (every ticket is on it). */
+  lane: Lane;
   rank: string;
   /** The ticket this one is a part of: it completes only once its children are closed. */
   parent: TicketRef | null;

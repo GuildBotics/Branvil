@@ -75,7 +75,6 @@ export const ja: Record<MessageKey, string> = {
   "ticket.closeNotPlanned": "対応しないでクローズ",
   "ticket.reopen": "再オープン",
   "ticket.lane": "レーン",
-  "ticket.offBoard": "ボードに載せない",
   "ticket.labels": "ラベル",
   "ticket.noLabelsDefined": "リポジトリにラベルの定義がありません。",
   "ticket.assignee": "担当者",

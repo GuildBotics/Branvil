@@ -69,6 +69,7 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     // it, a review, a conversation comment, an inline thread with a reply,
     // and an upstream read with the owner's account and its token.
     let t = w.ticket("Back me up").await;
+    w.ticket("Off the board").await;
     let one = format!("/repos/{}/tickets/1", encode(REPO));
     let (st, _) = s
         .put(
@@ -255,14 +256,15 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(!text(&out).contains("upgraded"), "{}", text(&out));
 
-    // A backup of the previous schema version: what version 9 wrote.
+    // A backup of the previous schema version: what version 10 wrote, with
+    // ticket 2 off the board.
     let previous = out_dir.path().join("previous");
     copy_backup(&backup, &previous, &manifest);
     let db = previous.join("branvil.redb");
-    as_schema_9(&db);
+    as_schema_10(&db, |t| t["number"] == 2);
     let bytes = std::fs::read(&db).unwrap();
     let mut old = manifest.clone();
-    old["schema_version"] = json!(9);
+    old["schema_version"] = json!(10);
     for f in old["files"].as_array_mut().unwrap() {
         if f["path"] == "branvil.redb" {
             f["bytes"] = json!(bytes.len());
@@ -296,12 +298,12 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         text(&out)
     );
     assert!(
-        text(&out).contains("from schema version 9 to 10"),
+        text(&out).contains("from schema version 10 to 11"),
         "{}",
         text(&out)
     );
     assert!(
-        text(&out).contains("ticket(s) got no parent") && !text(&out).contains(" 0 ticket(s)"),
+        text(&out).contains("1 open ticket(s) off the board went to the end of new"),
         "{}",
         text(&out)
     );
@@ -361,6 +363,10 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         )
         .await;
     assert_eq!(cards["items"][0]["key"], "1");
+    let cards = r
+        .ok(&format!("/workspaces/{WS}/board/cards?lane=new"), &w.aiko)
+        .await;
+    assert_eq!(cards["items"][0]["key"], "2");
     // The ticket comment made after the backup is not there.
     let tc = r.ok(&format!("{one}/comments"), &w.aiko).await;
     assert!(tc["items"].as_array().unwrap().is_empty());

@@ -127,7 +127,7 @@ export interface TicketPatch {
 const ticketPath = (repo: string, key: string) => `/repos/${enc(repo)}/tickets/${enc(key)}`;
 
 export const tickets = {
-  /** With `lane` the ticket is put on its workspace's board in the same transaction. */
+  /** The ticket goes last in `lane` of its workspace's board (`new` without one). */
   create: (repo: string, body: { title: string; body: string; labels: string[]; lane?: Lane }) =>
     create<Ticket>(`/repos/${enc(repo)}/tickets`, body),
   get: (repo: string, key: string) => get<Ticket>(ticketPath(repo, key)),
@@ -144,8 +144,8 @@ export const tickets = {
   assign: (repo: string, key: string, name: string) =>
     request<Ticket>("PUT", `${ticketPath(repo, key)}/assignee`, { body: { name } }),
   unassign: (repo: string, key: string) => request<Ticket>("DELETE", `${ticketPath(repo, key)}/assignee`),
-  /** Puts the ticket on its workspace's board (`lane: null` takes it off); `before`/`after` name a card of the lane by its `ticketRef`. */
-  place: (repo: string, key: string, body: { lane: Lane | null; before?: string; after?: string }) =>
+  /** Moves the ticket to a lane of its workspace's board; `before`/`after` name a card of the lane by its `ticketRef`. */
+  place: (repo: string, key: string, body: { lane: Lane; before?: string; after?: string }) =>
     request<unknown>("PUT", `${ticketPath(repo, key)}/board`, { body }),
 };
 

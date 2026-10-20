@@ -18,7 +18,8 @@ async fn ticket_lifecycle_and_board() {
     assert_eq!(t["key"], "1");
     assert_eq!(t["url"], format!("{}/{REPO}/-/tickets/1", s.url));
     assert_eq!(t["repository"], REPO);
-    assert_eq!(t["lane"], Value::Null);
+    // Created at the end of new unless another lane is given.
+    assert_eq!(t["lane"], "new");
     assert_eq!(t["state"], "open");
 
     // Undefined labels are refused with the defined ones listed.
@@ -33,7 +34,7 @@ async fn ticket_lifecycle_and_board() {
     assert_eq!(v["error"]["code"], "label_undefined");
     assert!(v["error"]["message"].as_str().unwrap().contains("bug"));
 
-    // Created straight onto a lane of the workspace's board.
+    // Created at the end of another lane of the workspace's board.
     let (st, t2) = s
         .post(
             &tickets_path(),
@@ -401,20 +402,20 @@ async fn workspaces_hold_repositories_and_one_board_each() {
     };
     assert_eq!(cards("acme").await, ["acme/demo#1"]);
     assert_eq!(cards("beta").await, ["beta/x#1"]);
-    // Off the board again.
-    let (st, v) = s
-        .put(&format!("{one}/board"), &w.aiko, json!({"lane": null}))
-        .await;
-    assert_eq!(st, 200, "{v}");
-    assert_eq!(v["lane"], Value::Null);
-    assert!(cards("acme").await.is_empty());
+    // A ticket does not leave the board.
+    for body in [json!({"lane": null}), json!({})] {
+        let (st, v) = s.put(&format!("{one}/board"), &w.aiko, body).await;
+        assert_eq!(st, 400, "{v}");
+        assert_eq!(v["error"]["code"], "invalid");
+    }
+    assert_eq!(cards("acme").await, ["acme/demo#1"]);
 }
 
 #[tokio::test]
 async fn the_board_lists_the_closed_items_of_its_workspace() {
     let w = World::new().await;
     let s = &w.server;
-    // A closed pull request and a closed ticket that is on no board.
+    // A closed pull request and a closed ticket.
     w.push_change("feature", "f.txt", "one\n");
     let p = w.open_pull("feature", json!([])).await;
     let (st, v) = s
@@ -425,7 +426,7 @@ async fn the_board_lists_the_closed_items_of_its_workspace() {
         )
         .await;
     assert_eq!(st, 200, "{v}");
-    w.ticket("Off the board").await;
+    w.ticket("Closed").await;
     let (st, v) = s
         .patch(
             &format!("{}/1", tickets_path()),
@@ -564,17 +565,6 @@ async fn the_owner_closes_by_moving_to_done_and_closing_moves_to_done() {
     assert_eq!(
         state(&v["ticket"]),
         (json!("done"), json!("open"), Value::Null)
-    );
-    // A ticket off the board stays off it when closed.
-    let (st, v) = s
-        .put(&format!("{one}/board"), &w.owner, json!({"lane": null}))
-        .await;
-    assert_eq!(st, 200, "{v}");
-    let (st, v) = s.patch(&one, &w.owner, json!({"state": "closed"})).await;
-    assert_eq!(st, 200, "{v}");
-    assert_eq!(
-        state(&v["ticket"]),
-        (Value::Null, json!("closed"), json!("completed"))
     );
 }
 
@@ -1222,14 +1212,31 @@ async fn a_merge_closes_a_parent_only_with_its_children() {
 }
 
 #[tokio::test]
-async fn the_upgrade_from_version_9_gives_tickets_no_relations() {
+async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_their_lane() {
     let mut w = World::new().await;
-    w.ticket("One").await;
-    w.ticket("Two").await;
+    let s = &w.server;
+    for title in ["One", "Two", "Three", "Four", "Five"] {
+        w.ticket(title).await;
+    }
+    let path = |n: u64| format!("{}/{n}", tickets_path());
+    let (st, v) = s
+        .patch(&path(3), &w.owner, json!({"state": "closed"}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = s
+        .put(
+            &format!("{}/board", path(5)),
+            &w.owner,
+            json!({"lane": "done"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
     w.server.stop();
     let data = w.server.data.clone();
     let db = data.join("branvil.redb");
-    as_schema_9(&db);
+    // Version 10 had #1 and #4 (open) and #3 (closed) off the board; #2 is
+    // in new and #5 in done.
+    as_schema_10(&db, |t| [1, 3, 4].contains(&t["number"].as_u64().unwrap()));
     let before = tables(&db);
     let admin = |what: &str| {
         let out = std::process::Command::new(BIN)
@@ -1246,32 +1253,75 @@ async fn the_upgrade_from_version_9_gives_tickets_no_relations() {
     };
     let (ok, text) = admin("check");
     assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
+    // A ticket it does not expect stops it before anything is written, the
+    // copy of the database included.
+    let four = |title: Value| {
+        edit_records(&db, "tickets", |t| {
+            if t["number"] == 4 {
+                t["title"] = title.clone();
+            }
+        })
+    };
+    four(Value::Null);
+    let (ok, text) = admin("upgrade");
+    assert!(!ok && text.contains("a ticket does not decode"), "{text}");
+    let copies = std::fs::read_dir(&data)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("branvil-schema-")
+        })
+        .count();
+    assert_eq!(copies, 0);
+    let (ok, text) = admin("check");
+    assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
+    four(json!("Four"));
     let (ok, text) = admin("upgrade");
     assert!(
-        ok && text.contains("2 ticket(s) got no parent and no blockers"),
+        ok && text.contains(
+            "2 open ticket(s) off the board went to the end of new and 1 closed one(s) to the end of done"
+        ),
         "{text}"
     );
-    // Only the tickets and the version changed.
+    // Only the tickets, their cards, and the version changed.
     let (mut after, mut expected) = (tables(&db), before);
-    for t in ["tickets", "meta", "ix_ticket_refs"] {
+    for t in ["tickets", "meta", "ix_cards"] {
         after.remove(t);
         expected.remove(t);
     }
     assert_eq!(after, expected);
-    for t in records(&db, "tickets") {
-        assert_eq!(
-            (&t["parent"], &t["blocked_by"]),
-            (&Value::Null, &json!([])),
-            "{t}"
-        );
-    }
     let (ok, text) = admin("check");
     assert!(ok && text.contains("indexes: ok"), "{text}");
     w.restart(&[]);
-    let t = w.server.ok(&format!("{}/1", tickets_path()), &w.aiko).await;
+    // The moved tickets follow the cards that were there, in number order.
+    let lane = |lane: &'static str| {
+        let (s, aiko) = (&w.server, w.aiko.clone());
+        async move {
+            let v = s
+                .ok(
+                    &format!("/workspaces/{WS}/board/cards?lane={lane}&state=all"),
+                    &aiko,
+                )
+                .await;
+            let items = v["items"].as_array().unwrap().clone();
+            let ranks: Vec<&str> = items.iter().map(|c| c["rank"].as_str().unwrap()).collect();
+            assert!(ranks.windows(2).all(|r| r[0] < r[1]), "{ranks:?}");
+            items
+                .iter()
+                .map(|c| (c["key"].as_str().unwrap().to_string(), c["state"].clone()))
+                .collect::<Vec<_>>()
+        }
+    };
+    let card = |n: &str, state: &str| (n.to_string(), json!(state));
     assert_eq!(
-        (&t["parent"], &t["children"]),
-        (&Value::Null, &json!([])),
-        "{t}"
+        lane("new").await,
+        [card("2", "open"), card("1", "open"), card("4", "open")]
+    );
+    assert_eq!(
+        lane("done").await,
+        [card("5", "closed"), card("3", "closed")]
     );
 }

@@ -224,7 +224,7 @@ describe("kanban board", () => {
   });
 
   it("marks a card blocked by an open ticket and counts its closed children, and says why a start is refused", async () => {
-    const ref = (key: string, state: "open" | "closed") => ({ ...card(key, null), state, state_reason: null });
+    const ref = (key: string, state: "open" | "closed") => ({ ...card(key, "new"), state, state_reason: null });
     fakeApi(
       boardRoutes({
         "GET /api/v1/workspaces/acme/board/cards": json(200, {
