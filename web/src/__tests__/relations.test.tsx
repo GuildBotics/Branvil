@@ -58,9 +58,9 @@ const article = (key: string) => screen.getByRole("article", { name: new RegExp(
 const anchor = (key: string) => article(key).closest("[data-ticket]") as HTMLElement;
 /** What is dragged: the card's own box (an open parent's frame holds its children too). */
 const draggable = (key: string) => article(key).closest(".rel-card") as HTMLElement;
-/** A line as drawn, and its "×" (a hit area under the cards, solid lines only). */
-const edge = (from: string, to: string) => document.querySelector(`.rel-lines g[data-from="acme/demo#${from}"][data-to="acme/demo#${to}"]`);
-const removal = (from: string, to: string) => document.querySelector(`.rel-hits g[data-from="acme/demo#${from}"][data-to="acme/demo#${to}"]`);
+/** A line behind the cards (with its "×" when solid), and its copy in front of them. */
+const edge = (from: string, to: string) => document.querySelector<SVGGElement>(`.rel-lines g[data-from="acme/demo#${from}"][data-to="acme/demo#${to}"]`);
+const inFront = (from: string, to: string) => document.querySelector(`.rel-front g[data-from="acme/demo#${from}"][data-to="acme/demo#${to}"]`);
 const dataTransfer = () => ({ setData: () => {}, getData: () => "", effectAllowed: "" });
 
 async function shown() {
@@ -88,7 +88,7 @@ describe("relations", () => {
     expect(screen.queryByRole("article", { name: /^acme\/demo#2 / })).not.toBeInTheDocument();
     expect(edge("4", "1")).toHaveClass("dashed");
     // A dotted line has no "×": which child's dependency it is, is not one.
-    expect(removal("4", "1")).toBeNull();
+    expect(within(edge("4", "1") as unknown as HTMLElement).queryByRole("button")).not.toBeInTheDocument();
     expect(fake.calls("GET", "/api/v1/workspaces/acme/board/cards").every((r) => r.search.includes("state=open") && r.search.includes("comments=none"))).toBe(true);
 
     // #5 has no relation: folded below the figure.
@@ -117,7 +117,7 @@ describe("relations", () => {
     expect(anchor("1")).toHaveClass("rel-frame");
     expect(anchor("2").parentElement?.closest("[data-ticket]")).toBe(anchor("1"));
     expect(edge("4", "2")).not.toHaveClass("dashed");
-    expect(within(removal("4", "2") as HTMLElement).getByRole("button")).toBeInTheDocument();
+    expect(within(edge("4", "2") as unknown as HTMLElement).getByRole("button")).toBeInTheDocument();
     expect(edge("4", "1")).toBeNull();
     expect(JSON.parse(window.localStorage.getItem("branvil.relations.open.acme") ?? "[]")).toEqual(["acme/demo#1"]);
   });
@@ -194,6 +194,21 @@ describe("relations", () => {
     fireEvent.pointerUp(anchor("1"));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(fake.requests.some((r) => r.method === "PATCH")).toBe(false);
+  });
+
+  it("draws the lines behind the cards and a hovered or focused one again in front of them", async () => {
+    const user = userEvent.setup();
+    fakeApi(routes());
+    await shown();
+    await openParent(user);
+    expect(inFront("4", "2")).not.toHaveClass("front");
+    await user.hover(edge("4", "2") as SVGGElement);
+    expect(inFront("4", "2")).toHaveClass("front");
+    await user.unhover(edge("4", "2") as SVGGElement);
+    expect(inFront("4", "2")).not.toHaveClass("front");
+    // The keyboard reaches a line through its "×".
+    within(edge("4", "2") as unknown as HTMLElement).getByRole("button").focus();
+    await waitFor(() => expect(inFront("4", "2")).toHaveClass("front"));
   });
 
   it("removes a dependency with the line's ×, and undoes it", async () => {

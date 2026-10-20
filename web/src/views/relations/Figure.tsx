@@ -67,7 +67,6 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
         const [x2, y2] = [b.left - origin.left, b.top + b.height / 2 - origin.top];
         const d = curve(x1, y1, x2, y2);
         for (const p of g.querySelectorAll("path")) p.setAttribute("d", d);
-        // Just before the arrow, where the line runs through the gap left of its card, never under a card.
         const remove = g.querySelector("foreignObject");
         remove?.setAttribute("x", String(x2 - 38));
         remove?.setAttribute("y", String(y2 - 12));
@@ -171,21 +170,6 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
         onDragOver={onDragOver}
         onDrop={onDrop}
       >
-        <svg className="rel-hits" role="group" aria-label={t("relations.title")}>
-          {graph.edges.map(
-            (e) =>
-              e.blocker &&
-              e.blocked && (
-                <g key={edgeKey(e)} className="rel-hit" data-from={e.from} data-to={e.to}>
-                  <RemoveEdge
-                    label={t("relations.unlink", { blocked: e.to, blocker: e.from })}
-                    disabled={!editable}
-                    onRemove={() => onEdit(unlinkEdit(e.blocker as Card, e.blocked as Card))}
-                  />
-                </g>
-              ),
-          )}
-        </svg>
         <div ref={canvasRef} className={`relations-canvas${target === BACKGROUND ? " drop-target" : ""}`}>
           {graph.level.length === 0 ? <p className="relations-empty">{t("relations.empty")}</p> : level(graph.level)}
         </div>
@@ -201,20 +185,7 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
             )}
           </section>
         )}
-        {/* The lines are drawn over the cards, so they can be followed; what the pointer takes of them
-            (a hit area and the "×") lies under the cards, in the gaps between them. */}
-        <svg className="rel-lines" aria-hidden>
-          <defs>
-            <marker id="rel-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" />
-            </marker>
-          </defs>
-          {graph.edges.map((e) => (
-            <g key={edgeKey(e)} className={`rel-edge${e.dashed ? " dashed" : ""}`} data-from={e.from} data-to={e.to}>
-              <path className="rel-edge-line" markerEnd="url(#rel-arrow)" />
-            </g>
-          ))}
-        </svg>
+        <Lines edges={graph.edges} editable={editable} onEdit={onEdit} />
         <LinkDraft contentRef={contentRef} startRef={startLinkRef} linkingRef={linkingRef} byRef={byRef} editable={editable} onEdit={onEdit} />
       </div>
     </div>
@@ -227,16 +198,72 @@ function curve(x1: number, y1: number, x2: number, y2: number): string {
   return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
 }
 
-/** A solid line's wide hit area and its "×", shown while the line is hovered or the button focused. */
-function RemoveEdge({ label, disabled, onRemove }: { label: string; disabled: boolean; onRemove: () => void }) {
+/** The arrowhead of a layer's lines (each layer colours its own). */
+const arrow = (id: string) => (
+  <defs>
+    <marker id={id} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" />
+    </marker>
+  </defs>
+);
+
+/**
+ * The lines, behind the cards so the cards stay readable: they show in the gaps
+ * between them. A line hovered there (or whose "×" has the focus) is drawn
+ * again in front of the cards, so it can be followed across them. Its own
+ * state, so a hover re-renders only the lines.
+ */
+function Lines({ edges, editable, onEdit }: { edges: GraphEdge[]; editable: boolean; onEdit: (edit: Edit) => void }) {
+  const t = useT();
+  const [front, setFront] = useState<string | null>(null);
   return (
     <>
-      <path className="rel-edge-hit" />
-      <foreignObject width="24" height="24">
-        <button type="button" className="rel-edge-remove" aria-label={label} title={label} disabled={disabled} onClick={onRemove}>
-          ×
-        </button>
-      </foreignObject>
+      <svg className="rel-lines" role="group" aria-label={t("relations.title")}>
+        {arrow("rel-arrow")}
+        {edges.map((e) => {
+          const key = edgeKey(e);
+          const show = () => setFront(key);
+          const hide = () => setFront((k) => (k === key ? null : k));
+          return (
+            <g
+              key={key}
+              className={`rel-edge${e.dashed ? " dashed" : ""}`}
+              data-from={e.from}
+              data-to={e.to}
+              onPointerEnter={show}
+              onPointerLeave={hide}
+              onFocus={show}
+              onBlur={hide}
+            >
+              <path className="rel-edge-line" markerEnd="url(#rel-arrow)" />
+              <path className="rel-edge-hit" />
+              {e.blocker && e.blocked && (
+                // Just before the arrow, in the gap left of its card: never under a card.
+                <foreignObject width="24" height="24">
+                  <button
+                    type="button"
+                    className="rel-edge-remove"
+                    aria-label={t("relations.unlink", { blocked: e.to, blocker: e.from })}
+                    title={t("relations.unlink", { blocked: e.to, blocker: e.from })}
+                    disabled={!editable}
+                    onClick={() => onEdit(unlinkEdit(e.blocker as Card, e.blocked as Card))}
+                  >
+                    ×
+                  </button>
+                </foreignObject>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+      <svg className="rel-front" aria-hidden>
+        {arrow("rel-arrow-front")}
+        {edges.map((e) => (
+          <g key={edgeKey(e)} className={`rel-edge${e.dashed ? " dashed" : ""}${front === edgeKey(e) ? " front" : ""}`} data-from={e.from} data-to={e.to}>
+            <path className="rel-edge-line" markerEnd="url(#rel-arrow-front)" />
+          </g>
+        ))}
+      </svg>
     </>
   );
 }
@@ -325,11 +352,7 @@ function LinkDraft({
   return (
     <>
       <svg className="rel-draft" aria-hidden>
-        <defs>
-          <marker id="rel-arrow-draft" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" />
-          </marker>
-        </defs>
+        {arrow("rel-arrow-draft")}
         <path d={curve(draft.x1, draft.y1, draft.x2, draft.y2)} markerEnd="url(#rel-arrow-draft)" />
       </svg>
       {draft.to && (

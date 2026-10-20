@@ -628,10 +628,11 @@ pre {
   overflow: auto;
 }
 
-/* Layers, bottom up: the lines' hit areas and "×" (.rel-hits), the cards
-   (.relations-canvas), the lines (.rel-lines), the line being drawn. Outside a
-   drag, the pointer goes through the layout around the cards to the hit
-   areas; during one, the frames and the background take it as drop targets. */
+/* Layers, bottom up: the lines with their hit areas and "×" (.rel-lines),
+   the cards (.relations-canvas), the hovered line again (.rel-front), the line
+   being drawn. Outside a drag, the pointer goes through the layout around the
+   cards to the lines; during one, the frames and the background take it as
+   drop targets. */
 .relations-content {
   display: flex;
   flex-direction: column;
@@ -744,8 +745,8 @@ pre {
   gap: 16px;
 }
 
-.rel-hits,
 .rel-lines,
+.rel-front,
 .rel-draft {
   height: 100%;
   inset: 0;
@@ -755,7 +756,7 @@ pre {
   width: 100%;
 }
 
-.rel-lines {
+.rel-front {
   z-index: 2;
 }
 
@@ -767,6 +768,7 @@ pre {
   fill: var(--color-text-muted);
 }
 
+.rel-front marker path,
 .rel-draft marker path {
   fill: var(--color-brand);
 }
@@ -778,6 +780,7 @@ pre {
   stroke-width: 1.5;
 }
 
+.rel-front .rel-edge-line,
 .rel-draft > path {
   stroke: var(--color-brand);
   stroke-width: 2;
@@ -787,6 +790,10 @@ pre {
   stroke-dasharray: 6 4;
 }
 
+.rel-front .rel-edge:not(.front) {
+  visibility: hidden;
+}
+
 .rel-edge-hit {
   fill: none;
   pointer-events: stroke;
@@ -794,7 +801,7 @@ pre {
   stroke-width: 12;
 }
 
-.rel-hit foreignObject {
+.rel-edge foreignObject {
   overflow: visible;
   pointer-events: all;
 }
@@ -817,14 +824,14 @@ pre {
   width: 22px;
 }
 
-.rel-hit:hover .rel-edge-remove,
-.rel-hit:focus-within .rel-edge-remove {
+.rel-edge:hover .rel-edge-remove,
+.rel-edge:focus-within .rel-edge-remove {
   opacity: 1;
 }
 
 /* While a card or a line is dragged, the lines take no pointer. */
 .relations-content.relating .rel-edge-hit,
-.relations-content.relating .rel-hit foreignObject {
+.relations-content.relating .rel-edge foreignObject {
   pointer-events: none;
 }
 
