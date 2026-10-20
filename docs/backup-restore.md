@@ -148,6 +148,14 @@ branvil admin upgrade --data-dir /srv/branvil
 branvil serve --data-dir /srv/branvil
 ```
 
+A development service run by `scripts/dev.sh` is updated this way by one
+command, `scripts/update.sh` (README, "Development"): it takes the backup with
+the old build while the service runs (into `~/branvil-backups`, keeping the
+newest three it made), fast-forwards the checkout to `origin/main`, stops the
+service, builds, runs `branvil admin upgrade` and `branvil admin check`, and
+starts the service again. When a step fails it prints where it stopped, the
+checkout's previous commit, the backup, and the database copy below.
+
 `branvil admin upgrade`:
 
 1. refuses a database that another process has open, and any version other
