@@ -4,13 +4,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/dev.sh [--data-dir PATH] [--owner NAME] [--no-open]
+Usage: scripts/dev.sh [--data-dir PATH] [--owner NAME] [--no-open] [--build-only]
 
 Build and run Branvil until Ctrl-C. Open the GUI after the server is ready.
   --data-dir PATH  Data directory (default: BRANVIL_DATA_DIR or <repo>/data).
                   Relative paths are resolved from the repository root.
   --owner NAME     Owner name for first initialization (default: owner).
   --no-open        Start the server without opening a browser.
+  --build-only     Build the GUI and server, then exit (scripts/update.sh).
   -h, --help       Show this help.
 
 Existing data and branvil.toml are reused. Restart to pick up code changes.
@@ -21,6 +22,7 @@ repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 data_dir="${BRANVIL_DATA_DIR:-$repo_root/data}"
 owner=owner
 open_browser=true
+build_only=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data-dir|--owner)
@@ -32,10 +34,26 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --no-open) open_browser=false; shift ;;
+    --build-only) build_only=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+startup_log=
+server_pid=
+cleanup() {
+  if [[ -n "$server_pid" ]]; then
+    kill -TERM "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$startup_log" ]]; then rm -f "$startup_log"; fi
+}
+trap cleanup EXIT
+# Set before the build: a TERM during it (scripts/update.sh forwards Ctrl-C so)
+# ends the launcher once the running step returns, before any server starts.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cd "$repo_root"
 for command in cargo npm git; do
@@ -56,6 +74,7 @@ build_status=0
 cargo build --target-dir "$target" || build_status=$?
 "$repo_root/scripts/clean-stale-target.sh" --mark "$target"
 if (( build_status != 0 )); then exit "$build_status"; fi
+if "$build_only"; then exit 0; fi
 binary="$target/debug/branvil"
 
 if [[ ! -f "$data_dir/branvil.redb" ]]; then
@@ -63,18 +82,6 @@ if [[ ! -f "$data_dir/branvil.redb" ]]; then
 fi
 
 startup_log="$(mktemp "${TMPDIR:-/tmp}/branvil-dev.XXXXXX")"
-server_pid=
-cleanup() {
-  if [[ -n "$server_pid" ]]; then
-    kill -TERM "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
-  fi
-  rm -f "$startup_log"
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
 # The service flushes this line only after startup recovery is complete.
 # Watching our child's output avoids mistaking another server for this one.
 "$binary" serve --data-dir "$data_dir" >"$startup_log" &

@@ -428,6 +428,26 @@ Relative data paths are resolved from the repository root. `--owner` applies
 only when initializing a new database. An existing configuration keeps its
 listen address and base URL (by default `http://127.0.0.1:7878`).
 
+To update the Branvil the script runs to `origin/main` after a merge, run this
+in another terminal while it runs:
+
+```sh
+./scripts/update.sh            # or: --data-dir PATH, --backup-dir PATH, --no-open
+```
+
+It backs the running service up into `~/branvil-backups/branvil-update-<UTC time>`
+(keeping the newest three of these), switches the checkout to `main` and
+fast-forwards it to `origin/main`, stops the `branvil serve` that has the data
+directory open (its `dev.sh` ends with it), builds, runs `branvil admin upgrade`
+and `branvil admin check`, and runs `scripts/dev.sh` in its terminal until
+Ctrl-C. `origin` must be this Branvil: the script fetches as its owner, with
+the owner's token from the data directory, and its Git reads neither your
+system or global Git configuration nor any credential helper. It refuses to start when the service
+is not running or the checkout has uncommitted changes. Until the new service
+answers, a failed step prints where it stopped, the checkout's previous commit,
+and where the backup and the upgrade's database copy are.
+`scripts/dev.sh --build-only` builds without starting the server.
+
 If the browser cannot open, the script prints a single-use GUI link valid for
 60 seconds and keeps the server running. Both attempts use this data
 directory's credentials and URL rather than `BRANVIL_TOKEN` or `BRANVIL_URL`
