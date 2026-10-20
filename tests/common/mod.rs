@@ -530,32 +530,15 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Makes the database file `db` (the service stopped) look as schema
-/// version 8 wrote it: every job definition, of a run's pipeline and of an
-/// attempt, has `cpus` and `memory_mib` and a time limit (600 s when its
-/// pipeline gave none), and no attempt names the image it ran on.
-pub fn as_schema_8(db: &Path) {
-    let v8 = |job: &mut Value| {
-        job["cpus"] = json!(1);
-        job["memory_mib"] = json!(1024);
-        if job["timeout_secs"].is_null() {
-            job["timeout_secs"] = json!(600);
-        }
-    };
-    edit_records(db, "ci_runs", |run| {
-        if let Some(jobs) = run
-            .pointer_mut("/pipeline/jobs")
-            .and_then(Value::as_array_mut)
-        {
-            jobs.iter_mut().for_each(v8);
-        }
-    });
-    edit_records(db, "ci_attempts", |a| {
-        v8(&mut a["job"]);
-        a.as_object_mut().unwrap().remove("image_digest");
+/// version 9 wrote it: no ticket has a parent or blockers.
+pub fn as_schema_9(db: &Path) {
+    edit_records(db, "tickets", |t| {
+        let t = t.as_object_mut().unwrap();
+        assert!(t.remove("parent").is_some() && t.remove("blocked_by").is_some());
     });
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(8);
+            *v = json!(9);
         }
     });
 }
@@ -580,30 +563,6 @@ pub fn tables(db: &Path) -> Tables {
             })
             .collect();
         out.insert(name, rows);
-    }
-    out
-}
-
-/// Writes one JSON record into `table` of the database file `db` (the
-/// service stopped).
-pub fn insert_record(db: &Path, table: &str, key: &[u8], value: &Value) {
-    let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
-    let database = redb::Database::open(db).unwrap();
-    let txn = database.begin_write().unwrap();
-    txn.open_table(def)
-        .unwrap()
-        .insert(key, serde_json::to_vec(value).unwrap().as_slice())
-        .unwrap();
-    txn.commit().unwrap();
-}
-
-/// The database key of strings `parts` (as Branvil's `Key::s` makes it, for
-/// strings without NUL).
-pub fn key_of(parts: &[&str]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for p in parts {
-        out.extend_from_slice(p.as_bytes());
-        out.extend_from_slice(&[0, 1]);
     }
     out
 }

@@ -152,10 +152,8 @@ branvil serve --data-dir /srv/branvil
 
 1. refuses a database that another process has open, and any version other
    than the previous one (a current database is left as it is);
-2. reads what the upgrade needs (records, and Git for 8 → 9), so that a
-   record it does not expect or a Git failure stops it before anything is
-   written (for 8 → 9, every repository needs its Git directory, as
-   `branvil admin check` requires);
+2. reads the records the upgrade changes, so that a record it does not
+   expect stops it before anything is written;
 3. writes a copy of the database as it is next to it,
    `branvil-schema-<version>-<time>.redb`, and never overwrites or removes
    one;

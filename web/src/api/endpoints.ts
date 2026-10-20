@@ -117,6 +117,10 @@ export interface TicketPatch {
   state?: "open" | "closed";
   state_reason?: "completed" | "not_planned" | null;
   upstream_issue?: string | null;
+  /** Ticket URLs: the parent (null for none), tickets it is blocked by. */
+  parent?: string | null;
+  add_blocked_by?: string[];
+  remove_blocked_by?: string[];
   revision?: number;
 }
 

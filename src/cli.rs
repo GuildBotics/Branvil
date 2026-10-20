@@ -277,12 +277,7 @@ pub async fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8>
     let open = || Store::open(&layout.db(), config.storage.cache_size_mib << 20, 1);
     match command {
         AdminCommand::Upgrade => {
-            let git = crate::git::Git::new(
-                layout.clone(),
-                1,
-                std::time::Duration::from_secs(config.limits.git_command_timeout_secs),
-            );
-            let done = crate::upgrade::upgrade(&layout, &git).await?;
+            let done = crate::upgrade::upgrade(&layout)?;
             println!("{}", store::upgrade_report(&layout.db(), &done));
             Ok(0)
         }

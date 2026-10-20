@@ -932,3 +932,346 @@ async fn sessions_need_csrf_and_hosts_are_checked() {
     assert!(csp.contains("style-src 'self' 'unsafe-inline';"), "{csp}");
     assert_eq!(page.headers()["x-content-type-options"], "nosniff");
 }
+
+/// The URL path of ticket `t` (a ticket of `REPO`).
+fn path_of(t: &Value) -> String {
+    format!("{}/{}", tickets_path(), t["key"].as_str().unwrap())
+}
+
+/// The keys of the tickets in relation list `list` of a ticket.
+fn keys(list: &Value) -> Vec<String> {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn relations_are_shown_from_both_sides_and_never_make_tickets_wait_on_each_other() {
+    let w = World::new().await;
+    let s = &w.server;
+    let parent = w.ticket("Parent").await;
+    let a = w.ticket("Child A").await;
+    let b = w.ticket("Child B").await;
+    let blocker = w.ticket("Blocker").await;
+    let aiko = &w.aiko;
+    let patch = |t: &Value, body: Value| {
+        let path = path_of(t);
+        async move { s.patch(&path, aiko, body).await }
+    };
+    for child in [&a, &b] {
+        let (st, v) = patch(child, json!({"parent": parent["url"]})).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["ticket"]["parent"]["key"], "1", "{v}");
+    }
+    let (st, v) = patch(&parent, json!({"add_blocked_by": [blocker["url"]]})).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(keys(&v["ticket"]["blocked_by"]), ["4"]);
+    // Each side shows the other with its title and state.
+    let p = s.ok(&path_of(&parent), &w.aiko).await;
+    assert_eq!(keys(&p["children"]), ["2", "3"]);
+    assert_eq!(p["children"][0]["title"], "Child A");
+    assert_eq!(p["children"][0]["state"], "open");
+    assert_eq!(p["children"][0]["url"], a["url"]);
+    assert_eq!(
+        keys(&s.ok(&path_of(&blocker), &w.aiko).await["blocks"]),
+        ["1"]
+    );
+
+    // Refused, changing nothing: a cycle of parents, a ticket that would wait
+    // on itself (its own parent or blocker, a child blocked by its parent, a
+    // blocker blocked by what it blocks, a parent made a child of its
+    // blocker), a ticket of another workspace, a URL that is not a ticket of
+    // this Branvil (another host, a ticket that is not there, a pull request).
+    s.post("/workspaces", &w.owner, json!({"name": "beta"}))
+        .await;
+    s.post("/repos", &w.owner, json!({"path": "beta/x"})).await;
+    let (_, elsewhere) = s
+        .post(
+            &format!("/repos/{}/tickets", encode("beta/x")),
+            &w.aiko,
+            json!({"title": "Elsewhere"}),
+        )
+        .await;
+    for (t, body) in [
+        (&parent, json!({"parent": a["url"]})),
+        (&parent, json!({"parent": parent["url"]})),
+        (&parent, json!({"add_blocked_by": [parent["url"]]})),
+        (&a, json!({"add_blocked_by": [parent["url"]]})),
+        (&blocker, json!({"add_blocked_by": [parent["url"]]})),
+        (&parent, json!({"parent": blocker["url"]})),
+        (&parent, json!({"parent": elsewhere["url"]})),
+        (
+            &parent,
+            json!({"add_blocked_by": ["https://example.com/acme/demo/-/tickets/2"]}),
+        ),
+        (
+            &parent,
+            json!({"parent": format!("{}/acme/demo/-/tickets/99", s.url)}),
+        ),
+        (
+            &parent,
+            json!({"parent": format!("{}/acme/demo/-/pulls/1", s.url)}),
+        ),
+    ] {
+        let before = s.ok(&path_of(t), &w.aiko).await;
+        let (st, v) = patch(t, body.clone()).await;
+        assert_eq!(
+            (st.as_u16(), v["error"]["code"].as_str()),
+            (400, Some("invalid")),
+            "{body} {v}"
+        );
+        assert_eq!(s.ok(&path_of(t), &w.aiko).await, before, "{body}");
+    }
+    // A parent and a blocker set together are checked together.
+    let c = w.ticket("Child C").await;
+    let (st, v) = patch(
+        &c,
+        json!({"parent": blocker["url"], "add_blocked_by": [parent["url"]]}),
+    )
+    .await;
+    assert_eq!(st, 400, "{v}");
+
+    // Blocked: not started (into in_progress) while a blocker is open, by
+    // anyone; once in progress it may still move within the lane.
+    for token in [&w.aiko, &w.owner] {
+        let (st, v) = s
+            .put(
+                &format!("{}/board", path_of(&parent)),
+                token,
+                json!({"lane": "in_progress"}),
+            )
+            .await;
+        assert_eq!(
+            (st.as_u16(), v["error"]["code"].as_str()),
+            (409, Some("blocked")),
+            "{v}"
+        );
+    }
+    patch(
+        &blocker,
+        json!({"state": "closed", "state_reason": "not_planned"}),
+    )
+    .await;
+    s.put(
+        &format!("{}/board", path_of(&a)),
+        &w.aiko,
+        json!({"lane": "in_progress"}),
+    )
+    .await;
+    let (st, v) = s
+        .put(
+            &format!("{}/board", path_of(&parent)),
+            &w.aiko,
+            json!({"lane": "in_progress"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    patch(&blocker, json!({"state": "open"})).await;
+    let (st, v) = s
+        .put(
+            &format!("{}/board", path_of(&parent)),
+            &w.aiko,
+            json!({"lane": "in_progress", "before": format!("{REPO}#2")}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+
+    // A parent completes only once its children are closed: closing it as
+    // completed, changing a not-planned close to completed, and the owner's
+    // move into done are refused; closing as not planned and an agent's move
+    // into done (which leaves the state) are not.
+    let refused = |(st, v): (reqwest::StatusCode, Value)| {
+        assert_eq!(
+            (st.as_u16(), v["error"]["code"].as_str()),
+            (409, Some("children_open")),
+            "{v}"
+        );
+    };
+    refused(patch(&parent, json!({"state": "closed"})).await);
+    let (st, v) = patch(
+        &parent,
+        json!({"state": "closed", "state_reason": "not_planned"}),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    refused(patch(&parent, json!({"state_reason": "completed"})).await);
+    patch(&parent, json!({"state": "open"})).await;
+    refused(
+        s.put(
+            &format!("{}/board", path_of(&parent)),
+            &w.owner,
+            json!({"lane": "done"}),
+        )
+        .await,
+    );
+    let (st, v) = s
+        .put(
+            &format!("{}/board", path_of(&parent)),
+            &w.aiko,
+            json!({"lane": "done"}),
+        )
+        .await;
+    assert_eq!(
+        (st.as_u16(), v["state"].as_str()),
+        (200, Some("open")),
+        "{v}"
+    );
+    // A child closed as not planned is closed too.
+    patch(&a, json!({"state": "closed"})).await;
+    patch(
+        &b,
+        json!({"state": "closed", "state_reason": "not_planned"}),
+    )
+    .await;
+    let (st, v) = patch(&parent, json!({"state": "closed"})).await;
+    assert_eq!(
+        (st.as_u16(), v["ticket"]["state_reason"].as_str()),
+        (200, Some("completed")),
+        "{v}"
+    );
+    let p = s.ok(&path_of(&parent), &w.aiko).await;
+    assert_eq!(p["children"][1]["state_reason"], "not_planned");
+
+    // Relations are taken back as they were given.
+    patch(&b, json!({"parent": null})).await;
+    patch(&parent, json!({"remove_blocked_by": [blocker["url"]]})).await;
+    let p = s.ok(&path_of(&parent), &w.aiko).await;
+    assert_eq!(keys(&p["children"]), ["2"]);
+    assert_eq!(keys(&p["blocked_by"]), Vec::<String>::new());
+    assert_eq!(
+        keys(&s.ok(&path_of(&blocker), &w.aiko).await["blocks"]),
+        Vec::<String>::new()
+    );
+    // Cards carry the relations too.
+    let cards = s
+        .ok(
+            &format!("/workspaces/{WS}/board/cards?state=all&comments=none"),
+            &w.aiko,
+        )
+        .await;
+    let card = cards["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["key"] == "1")
+        .unwrap();
+    assert_eq!(keys(&card["children"]), ["2"]);
+
+    // The offline check finds the relation index as the records imply.
+    let mut server = w.server;
+    server.stop();
+    let out = std::process::Command::new(BIN)
+        .args(["admin", "check", "--data-dir"])
+        .arg(&server.data)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && text.contains("indexes: ok"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_merge_closes_a_parent_only_with_its_children() {
+    let w = &World::new().await;
+    let s = &w.server;
+    let parent = w.ticket("Parent").await;
+    let child = w.ticket("Child").await;
+    s.patch(&path_of(&child), &w.aiko, json!({"parent": parent["url"]}))
+        .await;
+    s.put(
+        &format!("{}/board", path_of(&parent)),
+        &w.aiko,
+        json!({"lane": "in_progress"}),
+    )
+    .await;
+    let state = |t: Value| (t["state"].clone(), t["lane"].clone());
+    let merge = |branch: &'static str, tickets: Value| async move {
+        let head = w.push_change(branch, &format!("{branch}.txt"), "one\n");
+        let p = w.open_pull(branch, tickets).await;
+        let (st, v) = s
+            .post(
+                &format!("{}/pulls/{}/merge", w.repo_path(), p["number"]),
+                &w.owner,
+                json!({"expected_head": head, "expected_base": p["base_sha"]}),
+            )
+            .await;
+        assert_eq!(st, 200, "{v}");
+    };
+    // A merge that closes the parent while its child is open leaves it as
+    // it is.
+    merge("first", json!([{"url": parent["url"], "closes": true}])).await;
+    assert_eq!(
+        state(s.ok(&path_of(&parent), &w.aiko).await),
+        (json!("open"), json!("in_progress"))
+    );
+    // One that closes both closes both, whatever the order of its links.
+    merge(
+        "second",
+        json!([{"url": parent["url"], "closes": true}, {"url": child["url"], "closes": true}]),
+    )
+    .await;
+    assert_eq!(
+        state(s.ok(&path_of(&parent), &w.aiko).await),
+        (json!("closed"), json!("done"))
+    );
+    assert_eq!(s.ok(&path_of(&child), &w.aiko).await["state"], "closed");
+}
+
+#[tokio::test]
+async fn the_upgrade_from_version_9_gives_tickets_no_relations() {
+    let mut w = World::new().await;
+    w.ticket("One").await;
+    w.ticket("Two").await;
+    w.server.stop();
+    let data = w.server.data.clone();
+    let db = data.join("branvil.redb");
+    as_schema_9(&db);
+    let before = tables(&db);
+    let admin = |what: &str| {
+        let out = std::process::Command::new(BIN)
+            .args(["admin", what, "--data-dir"])
+            .arg(&data)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    };
+    let (ok, text) = admin("check");
+    assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
+    let (ok, text) = admin("upgrade");
+    assert!(
+        ok && text.contains("2 ticket(s) got no parent and no blockers"),
+        "{text}"
+    );
+    // Only the tickets and the version changed.
+    let (mut after, mut expected) = (tables(&db), before);
+    for t in ["tickets", "meta", "ix_ticket_refs"] {
+        after.remove(t);
+        expected.remove(t);
+    }
+    assert_eq!(after, expected);
+    for t in records(&db, "tickets") {
+        assert_eq!(
+            (&t["parent"], &t["blocked_by"]),
+            (&Value::Null, &json!([])),
+            "{t}"
+        );
+    }
+    let (ok, text) = admin("check");
+    assert!(ok && text.contains("indexes: ok"), "{text}");
+    w.restart(&[]);
+    let t = w.server.ok(&format!("{}/1", tickets_path()), &w.aiko).await;
+    assert_eq!(
+        (&t["parent"], &t["children"]),
+        (&Value::Null, &json!([])),
+        "{t}"
+    );
+}

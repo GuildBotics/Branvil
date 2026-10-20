@@ -806,13 +806,15 @@ async fn sync_pull(
                             None => None,
                         };
                         let (r2, x2) = (repo.clone(), x.clone());
-                        app.store
+                        let merged = app
+                            .store
                             .write(move |w| {
                                 pulls::store_published(w, &r2, number, x2, None)?;
                                 pulls::mark_merged(w, &r2, number, &merge_sha, merged_base)
                             })
                             .await?;
                         app.events.publish("pull", &repo.path, number.to_string());
+                        crate::domain::tickets::publish_closed_by(app, &merged).await;
                         tracing::info!(
                             "upstream: {} !{number} merged on {}",
                             repo.path,

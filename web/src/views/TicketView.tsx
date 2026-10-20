@@ -15,6 +15,7 @@ import { useMemberKinds, useMembers, useRepo, useTicket, useTicketComments, useT
 import { keys } from "../query/keys";
 import { Link, ServiceLink } from "../router/Router";
 import { href } from "../router/routes";
+import { Relations, relationRefusal } from "./ticket/Relations";
 
 /** The lane select's value for "not on the board". */
 const OFF_BOARD = "-";
@@ -95,7 +96,7 @@ export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: strin
           <AssigneePicker current={tk.assignee?.name ?? null} people={people} disabled={assignee.isPending} onChoose={(name) => assignee.mutate(name)} />
         }
       />
-      {update.isError && (isApiError(update.error, "conflict") ? <Refusal>{t("ticket.conflict")}</Refusal> : <ErrorMessage error={update.error} />)}
+      {update.isError && <TicketError error={update.error} />}
       {assignee.isError && <ErrorMessage error={assignee.error} />}
 
       <div className="detail">
@@ -160,7 +161,7 @@ export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: strin
                   { group: " ", items: [{ value: OFF_BOARD, label: t("ticket.offBoard") }] },
                 ]}
               />
-              {place.isError && <ErrorMessage error={place.error} />}
+              {place.isError && <TicketError error={place.error} />}
               <Stack gap={6}>
                 <Text size="sm" fw={500}>
                   {t("ticket.labels")}
@@ -195,6 +196,8 @@ export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: strin
               )}
             </Stack>
           </Card>
+
+          <Relations ticket={tk} />
 
           <Card p="md" component="section" aria-label={t("ticket.linkedPulls")}>
             <Text fw={700} mb="xs">
@@ -234,6 +237,14 @@ export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: strin
       </div>
     </Stack>
   );
+}
+
+/** A refused change of the ticket, in the GUI's language where its reason is known. */
+function TicketError({ error }: { error: unknown }) {
+  const t = useT();
+  if (isApiError(error, "conflict")) return <Refusal>{t("ticket.conflict")}</Refusal>;
+  const refusal = relationRefusal(error, t);
+  return refusal ? <Refusal>{refusal}</Refusal> : <ErrorMessage error={error} />;
 }
 
 /** Close (as completed, or as not planned from its menu), or reopen. */

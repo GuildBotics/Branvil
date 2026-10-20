@@ -23,7 +23,7 @@ pub type Tbl = TableDefinition<'static, &'static [u8], &'static [u8]>;
 /// The schema version this build reads and writes. A database of any other
 /// version is refused instead of being misread; one of the previous version
 /// is upgraded by `upgrade` (`branvil admin upgrade`, `branvil restore`).
-pub const SCHEMA_VERSION: u64 = 9;
+pub const SCHEMA_VERSION: u64 = 10;
 
 pub const META: Tbl = TableDefinition::new("meta");
 pub const COUNTERS: Tbl = TableDefinition::new("counters");
@@ -51,6 +51,9 @@ pub const IX_PATHS: Tbl = TableDefinition::new("ix_paths");
 pub const IX_CARDS: Tbl = TableDefinition::new("ix_cards");
 pub const IX_TICKET_LABELS: Tbl = TableDefinition::new("ix_ticket_labels");
 pub const IX_CLOSED_TICKETS: Tbl = TableDefinition::new("ix_closed_tickets");
+/// (to repository, to number, `parent` | `blocked_by`, from repository, from
+/// number): the tickets that name a ticket as their parent or blocker.
+pub const IX_TICKET_REFS: Tbl = TableDefinition::new("ix_ticket_refs");
 pub const IX_ENTRIES: Tbl = TableDefinition::new("ix_entries");
 pub const IX_OPEN_PULLS: Tbl = TableDefinition::new("ix_open_pulls");
 pub const IX_INVOLVED: Tbl = TableDefinition::new("ix_involved");
@@ -90,6 +93,7 @@ pub const INDEX_TABLES: &[Tbl] = &[
     IX_CARDS,
     IX_TICKET_LABELS,
     IX_CLOSED_TICKETS,
+    IX_TICKET_REFS,
     IX_ENTRIES,
     IX_OPEN_PULLS,
     IX_INVOLVED,

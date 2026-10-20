@@ -15,6 +15,7 @@ import { keys } from "../query/keys";
 import { routeOfUrl } from "../router/routes";
 import { CardView } from "./board/CardView";
 import { LaneAdd, NewTicketModal } from "./board/NewTicket";
+import { relationRefusal } from "./ticket/Relations";
 import {
   applyMove,
   groupByLane,
@@ -95,7 +96,7 @@ export function BoardView({ workspace }: { workspace: string }) {
       if (context?.previous) client.setQueryData(cardsKey, context.previous);
       // A neighbour card that moved meanwhile is answered with 404: also a concurrent change.
       if (isApiError(err, "conflict") || isApiError(err, "not_found")) setNotice({ tone: "info", text: t("board.moveConflict", { key: ticketRef(card) }) });
-      else setNotice({ tone: "error", text: t("board.moveFailed", { key: ticketRef(card), message: (err as Error).message }) });
+      else setNotice({ tone: "error", text: t("board.moveFailed", { key: ticketRef(card), message: relationRefusal(err, t) ?? (err as Error).message }) });
     },
     onSuccess: (_data, { card, lane }) => setNotice({ tone: "info", text: t("board.moved", { key: ticketRef(card), lane: t(`lane.${lane}`) }) }),
     onSettled: () => void client.invalidateQueries({ queryKey: keys.board(workspace) }),

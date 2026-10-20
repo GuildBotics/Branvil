@@ -209,6 +209,12 @@ pub struct Ticket {
     /// not on the board.
     pub lane: Option<String>,
     pub rank: Option<String>,
+    /// The (repository id, number) of the ticket this one is a part of: the
+    /// parent completes only once its children are closed.
+    pub parent: Option<(String, u64)>,
+    /// The (repository id, number) of the tickets that must be closed before
+    /// this one is started.
+    pub blocked_by: Vec<(String, u64)>,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
@@ -218,6 +224,12 @@ pub struct Ticket {
 impl Ticket {
     pub fn key(repo: &str, number: u64) -> Vec<u8> {
         Key::new().s(repo).u(number).bytes()
+    }
+
+    /// The prefix of the relation index entries that name ticket `to` as
+    /// `kind` (`parent` or `blocked_by`) of another ticket.
+    pub fn refs_prefix(to: &(String, u64), kind: &str) -> Vec<u8> {
+        Key::new().s(&to.0).u(to.1).s(kind).bytes()
     }
 
     pub fn card_key(workspace: &str, lane: &str, rank: &str, repo: &str, number: u64) -> Vec<u8> {
@@ -536,6 +548,12 @@ pub fn ticket_index(t: &Ticket) -> Vec<IxEntry> {
             store::IX_TICKET_LABELS,
             Key::new().s(&t.repo).s(label).u(t.number).bytes(),
         ));
+    }
+    let to = t.parent.iter().map(|p| ("parent", p));
+    for (kind, other) in to.chain(t.blocked_by.iter().map(|b| ("blocked_by", b))) {
+        let mut key = Ticket::refs_prefix(other, kind);
+        key.extend(Key::new().s(&t.repo).u(t.number).bytes());
+        out.push(IxEntry::mark(store::IX_TICKET_REFS, key));
     }
     if let (Some(closed_at), "closed") = (&t.closed_at, t.state.as_str()) {
         out.push(IxEntry::mark(
