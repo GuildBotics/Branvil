@@ -6,7 +6,7 @@ import { ticketRef, type Card, type Check, type CheckSet, type Lane } from "../.
 
 export function groupByLane(cards: Card[], lanes: readonly Lane[]): Map<Lane, Card[]> {
   const groups = new Map<Lane, Card[]>(lanes.map((l) => [l, []]));
-  for (const c of cards) if (c.lane) groups.get(c.lane)?.push(c);
+  for (const c of cards) groups.get(c.lane)?.push(c);
   return groups;
 }
 
@@ -46,7 +46,7 @@ export function applyMove(cards: Card[], lanes: readonly Lane[], movedId: string
   const target = groups.get(lane);
   if (!target) return cards;
   target.splice(Math.max(0, Math.min(index, target.length)), 0, { ...moved, lane });
-  return [...lanes.flatMap((l) => groups.get(l) ?? []), ...rest.filter((c) => !c.lane)];
+  return [...groups.values()].flat();
 }
 
 export type CiRollup = "passing" | "failing" | "pending" | "not_registered" | "none";

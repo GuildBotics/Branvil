@@ -82,13 +82,12 @@ live run were fixed.
 | `read(tickets)` | → `Ticket` (key = number, tracker = repository = the repository path, lane) | ticket | — | `tickets(repo, n)` | — | `GET tickets/{n}` | contract | done: live contract |
 | `read(ticket_comments)` | → `Comment` page | comments | — | `comments` | — | `GET tickets/{n}/comments` | contract | done: live contract |
 | `comment` | status in `meta` | ticket | comment | `comments` | one txn | `POST tickets/{n}/comments` | contract | done: live contract |
-| `create_ticket(tracker, ...)` | `tracker` is a repository path; undefined label → `ServiceError("... not defined ...")` | repository labels | ticket, counter | `tickets`, `ticket:<repo>` counter | number allocation + insert in one txn | `POST repos/{r}/tickets` | contract | done: live contract |
+| `create_ticket(tracker, ...)` | `tracker` is a repository path; the ticket goes to the end of lane `new`; undefined label → `ServiceError("... not defined ...")` | repository labels | ticket, counter | `tickets`, `cards`, `ticket:<repo>` counter | number allocation + insert in one txn | `POST repos/{r}/tickets` | contract | done: live contract |
 | `update_ticket` | label add/remove against stored set; `state_changed` | ticket | ticket | `labels(repo,label,ticket)`, `closed(workspace, closed_at)` | one txn: concurrent label changes are merged, not overwritten | `PATCH tickets/{n}` | contract + service concurrency test | done: live contract |
 | `add_reaction` | comment of this ticket | comment | reaction | — | one txn | `POST tickets/{n}/reactions` | contract | done: live contract |
 | `candidates` | GitHub ticket semantics: assigned (since assignment), ready first then working lane, oldest first; status hold; own last word; working lane with a PR is the patrol's (merged → move to done) | cards of the configured workspace's board | lane `done` when merged | `cards(workspace, lane, rank)`; the ticket's one `assignee` is matched on the record | — | `GET workspaces/{w}/board/cards?lane=ready,in_progress&assignee=me` | contract + provider unit | done: live contract + E2E flow |
 | `refresh` | one card re-read | ticket + comments + PRs | as above | — | — | `GET tickets/{n}`, `GET tickets/{n}/comments`, `GET tickets/{n}/pulls` | contract | done: live contract |
 | `move(task, lane)` | → `True` | ticket | lane | `cards` | one txn | `PUT tickets/{n}/board` | contract | done: live contract + E2E flow |
-| `add(url)` | lane `new` if not on the board; a ticket of a repository outside the workspace → `ServiceError` (scope) | ticket | lane | `cards` | one txn | `PUT tickets/{n}/board` | contract | done: live contract |
 | `closed_since(start, end)` | → `ClosedItem`s: the closed tickets and the closed pull requests of the workspace's repositories | closed indexes, repository records | — | `closed(workspace, closed_at)`, `closed_pulls(repo, closed_at)` | — | `GET workspaces/{w}/board/closed` | contract + provider unit | done: live contract + E2E flow |
 
 ## Optional features
@@ -98,7 +97,7 @@ live run were fixed.
 | `request_changes` | supported |
 | artifacts | supported |
 | `dependency_alerts` | `ServiceUnsupported` |
-| board add | supported |
+| ticket created off the board | `ServiceUnsupported` (every ticket is a card) |
 | failed logs | supported |
 | PRs of another service's ticket | `ServiceUnsupported` |
 | merge closes a ticket | supported for tickets of the pull request's repository |

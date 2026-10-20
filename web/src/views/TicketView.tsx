@@ -17,9 +17,6 @@ import { Link, ServiceLink } from "../router/Router";
 import { href } from "../router/routes";
 import { Relations, relationRefusal } from "./ticket/Relations";
 
-/** The lane select's value for "not on the board". */
-const OFF_BOARD = "-";
-
 export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: string }) {
   const t = useT();
   const client = useQueryClient();
@@ -65,7 +62,7 @@ export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: strin
     },
   });
   const place = useMutation({
-    mutationFn: (lane: Lane | null) => api.tickets.place(repo, ticketKey, { lane }),
+    mutationFn: (lane: Lane) => api.tickets.place(repo, ticketKey, { lane }),
     onSettled: () => {
       refresh();
       refreshBoards();
@@ -75,7 +72,7 @@ export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: strin
   if (ticket.isPending) return <Loading />;
   if (ticket.isError) return <ErrorMessage error={ticket.error} />;
   const tk = ticket.data;
-  // The repository's path starts with its workspace, whose board the ticket may be on.
+  // The repository's path starts with its workspace, whose board the ticket is on.
   const workspace = repo.split("/")[0] as string;
   // The revision read when editing began makes a stale edit fail with 409.
   const save = (patch: api.TicketPatch) => update.mutateAsync({ ...patch, revision: tk.revision });
@@ -152,14 +149,11 @@ export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: strin
             <Stack gap="md">
               <Select
                 label={t("ticket.lane")}
-                value={tk.lane ?? OFF_BOARD}
+                value={tk.lane}
                 disabled={place.isPending}
                 allowDeselect={false}
-                onChange={(v) => v && place.mutate(v === OFF_BOARD ? null : (v as Lane))}
-                data={[
-                  ...LANES.map((l) => ({ value: l, label: t(`lane.${l}`) })),
-                  { group: " ", items: [{ value: OFF_BOARD, label: t("ticket.offBoard") }] },
-                ]}
+                onChange={(v) => v && place.mutate(v as Lane)}
+                data={LANES.map((l) => ({ value: l, label: t(`lane.${l}`) }))}
               />
               {place.isError && <TicketError error={place.error} />}
               <Stack gap={6}>

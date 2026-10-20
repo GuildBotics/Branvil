@@ -300,8 +300,8 @@ branch of exactly that name.
 
 ## Tickets and the board
 
-A ticket belongs to a repository. The repository's workspace has one board; a
-ticket is on it, in a lane, or not on it.
+A ticket belongs to a repository. The repository's workspace has one board;
+every ticket is on it, in a lane.
 
 ### Ticket shape
 
@@ -334,8 +334,9 @@ ticket is on it, in a lane, or not on it.
 
 `key` is the ticket's number as a string (it reads `#3`). `state` is `open` or
 `closed`; `state_reason` is `completed`, `not_planned`, or `null`. A ticket has at most one assignee, the agent that works on it
-(`assignee` is `null` when nobody is assigned). `lane` is `new`, `ready`, `in_progress`, `done`, or `null` when the
-ticket is not on its workspace's board. `upstream_issue` is the issue the
+(`assignee` is `null` when nobody is assigned). `lane` is the lane of its workspace's board the
+ticket is in: `new`, `ready`, `in_progress`, or `done` (every ticket is a card
+of that board), and `rank` orders it within the lane. `upstream_issue` is the issue the
 ticket stands for on its repository's upstream host, or `null`; publishing a
 pull request that links the ticket writes a line about it there.
 
@@ -352,7 +353,7 @@ the other ticket's title and state:
   `not_planned` and an agent's move into `done` are not refused.
 - **Blockers.** A ticket is `blocked_by` any number of tickets (and `blocks`
   the tickets that name it). It is not started while one of them is open: a
-  move into `in_progress` from another lane or from off the board is refused
+  move into `in_progress` from another lane is refused
   with `409 blocked` (moving within `in_progress` is not).
 
 The rules hold at those moves only: reopening a child or a blocker, or adding
@@ -362,7 +363,7 @@ its own ancestor or blocker, a child blocked by its ancestor, a cycle of
 blockers, …) is refused with `400 invalid`, as is one to a ticket of another
 workspace.
 
-- `POST /api/v1/repos/{repo}/tickets` `{"title","body","labels","lane"?,"upstream_issue"?}` → `201` ticket with the repository's next number; with `lane` the ticket is put on the workspace's board in the same transaction. Labels must be defined by the repository (`400 label_undefined`).
+- `POST /api/v1/repos/{repo}/tickets` `{"title","body","labels","lane"?,"upstream_issue"?}` → `201` ticket with the repository's next number, at the end of `lane` of the workspace's board (`new` when `lane` is omitted) in the same transaction. Labels must be defined by the repository (`400 label_undefined`).
 - `GET /api/v1/repos/{repo}/tickets?state=open|closed|all&lane=...&assignee=...&label=...` → items in number order
   (`state` defaults to `open`; `assignee=me` is the requesting member).
 - `GET /api/v1/repos/{repo}/tickets/{number}` → ticket.
@@ -397,8 +398,8 @@ workspace.
   another lane). `before`/`after` place it next to another card of that lane,
   named by its repository path and number (`acme/demo#2`; `404` when that is
   not a card of that lane; both together must name adjacent cards); without
-  them it goes last. The response is the ticket. `{"lane": null}` takes it off
-  the board (`before`/`after` are not read then). The owner's move also sets
+  them it goes last. The response is the ticket. `lane` is required: a ticket
+  does not leave the board (`{"lane": null}` is `400 invalid`). The owner's move also sets
   the state: into `done` closes an open ticket as `completed`, into another
   lane reopens a closed one. An agent's move leaves the state alone (closing a
   ticket is a person's decision). A move into `in_progress` of a blocked
@@ -443,8 +444,8 @@ comment with `meta.routing == "suppress"` as a status notice.
   every card follows `next_cursor` to the end.
 - `GET /api/v1/workspaces/{workspace}/board/closed?since={ts}&until={ts}` → items of
   `{"kind": "ticket"|"pull_request", "url", "title", "label", "closed_at", "merged"}`:
-  the tickets of the workspace's repositories closed in the window, on the
-  board or not (`label` `#3`), and the pull requests of those repositories
+  the tickets of the workspace's repositories closed in the window, in any
+  lane (`label` `#3`), and the pull requests of those repositories
   closed or merged in it (`closed_at` is the merge time when merged). Both
   ends inclusive.
 - `GET /api/v1/events` — Server-Sent Events for the GUI (see "Events").

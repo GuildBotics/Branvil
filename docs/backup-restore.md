@@ -169,34 +169,11 @@ new data directory; when the upgrade fails, the restored directory is left
 at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
 it once the cause is fixed).
 
-Version 8 → 9 (`src/upgrade.rs`): a job definition no longer has `cpus` and
-`memory_mib` (every job runs with the runner's), and an attempt records the
-image it ran on. Every attempt's job loses `cpus` and `memory_mib` and keeps
-its time limit, with no image recorded. Every CI run takes the pipeline its
-own commit's `.branvil/ci.toml` reads as now (one that names an image by
-digest or gives `cpus` or `memory_mib` is invalid, with the reason), or, when
-the commit is no longer in its repository, a failing "could not verify"
-pipeline; unfinished attempts of another job definition are stopped. Every
-attempt is kept: one of another definition stays on its job page as history
-and never counts as a check (`docs/ci.md`). Nothing outside the CI runs and
-attempts changes.
-
-What this means for the owner after 8 → 9:
-
-- Every pipeline that names an image by digest or writes `cpus` or
-  `memory_mib` is an invalid pipeline, a failing `pipeline` check, open pull
-  request heads included, until a commit with a `.branvil/ci.toml` that names
-  its images by tag and leaves those keys out replaces it.
-- A pipeline that left out `timeout_secs` reads without a time limit now,
-  while version 8 recorded its 600 s default: its runs' attempts become
-  history and their checks start over. The reconciler registers the default
-  branch tips and open pull request heads again at start, which runs their
-  jobs again.
-- An image pulled by digest under version 8 is known to the cache by its
-  digest only, which no pipeline can name: pull it again by tag, or load it,
-  under Settings → CI or with `branvil runner pull`.
-- A runner started by hand on another machine is upgraded together with the
-  service.
+Version 10 → 11 (`src/upgrade.rs`): every ticket is a card of its
+workspace's board. A ticket that was off the board goes to the end of `new`
+when open and to the end of `done` when closed, after the cards already in
+that lane, in the order of the ticket table (by repository id, then number).
+Nothing else changes.
 
 ## Tested
 
@@ -205,11 +182,13 @@ request that closes it, a review, a conversation comment, an inline thread with
 a reply, and an upstream (a GitHub stand-in) read with a member's account and
 its token; it backs the service up while it runs, checks that the token is in
 no file of the backup, that a damaged copy and one two schema versions old are
-refused, turns the backup into one of the previous schema version, restores
+refused, turns the backup into one of the previous schema version (with a
+second ticket off the board), restores
 that into another directory (upgrading it), runs `branvil admin check`, starts the restored service on the
 original address, and checks the refs (`git ls-remote`), the ticket and its
 lane, the pull request and its ticket link, the review, the comments and
-thread, the ticket's linked pull requests, the board card, the member's
+thread, the ticket's linked pull requests, the board cards (the second ticket
+at the end of `new`), the member's
 account (its login, while polling reports the credential missing), and that a new push is
 recorded. `tests/ci.rs`
 (`ci_records_logs_and_artifacts_survive_a_backup_and_restore`) backs up a

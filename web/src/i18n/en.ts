@@ -73,7 +73,6 @@ export const en = {
   "ticket.closeNotPlanned": "Close as not planned",
   "ticket.reopen": "Reopen",
   "ticket.lane": "Lane",
-  "ticket.offBoard": "Not on the board",
   "ticket.labels": "Labels",
   "ticket.noLabelsDefined": "The repository defines no labels.",
   "ticket.assignee": "Assignee",

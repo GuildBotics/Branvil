@@ -193,7 +193,7 @@ pub struct Assignee {
 pub struct Ticket {
     /// The id of the repository the ticket belongs to.
     pub repo: String,
-    /// The id of that repository's workspace, whose board the ticket may be on.
+    /// The id of that repository's workspace, whose board the ticket is on.
     pub workspace: String,
     pub number: u64,
     pub title: String,
@@ -205,10 +205,10 @@ pub struct Ticket {
     pub labels: Vec<String>,
     /// The issue it stands for on its repository's upstream host.
     pub upstream_issue: Option<String>,
-    /// The lane and rank on the workspace's board; `None` when the ticket is
-    /// not on the board.
-    pub lane: Option<String>,
-    pub rank: Option<String>,
+    /// The lane and rank on the workspace's board: every ticket is a card of
+    /// it.
+    pub lane: String,
+    pub rank: String,
     /// The (repository id, number) of the ticket this one is a part of: the
     /// parent completes only once its children are closed.
     pub parent: Option<(String, u64)>,
@@ -536,13 +536,10 @@ pub fn workspace_index(x: &Workspace) -> Vec<IxEntry> {
 }
 
 pub fn ticket_index(t: &Ticket) -> Vec<IxEntry> {
-    let mut out = Vec::new();
-    if let (Some(lane), Some(rank)) = (&t.lane, &t.rank) {
-        out.push(IxEntry::mark(
-            store::IX_CARDS,
-            Ticket::card_key(&t.workspace, lane, rank, &t.repo, t.number),
-        ));
-    }
+    let mut out = vec![IxEntry::mark(
+        store::IX_CARDS,
+        Ticket::card_key(&t.workspace, &t.lane, &t.rank, &t.repo, t.number),
+    )];
     for label in &t.labels {
         out.push(IxEntry::mark(
             store::IX_TICKET_LABELS,

@@ -94,16 +94,16 @@ function CardMenu({
           <Menu.Item
             leftSection={<ArrowUp size={14} />}
             aria-label={t("board.moveUp", { key: ref })}
-            disabled={position <= 0 || !card.lane}
-            onClick={() => card.lane && onMove(card, card.lane, position - 1)}
+            disabled={position <= 0}
+            onClick={() => onMove(card, card.lane, position - 1)}
           >
             {t("board.up")}
           </Menu.Item>
           <Menu.Item
             leftSection={<ArrowDown size={14} />}
             aria-label={t("board.moveDown", { key: ref })}
-            disabled={position >= laneSize - 1 || !card.lane}
-            onClick={() => card.lane && onMove(card, card.lane, position + 1)}
+            disabled={position >= laneSize - 1}
+            onClick={() => onMove(card, card.lane, position + 1)}
           >
             {t("board.down")}
           </Menu.Item>

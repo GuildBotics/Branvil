@@ -34,8 +34,8 @@ pub struct TicketView {
     pub labels: Vec<String>,
     /// The issue it stands for on its repository's upstream host.
     pub upstream_issue: Option<String>,
-    pub lane: Option<String>,
-    pub rank: Option<String>,
+    pub lane: String,
+    pub rank: String,
     /// The ticket this one is a part of.
     pub parent: Option<TicketRef>,
     /// The tickets that are a part of this one.
@@ -292,10 +292,15 @@ pub struct NewTicket {
     pub body: String,
     #[serde(default)]
     pub labels: Vec<String>,
-    /// Puts the ticket on its workspace's board in this lane.
-    pub lane: Option<String>,
+    /// The lane of its workspace's board the ticket goes to the end of.
+    #[serde(default = "first_lane")]
+    pub lane: String,
     /// The issue it stands for on the repository's upstream host.
     pub upstream_issue: Option<String>,
+}
+
+fn first_lane() -> String {
+    LANES[0].into()
 }
 
 fn undefined_labels(repo: &Repo, labels: &[String]) -> AppResult<()> {
@@ -329,9 +334,7 @@ pub async fn create_ticket(
     let repo = repos::visible(app, caller, repo_path).await?;
     domain::check_title(&input.title)?;
     domain::check_text("body", &input.body, domain::MAX_TEXT)?;
-    if let Some(lane) = &input.lane {
-        check_lane(lane)?;
-    }
+    check_lane(&input.lane)?;
     let upstream_issue = input
         .upstream_issue
         .as_deref()
@@ -364,8 +367,15 @@ pub async fn create_ticket(
                 assignee: None,
                 labels,
                 upstream_issue,
-                lane: None,
-                rank: None,
+                rank: rank_in(
+                    w,
+                    &repo.workspace,
+                    (&repo.id, number),
+                    &input.lane,
+                    None,
+                    None,
+                )?,
+                lane: input.lane,
                 parent: None,
                 blocked_by: Vec::new(),
                 created_at: now.clone(),
@@ -373,20 +383,14 @@ pub async fn create_ticket(
                 closed_at: None,
                 revision: 1,
             };
-            let t = match &input.lane {
-                Some(lane) => place(w, &t, lane, None, None)?,
-                None => t,
-            };
             write_ticket(w, None, &t)?;
             ticket_view(w, &base_url, &repo, &t)
         })
         .await?;
     app.events
         .publish("ticket", &view.repository, view.key.clone());
-    if view.lane.is_some() {
-        app.events
-            .publish("board", workspace_of(&view.repository), "");
-    }
+    app.events
+        .publish("board", workspace_of(&view.repository), "");
     Ok(view)
 }
 
@@ -418,10 +422,7 @@ fn matches(t: &Ticket, q: &TicketQuery, me: &str) -> bool {
         "all" => true,
         s => t.state == s,
     };
-    let lane_ok = q
-        .lane
-        .as_ref()
-        .is_none_or(|l| t.lane.as_deref() == Some(l.as_str()));
+    let lane_ok = q.lane.as_ref().is_none_or(|l| &t.lane == l);
     let assignee_ok = q.assignee.as_ref().is_none_or(|a| {
         let a = if a == "me" { me } else { a.as_str() };
         t.assignee
@@ -679,10 +680,7 @@ pub async fn update_ticket(
             }
             // A ticket closed on the board leaves its lane for done, as one
             // closed by a merge does.
-            if state_changed
-                && t.state == "closed"
-                && t.lane.as_deref().is_some_and(|lane| lane != "done")
-            {
+            if state_changed && t.state == "closed" && t.lane != "done" {
                 t = place(w, &t, "done", None, None)?;
             }
             let changed = serde_json::to_value(&t).ok() != serde_json::to_value(&old).ok();
@@ -768,11 +766,11 @@ pub async fn set_assignee(
     Ok(view)
 }
 
-/// Where a ticket goes on its workspace's board; no `lane` takes it off.
+/// Where a ticket goes on its workspace's board.
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Placement {
-    pub lane: Option<String>,
+    pub lane: String,
     pub before: Option<String>,
     pub after: Option<String>,
 }
@@ -798,12 +796,16 @@ fn lane_card(
     let ticket: Ticket = r
         .get(store::TICKETS, &Ticket::key(&repo_id, number))?
         .ok_or_else(not_found)?;
-    match (&ticket.lane, &ticket.rank) {
-        (Some(l), Some(rank)) if ticket.workspace == workspace && l == lane => {
-            Ok(Ticket::card_key(workspace, lane, rank, &repo_id, number))
-        }
-        _ => Err(not_found()),
+    if ticket.workspace != workspace || ticket.lane != lane {
+        return Err(not_found());
     }
+    Ok(Ticket::card_key(
+        workspace,
+        lane,
+        &ticket.rank,
+        &repo_id,
+        number,
+    ))
 }
 
 /// The rank of the card next to `from` (exclusive; the lane's end when
@@ -854,34 +856,34 @@ fn card_rank(key: &[u8]) -> AppResult<String> {
     Ok(parts[2].s().to_string())
 }
 
-/// Puts a ticket on a lane of its workspace's board, inside a write
-/// transaction. Only the neighbours of the new position are read, so the cost
+/// The rank of ticket `own`'s card placed in `lane` of the board of workspace
+/// `board`: before the card `before`, after the card `after`, or at the
+/// lane's end. Only the neighbours of the new position are read, so the cost
 /// does not grow with the lane (the `done` lane keeps every finished ticket).
-pub fn place(
-    w: &Wtx,
-    ticket: &Ticket,
+fn rank_in(
+    r: &impl Rd,
+    board: &str,
+    own: (&str, u64),
     lane: &str,
     before: Option<&str>,
     after: Option<&str>,
-) -> AppResult<Ticket> {
-    let own = (ticket.repo.as_str(), ticket.number);
-    let board = ticket.workspace.as_str();
+) -> AppResult<String> {
     let lane_prefix = Key::new()
         .s(board)
         .u(model::lane_index(lane).unwrap_or(0))
         .bytes();
-    let rank = match (before, after) {
+    Ok(match (before, after) {
         (Some(b), None) => {
-            let card = lane_card(w, board, lane, b, own)?;
-            let prev = neighbour(w, &lane_prefix, Some(&card), false, own)?;
+            let card = lane_card(r, board, lane, b, own)?;
+            let prev = neighbour(r, &lane_prefix, Some(&card), false, own)?;
             rank::between(
                 prev.as_ref().map(|p| p.1.as_str()),
                 Some(&card_rank(&card)?),
             )
         }
         (None, Some(a)) => {
-            let card = lane_card(w, board, lane, a, own)?;
-            let next = neighbour(w, &lane_prefix, Some(&card), true, own)?;
+            let card = lane_card(r, board, lane, a, own)?;
+            let next = neighbour(r, &lane_prefix, Some(&card), true, own)?;
             rank::between(
                 Some(&card_rank(&card)?),
                 next.as_ref().map(|n| n.1.as_str()),
@@ -889,10 +891,10 @@ pub fn place(
         }
         (Some(b), Some(a)) => {
             let (cb, ca) = (
-                lane_card(w, board, lane, b, own)?,
-                lane_card(w, board, lane, a, own)?,
+                lane_card(r, board, lane, b, own)?,
+                lane_card(r, board, lane, a, own)?,
             );
-            let next = neighbour(w, &lane_prefix, Some(&ca), true, own)?;
+            let next = neighbour(r, &lane_prefix, Some(&ca), true, own)?;
             if next.as_ref().map(|n| &n.0) != Some(&cb) {
                 return Err(AppError::invalid(
                     "before and after must name adjacent cards.",
@@ -901,20 +903,32 @@ pub fn place(
             rank::between(Some(&card_rank(&ca)?), Some(&card_rank(&cb)?))
         }
         (None, None) => {
-            let last = neighbour(w, &lane_prefix, None, false, own)?;
+            let last = neighbour(r, &lane_prefix, None, false, own)?;
             rank::between(last.as_ref().map(|l| l.1.as_str()), None)
         }
-    };
-    let mut t = ticket.clone();
-    t.lane = Some(lane.to_string());
-    t.rank = Some(rank);
-    Ok(t)
+    })
 }
 
-/// Puts a ticket in a lane of its workspace's board, or takes it off. The
-/// owner's move decides the ticket's state too: into `done` closes it as
-/// completed, into another lane reopens it. An agent's move leaves the state
-/// alone, as closing a ticket is a person's decision.
+/// Moves a ticket to a lane of its workspace's board (see `rank_in`).
+pub fn place(
+    r: &impl Rd,
+    ticket: &Ticket,
+    lane: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> AppResult<Ticket> {
+    let own = (ticket.repo.as_str(), ticket.number);
+    Ok(Ticket {
+        rank: rank_in(r, &ticket.workspace, own, lane, before, after)?,
+        lane: lane.to_string(),
+        ..ticket.clone()
+    })
+}
+
+/// Moves a ticket to a lane of its workspace's board. The owner's move
+/// decides the ticket's state too: into `done` closes it as completed, into
+/// another lane reopens it. An agent's move leaves the state alone, as closing
+/// a ticket is a person's decision.
 pub async fn put_on_board(
     app: &App,
     caller: &Caller,
@@ -923,9 +937,7 @@ pub async fn put_on_board(
     p: Placement,
 ) -> AppResult<TicketView> {
     let repo = repos::visible(app, caller, repo_path).await?;
-    if let Some(lane) = &p.lane {
-        check_lane(lane)?;
-    }
+    check_lane(&p.lane)?;
     let owner = caller.is_owner();
     let key = key.to_string();
     let base_url = app.base_url.clone();
@@ -933,9 +945,7 @@ pub async fn put_on_board(
         .store
         .write(move |w| {
             let old = ticket_by_key(w, &repo, &key)?;
-            if p.lane.as_deref() == Some("in_progress")
-                && old.lane.as_deref() != Some("in_progress")
-                && any_open(w, &old.blocked_by)?
+            if p.lane == "in_progress" && old.lane != "in_progress" && any_open(w, &old.blocked_by)?
             {
                 return Err(AppError::new(
                     StatusCode::CONFLICT,
@@ -945,22 +955,14 @@ pub async fn put_on_board(
                     ),
                 ));
             }
-            let mut t = match &p.lane {
-                Some(lane) => place(w, &old, lane, p.before.as_deref(), p.after.as_deref())?,
-                None => {
-                    let mut t = old.clone();
-                    t.lane = None;
-                    t.rank = None;
-                    t
-                }
-            };
+            let mut t = place(w, &old, &p.lane, p.before.as_deref(), p.after.as_deref())?;
             let now = util::now();
-            match p.lane.as_deref() {
-                Some("done") if owner && t.state == "open" => {
+            match p.lane.as_str() {
+                "done" if owner && t.state == "open" => {
                     check_children_closed(w, &t)?;
                     set_state(&mut t, "closed", Some("completed".into()), &now);
                 }
-                Some(lane) if owner && lane != "done" && t.state == "closed" => {
+                lane if owner && lane != "done" && t.state == "closed" => {
                     set_state(&mut t, "open", None, &now);
                 }
                 _ => {}
@@ -1443,9 +1445,10 @@ pub fn close_by_merge(w: &Wtx, ticket: &TicketId, at: &str) -> AppResult<bool> {
     if has_open_children(w, ticket)? {
         return Ok(false);
     }
-    let mut t = match old.lane.as_deref() {
-        Some(lane) if lane != "done" => place(w, &old, "done", None, None)?,
-        _ => old.clone(),
+    let mut t = if old.lane == "done" {
+        old.clone()
+    } else {
+        place(w, &old, "done", None, None)?
     };
     set_state(&mut t, "closed", Some("completed".into()), at);
     t.revision += 1;
@@ -1510,8 +1513,8 @@ mod tests {
             assignee: None,
             labels: Vec::new(),
             upstream_issue: None,
-            lane: None,
-            rank: None,
+            lane: "new".into(),
+            rank: rank::between(None, None),
             parent: None,
             blocked_by: Vec::new(),
             created_at: util::now(),

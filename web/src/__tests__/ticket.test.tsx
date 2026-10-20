@@ -48,9 +48,9 @@ describe("ticket view", () => {
           next_cursor: null,
         }),
         [`GET ${TICKET}`]: [
-          json(200, card("1", null, { assignee: { name: "aiko", assigned_at: at } })),
-          json(200, card("1", null, { assignee: { name: "mia", assigned_at: at } })),
-          json(200, card("1", null)),
+          json(200, card("1", "new", { assignee: { name: "aiko", assigned_at: at } })),
+          json(200, card("1", "new", { assignee: { name: "mia", assigned_at: at } })),
+          json(200, card("1", "new")),
         ],
         [`PUT ${TICKET}/assignee`]: json(200, {}),
         [`DELETE ${TICKET}/assignee`]: json(200, {}),
@@ -85,7 +85,7 @@ describe("ticket view", () => {
     ];
     const fake = fakeApi(
       ticketRoutes({
-        [`GET ${TICKET}`]: json(200, card("1", null)),
+        [`GET ${TICKET}`]: json(200, card("1", "new")),
         [`GET ${TICKET}/comments`]: json(200, { items: [{ ...comment, reactions }], next_cursor: null }),
         [`POST ${TICKET}/reactions`]: json(200, {}),
         [`DELETE ${TICKET}/reactions`]: json(204, null),
@@ -128,30 +128,34 @@ describe("ticket view", () => {
     expect(fake.calls("POST", `${TICKET}/reactions`)[1]?.body).toEqual({ target_id: "cmt_1", reaction: "celebrate" });
   });
 
-  it("puts a ticket on its workspace's board and takes it off", async () => {
+  it("moves a ticket between the four lanes of its workspace's board, which it is never off", async () => {
     const fake = fakeApi(
       ticketRoutes({
-        [`GET ${TICKET}`]: [json(200, card("1", null)), json(200, card("1", "ready")), json(200, card("1", null))],
+        [`GET ${TICKET}`]: [json(200, card("1", "new")), json(200, card("1", "ready")), json(200, card("1", "done"))],
         [`PUT ${TICKET}/board`]: json(200, {}),
       }),
     );
     const user = userEvent.setup();
     renderApp("/acme/demo/-/tickets/1");
-    expect(await screen.findByRole("combobox", { name: "Lane" })).toHaveValue("Not on the board");
+    const select = await screen.findByRole("combobox", { name: "Lane" });
+    expect(select).toHaveValue("New");
 
-    await choose(user, "Lane", "Ready");
+    await user.click(select);
+    const options = await screen.findAllByRole("option");
+    expect(options.map((o) => o.textContent)).toEqual(["New", "Ready", "In progress", "Done"]);
+    await user.click(screen.getByRole("option", { name: "Ready" }));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Lane" })).toHaveValue("Ready"));
-    await choose(user, "Lane", "Not on the board");
+    await choose(user, "Lane", "Done");
     await waitFor(() => expect(fake.calls("PUT", `${TICKET}/board`)).toHaveLength(2));
-    expect(fake.calls("PUT", `${TICKET}/board`).map((c) => c.body)).toEqual([{ lane: "ready" }, { lane: null }]);
+    expect(fake.calls("PUT", `${TICKET}/board`).map((c) => c.body)).toEqual([{ lane: "ready" }, { lane: "done" }]);
   });
 
   it("edits the title and the body in place, each with the revision it was read at", async () => {
     const fake = fakeApi(
       ticketRoutes({
-        [`GET ${TICKET}`]: json(200, card("1", null, { body: "Old body", revision: 4 })),
+        [`GET ${TICKET}`]: json(200, card("1", "new", { body: "Old body", revision: 4 })),
         [`PATCH ${TICKET}`]: [
-          json(200, { ticket: card("1", null, { title: "New title", body: "Old body", revision: 5 }), state_changed: false }),
+          json(200, { ticket: card("1", "new", { title: "New title", body: "Old body", revision: 5 }), state_changed: false }),
           apiError(409, "conflict", "Changed."),
         ],
       }),
@@ -183,14 +187,14 @@ describe("ticket view", () => {
     const fake = fakeApi(
       ticketRoutes({
         [`GET ${TICKET}`]: [
-          json(200, card("1", null)),
-          json(200, card("1", null)),
-          json(200, card("1", null, { state: "closed", state_reason: "not_planned" })),
+          json(200, card("1", "new")),
+          json(200, card("1", "new")),
+          json(200, card("1", "new", { state: "closed", state_reason: "not_planned" })),
         ],
         [`PATCH ${TICKET}`]: [
-          json(200, { ticket: card("1", null), state_changed: true }),
-          json(200, { ticket: card("1", null, { state: "closed", state_reason: "not_planned" }), state_changed: true }),
-          json(200, { ticket: card("1", null), state_changed: true }),
+          json(200, { ticket: card("1", "new"), state_changed: true }),
+          json(200, { ticket: card("1", "new", { state: "closed", state_reason: "not_planned" }), state_changed: true }),
+          json(200, { ticket: card("1", "new"), state_changed: true }),
         ],
       }),
     );
@@ -212,8 +216,8 @@ describe("ticket view", () => {
   it("toggles the repository's labels on the ticket", async () => {
     const fake = fakeApi(
       ticketRoutes({
-        [`GET ${TICKET}`]: json(200, card("1", null, { labels: ["bug"] })),
-        [`PATCH ${TICKET}`]: json(200, { ticket: card("1", null), state_changed: false }),
+        [`GET ${TICKET}`]: json(200, card("1", "new", { labels: ["bug"] })),
+        [`PATCH ${TICKET}`]: json(200, { ticket: card("1", "new"), state_changed: false }),
       }),
     );
     const user = userEvent.setup();
@@ -241,8 +245,8 @@ describe("ticket view", () => {
             following: { tip: null, checked_at: null, followed_at: null, error: null, stopped: null },
           },
         }),
-        [`GET ${TICKET}`]: [json(200, card("1", null)), json(200, card("1", null, { upstream_issue: issue }))],
-        [`PATCH ${TICKET}`]: json(200, { ticket: card("1", null, { upstream_issue: issue }), state_changed: false }),
+        [`GET ${TICKET}`]: [json(200, card("1", "new")), json(200, card("1", "new", { upstream_issue: issue }))],
+        [`PATCH ${TICKET}`]: json(200, { ticket: card("1", "new", { upstream_issue: issue }), state_changed: false }),
       }),
     );
     const user = userEvent.setup();
@@ -258,11 +262,11 @@ describe("ticket view", () => {
 
   it("shows the relations from both sides and changes each on the ticket that stores it", async () => {
     const ref = (key: string, state: "open" | "closed" = "open", repository = "acme/demo") => ({
-      ...card(key, null, { repository }),
+      ...card(key, "new", { repository }),
       state,
       state_reason: null,
     });
-    const shown = card("1", null, {
+    const shown = card("1", "new", {
       parent: ref("9"),
       children: [ref("2", "closed"), ref("3")],
       blocked_by: [ref("4", "open", "acme/web")],
@@ -318,7 +322,7 @@ describe("ticket view", () => {
   it("says why a parent with open children is not closed as completed", async () => {
     fakeApi(
       ticketRoutes({
-        [`GET ${TICKET}`]: json(200, card("1", null)),
+        [`GET ${TICKET}`]: json(200, card("1", "new")),
         [`PATCH ${TICKET}`]: apiError(409, "children_open", "Ticket 1 has open child tickets."),
       }),
     );
@@ -330,7 +334,7 @@ describe("ticket view", () => {
 });
 
 describe("naming a related ticket", () => {
-  const ticket = card("1", null);
+  const ticket = card("1", "new");
   const base = window.location.origin;
   it("takes #number, repository#number, or a URL of this Branvil", () => {
     expect(ticketNamed(" #12 ", ticket)).toEqual({ repo: "acme/demo", key: "12", url: `${base}/acme/demo/-/tickets/12` });

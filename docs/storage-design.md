@@ -51,11 +51,12 @@ closure returns `Ok` and aborts otherwise.
 
 ## Schema version
 
-`meta["schema_version"]` is written on creation (currently `8`: members are
+`meta["schema_version"]` is written on creation (currently `11`: members are
 the owner, agents, and runners, whose kind alone decides what they may do, and
 have accounts on upstream hosts, each a token or an app; a ticket has at most one assignee and may name
-an upstream issue; tickets belong to repositories, which hold their labels and
-may have an upstream; repositories belong to workspaces, each with one board;
+an upstream issue, a parent, and tickets it is blocked by; tickets belong to repositories, which hold their labels and
+may have an upstream; repositories belong to workspaces, each with one board,
+on which every ticket is in a lane;
 a pull request may be published upstream; a CI run holds its commit's own
 pipeline). A database of any other version is refused at open. One of the
 previous version is upgraded by `branvil admin upgrade` or `branvil restore`
@@ -74,7 +75,7 @@ database as it was (`docs/backup-restore.md`, "Upgrading").
 | `sessions` | `(sha256(session id))` | member, CSRF secret, expiry | entry-code exchange (expired rows pruned there); all deleted when the owner's token file is replaced | cookie auth |
 | `workspaces` | `(workspace id)` | name | workspace API | repository creation, cards, closed |
 | `repos` | `(repo id)` | path, workspace id, default branch, protected branches, required checks, `ci_network`, labels, upstream (provider, repository), revision | repo API | everything under a repository |
-| `tickets` | `(repo id, n)` | ticket incl. its workspace id, its one assignee with `assigned_at` (or none), labels, upstream issue (or none), lane/rank on the workspace's board (or none), its parent (or none) and the tickets it is blocked by, as (repo id, n), state, revision | ticket API, merge | `read(tickets)`, candidates |
+| `tickets` | `(repo id, n)` | ticket incl. its workspace id, its one assignee with `assigned_at` (or none), labels, upstream issue (or none), lane/rank on the workspace's board, its parent (or none) and the tickets it is blocked by, as (repo id, n), state, revision | ticket API, merge | `read(tickets)`, candidates |
 | `comments` | `("ticket", repo id, n, seq)` / `("pull", repo id, n, seq)` | comment with its reactions | comment and reaction API | comments, cards, activity |
 | `pulls` | `(repo id, n)` | pull request record (links, reviewers, reviewed_by, draft, state, merge data, and once published: the host's pull request, what was last sent to it, the host's checks of the pushed head) | PR API, merge, publish, the upstream poller, push recording (`updated_at`) | PR reads, patrol, the upstream poller |
 | `reviews` | `(repo id, n, seq)` | review with reactions | review API | reviews, activity |
@@ -118,7 +119,7 @@ Every index entry of a record comes from one function in `src/model.rs`
 Cards read only the requested lanes' ranges of one workspace's `ix_cards` (the
 `done` lane keeps every finished ticket, and candidates ask for `ready` and
 `in_progress`); the assignee filter is applied to the tickets of those lanes.
-Placing a card (create on a board, move, merge closing a ticket) reads only
+Placing a card (create, move, merge closing a ticket) reads only
 the two index entries next to the new position, never the whole lane. Ticket
 lists scan one repository's range (or one label's index range). `closed_since`
 reads the repository records to find the workspace's repositories, whose pull
