@@ -129,9 +129,9 @@ export function ChildrenToggle({ card, open, onToggle }: { card: Card; open: boo
 
 /**
  * One card: its key, state, title, labels, pull requests, and its assignee,
- * pressed to change. `lane` follows the key, `childrenControl` stands for the
- * count of children (of a card that has any), and `children` are laid over the
- * card (its menu).
+ * pressed to change. `childrenControl` stands for the count of children (of a
+ * card that has any) right after the key, `lane` follows them, and `children`
+ * are laid over the card (its menu).
  */
 export function CardView({
   card,
@@ -169,15 +169,15 @@ export function CardView({
         <Link to={href.ticket(card.repository, card.key)} className="key">
           {ref}
         </Link>
+        {card.children.length > 0 && childrenControl}
         {lane}
         {card.state === "closed" && <StateBadge>{t("ticket.closed")}</StateBadge>}
         {card.state === "open" && card.blocked_by.some((b) => b.state === "open") && <StateBadge tone="warning">{t("board.blocked")}</StateBadge>}
-        {card.children.length > 0 &&
-          (childrenControl ?? (
-            <Text span size="xs" c="dimmed">
-              {childrenText(card, t)}
-            </Text>
-          ))}
+        {card.children.length > 0 && !childrenControl && (
+          <Text span size="xs" c="dimmed">
+            {childrenText(card, t)}
+          </Text>
+        )}
         {busy && (
           <Text span size="xs" c="dimmed">
             {t("board.moving")}

@@ -105,6 +105,9 @@ describe("relations", () => {
     expect(toggle).toHaveClass("card-control");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle).toHaveTextContent("▸");
+    // Right after the ticket's key, before its lane: where the eye starts.
+    expect(toggle.previousElementSibling).toHaveTextContent("acme/demo#1");
+    expect(toggle.nextElementSibling).toHaveAccessibleName(/^Lane of acme\/demo#1: /);
     await user.hover(toggle);
     expect(await screen.findByText("Open child tickets")).toBeInTheDocument();
 
