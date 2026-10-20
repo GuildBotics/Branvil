@@ -303,6 +303,39 @@ describe("relations", () => {
     expect(article("4")).not.toHaveClass("dim");
   });
 
+  it("shows a failure to read the closed tickets it needs, offers to retry, and relates nothing until they are read", { timeout: 15_000 }, async () => {
+    const user = userEvent.setup();
+    // #8's parent #7 is closed: the closed tickets are needed, and their first reads fail.
+    const open = [card("8", "ready", { parent: ref("7", "closed") })];
+    const all = [card("7", "done", { state: "closed", children: [ref("8")] }), ...open];
+    let failing = true;
+    const fake = fakeApi(
+      routes(undefined, {
+        "GET /api/v1/workspaces/acme/board/cards": (req) =>
+          !req.search.includes("state=all")
+            ? json(200, { items: open, next_cursor: null })
+            : failing
+              ? apiError(500, "internal", "The board could not be read.")
+              : json(200, { items: all, next_cursor: null }),
+      }),
+    );
+    renderApp("/acme/-/relations");
+    // Meanwhile the open tickets are shown (#8 without its parent, so without relations), and nothing can be dragged.
+    await user.click(await screen.findByRole("button", { name: /Tickets without relations \(1\)/ }));
+    expect(draggable("8")).toHaveAttribute("draggable", "false");
+    // After the query's own retries, the failure is shown with a retry, and nothing is still "refreshing".
+    expect(await screen.findByRole("alert", {}, { timeout: 10_000 })).toHaveTextContent("The board could not be read.");
+    expect(screen.queryByText("Refreshing…")).not.toBeInTheDocument();
+    expect(draggable("8")).toHaveAttribute("draggable", "false");
+
+    failing = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("article", { name: /^acme\/demo#7 / })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(draggable("7")).toHaveAttribute("draggable", "true");
+    expect(fake.calls("GET", "/api/v1/workspaces/acme/board/cards").filter((r) => r.search.includes("state=all")).length).toBeGreaterThan(3);
+  });
+
   it("reads closed tickets for a closed parent of an open one, and hides the others until asked", async () => {
     const user = userEvent.setup();
     // #7 is closed with an open child #8; #9 is closed and blocks #8.

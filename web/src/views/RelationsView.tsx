@@ -61,9 +61,12 @@ export function RelationsView({ workspace }: { workspace: string }) {
   const openCards = useCards(workspace, "open");
   const needAll = includeClosed || (openCards.data?.items ?? []).some((c) => c.parent?.state === "closed");
   const allCards = useCards(workspace, "all", needAll);
-  const cardsQuery = needAll && allCards.data ? allCards : openCards;
-  const complete = !needAll || allCards.data !== undefined;
-  const cards = useMemo(() => cardsQuery.data?.items ?? [], [cardsQuery.data]);
+  // Relations change only once the cards they need are read; until then the
+  // open ones are shown, and a failure to read them is shown with a retry.
+  const required = needAll ? allCards : openCards;
+  const shown = required.data ?? openCards.data;
+  const complete = required.data !== undefined;
+  const cards = useMemo(() => shown?.items ?? [], [shown]);
   const graph = useMemo(() => buildGraph(cards, { includeClosed, open }), [cards, includeClosed, open]);
   const lanes = useMemo(() => boardQuery.data?.lanes ?? [], [boardQuery.data]);
   const people = useMemo<Person[]>(
@@ -123,7 +126,7 @@ export function RelationsView({ workspace }: { workspace: string }) {
         onFilter={setFilter}
         includeClosed={includeClosed}
         onIncludeClosed={(include) => showClosed(String(include))}
-        status={(cardsQuery.isFetching || !complete) && !cardsQuery.isPending && t("common.refreshing")}
+        status={required.isFetching && shown && t("common.refreshing")}
       />
       {notice && "error" in notice && <ErrorMessage error={notice.error} />}
       {notice && "text" in notice && notice.tone === "error" && <Refusal>{notice.text}</Refusal>}
@@ -142,10 +145,16 @@ export function RelationsView({ workspace }: { workspace: string }) {
           )}
         </Group>
       )}
-      {cardsQuery.isPending ? (
-        <Loading />
-      ) : cardsQuery.isError ? (
-        <ErrorMessage error={cardsQuery.error} />
+      {required.isError && (
+        <Group gap="sm">
+          <ErrorMessage error={required.error} />
+          <Button size="compact-sm" variant="default" onClick={refresh}>
+            {t("common.retry")}
+          </Button>
+        </Group>
+      )}
+      {!shown ? (
+        !required.isError && <Loading />
       ) : (
         <Figure
           graph={graph}
