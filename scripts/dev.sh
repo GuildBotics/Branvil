@@ -40,6 +40,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+startup_log=
+server_pid=
+cleanup() {
+  if [[ -n "$server_pid" ]]; then
+    kill -TERM "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$startup_log" ]]; then rm -f "$startup_log"; fi
+}
+trap cleanup EXIT
+# Set before the build: a TERM during it (scripts/update.sh forwards Ctrl-C so)
+# ends the launcher once the running step returns, before any server starts.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 cd "$repo_root"
 for command in cargo npm git; do
   if ! command -v "$command" >/dev/null 2>&1; then
@@ -67,18 +82,6 @@ if [[ ! -f "$data_dir/branvil.redb" ]]; then
 fi
 
 startup_log="$(mktemp "${TMPDIR:-/tmp}/branvil-dev.XXXXXX")"
-server_pid=
-cleanup() {
-  if [[ -n "$server_pid" ]]; then
-    kill -TERM "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
-  fi
-  rm -f "$startup_log"
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
 # The service flushes this line only after startup recovery is complete.
 # Watching our child's output avoids mistaking another server for this one.
 "$binary" serve --data-dir "$data_dir" >"$startup_log" &

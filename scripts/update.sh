@@ -9,11 +9,11 @@ Usage: scripts/update.sh [--data-dir PATH] [--backup-dir PATH] [--no-open]
 Update the Branvil that scripts/dev.sh runs from this checkout to origin/main:
   1. back up the running service into the backup directory as
      branvil-update-<UTC time>, and remove all but the newest three of them;
-  2. switch the checkout to main and fast-forward it to origin/main (while
-     the service runs, so that origin may be this Branvil);
+  2. switch the checkout to main and fast-forward it to origin/main, which
+     must be this Branvil: it fetches as the owner while the service runs;
   3. stop the branvil serve that has the data directory open;
   4. build as scripts/dev.sh does, then branvil admin upgrade and admin check;
-  5. start it again with scripts/dev.sh.
+  5. start it again with scripts/dev.sh and wait until it answers.
   --data-dir PATH    Data directory (default: BRANVIL_DATA_DIR or <repo>/data).
   --backup-dir PATH  Backup directory (default: ~/branvil-backups).
                      Relative paths are resolved from the repository root.
@@ -26,13 +26,40 @@ where it stopped and how to go back.
 EOF
 }
 
+data_dir=
 stage=
 running=true
 previous_head=
 backup=
 copy=
 
-# Runs at an exit before scripts/dev.sh takes over.
+# Git without the system or global configuration and credential helpers.
+git() {
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+    command git -c credential.helper= -c core.askPass= "$@"
+}
+
+# Fetches origin as the member $1 with the token in file $2: the token goes
+# through GIT_ASKPASS and the environment, never a URL or an argument.
+fetch_as() {
+  local token askpass status=0
+  token="$(<"$2")"
+  askpass="$(mktemp "${TMPDIR:-/tmp}/branvil-askpass.XXXXXX")"
+  cat >"$askpass" <<'EOF'
+#!/bin/sh
+case "$1" in
+  Username*) printf '%s\n' "$BRANVIL_GIT_USER" ;;
+  *) printf '%s\n' "$BRANVIL_GIT_TOKEN" ;;
+esac
+EOF
+  chmod 700 "$askpass"
+  GIT_ASKPASS="$askpass" BRANVIL_GIT_USER="$1" BRANVIL_GIT_TOKEN="$token" \
+    git fetch origin || status=$?
+  rm -f "$askpass"
+  return "$status"
+}
+
+# Runs at an exit until the updated service answers.
 report() {
   local status=$?
   if (( status == 0 )); then return; fi
@@ -45,7 +72,7 @@ report() {
       echo "Branvil is stopped."
     fi
     if [[ -n "$previous_head" ]]; then
-      echo "Checkout before the update: $previous_head (git switch --detach $previous_head, then scripts/dev.sh)"
+      echo "Checkout before the update: $previous_head (git switch --detach $previous_head, then scripts/dev.sh --data-dir $data_dir)"
     fi
     if [[ -n "$backup" ]]; then
       echo "Backup taken before the update: $backup (branvil restore --from it into a new data directory)"
@@ -59,7 +86,7 @@ report() {
 
 # The whole script is read before the checkout changes under it.
 main() {
-  local repo_root data_dir backup_root
+  local repo_root backup_root
   repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
   data_dir="${BRANVIL_DATA_DIR:-$repo_root/data}"
   backup_root="$HOME/branvil-backups"
@@ -82,16 +109,24 @@ main() {
 
   cd "$repo_root"
   if [[ "$backup_root" != /* ]]; then backup_root="$repo_root/$backup_root"; fi
-  for command in cargo npm git lsof; do
+  for command in cargo npm node git lsof; do
     if ! command -v "$command" >/dev/null 2>&1; then
       echo "Required command not found: $command (see README requirements)." >&2
       exit 1
     fi
   done
   local binary="$repo_root/target/debug/branvil"
-  local pids
-  pids="$(lsof -t -a -c branvil -- "$data_dir/branvil.redb" 2>/dev/null || true)"
-  if [[ -z "$pids" ]]; then
+  # The processes of branvil that have the database open: the service.
+  serving() { lsof -t -a -c branvil -- "$data_dir/branvil.redb" 2>/dev/null || true; }
+  # The service of this data directory, with its credentials and URL even when
+  # the calling shell has those of another Branvil (as in scripts/dev.sh).
+  client() {
+    (
+      unset BRANVIL_TOKEN BRANVIL_URL
+      "$binary" "$@" --data-dir "$data_dir"
+    )
+  }
+  if [[ -z "$(serving)" ]]; then
     echo "Branvil is not running with $data_dir; a backup needs the running service. Start it with scripts/dev.sh, then run this again." >&2
     exit 1
   fi
@@ -104,11 +139,7 @@ main() {
 
   stage="backing up the running service"
   local target="$backup_root/branvil-update-$(date -u +%Y%m%dT%H%M%SZ)"
-  # This data directory's credentials and URL, as in scripts/dev.sh.
-  (
-    unset BRANVIL_TOKEN BRANVIL_URL
-    "$binary" backup --data-dir "$data_dir" --to "$target"
-  )
+  client backup --to "$target"
   backup="$target"
 
   stage="removing old backups"
@@ -129,15 +160,22 @@ main() {
 
   stage="updating the checkout to origin/main"
   previous_head="$(git rev-parse HEAD)"
-  GIT_TERMINAL_PROMPT=0 git fetch origin
+  local owner
+  owner="$(client member list | node -e '
+    const items = JSON.parse(require("fs").readFileSync(0, "utf8")).items;
+    console.log(items.find((m) => m.kind === "owner").name);
+  ')"
+  fetch_as "$owner" "$data_dir/secrets/owner.token"
   git switch main
   git merge --ff-only origin/main
 
   stage="stopping the service"
-  running=false
+  # Looked up again: the service may have been restarted since the preflight.
+  local pids
+  pids="$(serving)"
   # Jobs running in CI are interrupted and queued again once at the next start.
   # shellcheck disable=SC2086
-  kill -TERM $pids
+  kill -TERM $pids 2>/dev/null || true
   local deadline=$((SECONDS + 60)) pid
   for pid in $pids; do
     while kill -0 "$pid" 2>/dev/null; do
@@ -148,6 +186,7 @@ main() {
       sleep 0.2
     done
   done
+  running=false
 
   stage="building"
   "$repo_root/scripts/dev.sh" --build-only
@@ -159,9 +198,24 @@ main() {
   stage="checking the data directory"
   "$binary" admin check --data-dir "$data_dir"
 
-  trap - EXIT
+  stage="starting the service"
   echo "Updated to $(git rev-parse --short HEAD). Backup taken before the update: $backup"
-  exec "$repo_root/scripts/dev.sh" --data-dir "$data_dir" ${dev_args[@]+"${dev_args[@]}"}
+  # A background job ignores Ctrl-C; pass it on as the TERM dev.sh stops on.
+  local dev=
+  trap 'kill -TERM "$dev" 2>/dev/null || true; wait "$dev" || true; exit 130' INT
+  trap 'kill -TERM "$dev" 2>/dev/null || true; wait "$dev" || true; exit 143' TERM
+  "$repo_root/scripts/dev.sh" --data-dir "$data_dir" ${dev_args[@]+"${dev_args[@]}"} &
+  dev=$!
+  until client member list >/dev/null 2>&1; do
+    if ! kill -0 "$dev" 2>/dev/null; then
+      wait "$dev" || exit
+      exit 1
+    fi
+    sleep 0.5
+  done
+  trap - EXIT
+  echo "Update finished: Branvil answers with the new build."
+  wait "$dev"
 }
 
 main "$@"
