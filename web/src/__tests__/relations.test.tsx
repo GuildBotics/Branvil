@@ -101,21 +101,28 @@ describe("relations", () => {
     const user = userEvent.setup();
     fakeApi(routes());
     await shown();
-    const toggle = within(article("1")).getByRole("button", { name: /Children 0\/2/ });
+    const toggle = within(article("1")).getByRole("button", { name: "Open child tickets" });
     expect(toggle).toHaveClass("card-control");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(toggle).toHaveTextContent("▸");
-    // Right after the ticket's key, before its lane: where the eye starts.
-    expect(toggle.previousElementSibling).toHaveTextContent("acme/demo#1");
-    expect(toggle.nextElementSibling).toHaveAccessibleName(/^Lane of acme\/demo#1: /);
+    expect(toggle).toHaveTextContent(/^▶$/);
+    // First in the card, before the key; the count of children is a plain label.
+    expect(toggle.parentElement?.firstElementChild).toBe(toggle);
+    expect(toggle.nextElementSibling).toHaveTextContent("acme/demo#1");
+    expect(within(article("1")).getByText("Children 0/2").closest("button")).toBeNull();
+    // A parent has the colour of its header; a ticket without children does not.
+    expect(article("1")).toHaveClass("parent");
+    expect(article("4")).not.toHaveClass("parent");
     await user.hover(toggle);
-    expect(await screen.findByText("Open child tickets")).toBeInTheDocument();
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Open child tickets");
 
     await user.click(toggle);
     expect(await screen.findByRole("article", { name: /^acme\/demo#2 / })).toBeInTheDocument();
     // The same button, still focused: opening does not rebuild the card.
     expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveTextContent(/^▼$/);
+    expect(toggle).toHaveAccessibleName("Close child tickets");
     expect(toggle).toHaveFocus();
+    expect(article("1")).toHaveClass("parent");
     // The frame is #1's anchor; the line from #4 now reaches #2 itself, solid.
     expect(anchor("1")).toHaveClass("rel-frame");
     expect(anchor("2").parentElement?.closest("[data-ticket]")).toBe(anchor("1"));

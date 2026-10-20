@@ -118,10 +118,11 @@ const childrenText = (card: Card, t: Translate) =>
 /** Opens or closes a card's children; `onToggle` gets the card's reference. */
 export function ChildrenToggle({ card, open, onToggle }: { card: Card; open: boolean; onToggle: (ref: string) => void }) {
   const t = useT();
+  const label = t(open ? "relations.closeChildren" : "relations.openChildren");
   return (
-    <Tooltip label={t(open ? "relations.closeChildren" : "relations.openChildren")}>
-      <button type="button" className="card-control" aria-expanded={open} onClick={() => onToggle(ticketRef(card))}>
-        {open ? "▾" : "▸"} {childrenText(card, t)}
+    <Tooltip label={label}>
+      <button type="button" className="card-control" aria-label={label} aria-expanded={open} onClick={() => onToggle(ticketRef(card))}>
+        {open ? "▼" : "▶"}
       </button>
     </Tooltip>
   );
@@ -129,9 +130,9 @@ export function ChildrenToggle({ card, open, onToggle }: { card: Card; open: boo
 
 /**
  * One card: its key, state, title, labels, pull requests, and its assignee,
- * pressed to change. `childrenControl` stands for the count of children (of a
- * card that has any) right after the key, `lane` follows them, and `children`
- * are laid over the card (its menu).
+ * pressed to change. `lead` comes before the key (the toggle of a parent's
+ * children), `lane` follows it, and `children` are laid over the card (its
+ * menu).
  */
 export function CardView({
   card,
@@ -140,7 +141,7 @@ export function CardView({
   busy,
   className,
   lane,
-  childrenControl,
+  lead,
   children,
 }: {
   card: Card;
@@ -150,7 +151,7 @@ export function CardView({
   busy: boolean;
   className?: string;
   lane?: ReactNode;
-  childrenControl?: ReactNode;
+  lead?: ReactNode;
   children?: ReactNode;
 }) {
   const t = useT();
@@ -166,14 +167,14 @@ export function CardView({
   return (
     <article className={["card", busy && "busy", className].filter(Boolean).join(" ")} aria-busy={busy} aria-label={`${ref} ${card.title}`}>
       <div className="card-row">
+        {lead}
         <Link to={href.ticket(card.repository, card.key)} className="key">
           {ref}
         </Link>
-        {card.children.length > 0 && childrenControl}
         {lane}
         {card.state === "closed" && <StateBadge>{t("ticket.closed")}</StateBadge>}
         {card.state === "open" && card.blocked_by.some((b) => b.state === "open") && <StateBadge tone="warning">{t("board.blocked")}</StateBadge>}
-        {card.children.length > 0 && !childrenControl && (
+        {card.children.length > 0 && (
           <Text span size="xs" c="dimmed">
             {childrenText(card, t)}
           </Text>
