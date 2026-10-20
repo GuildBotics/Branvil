@@ -79,10 +79,10 @@ describe("relations", () => {
     const user = userEvent.setup();
     const fake = fakeApi(routes());
     renderApp("/acme");
-    await user.click(await screen.findByRole("link", { name: "Relations" }));
+    await user.click(await screen.findByRole("link", { name: "Task flow" }));
     await screen.findByRole("article", { name: /^acme\/demo#1 / });
     expect(window.location.pathname).toBe("/acme/-/relations");
-    expect(screen.getByRole("link", { name: "Relations" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Task flow" })).toHaveAttribute("aria-current", "page");
 
     // #2 and #3 are inside the collapsed #1; #4's dependency of #2 is drawn to #1, dotted.
     expect(screen.queryByRole("article", { name: /^acme\/demo#2 / })).not.toBeInTheDocument();
@@ -93,7 +93,7 @@ describe("relations", () => {
 
     // #5 has no relation: folded below the figure.
     expect(screen.queryByRole("article", { name: /^acme\/demo#5 / })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Tickets without relations \(1\)/ }));
+    await user.click(screen.getByRole("button", { name: /Other tickets \(1\)/ }));
     expect(article("5")).toBeInTheDocument();
   });
 
@@ -328,7 +328,7 @@ describe("relations", () => {
     );
     renderApp("/acme/-/relations");
     // Meanwhile the open tickets are shown (#8 without its parent, so without relations), and nothing can be dragged.
-    await user.click(await screen.findByRole("button", { name: /Tickets without relations \(1\)/ }));
+    await user.click(await screen.findByRole("button", { name: /Other tickets \(1\)/ }));
     expect(draggable("8")).toHaveAttribute("draggable", "false");
     // After the query's own retries, the failure is shown with a retry, and nothing is still "refreshing".
     expect(await screen.findByRole("alert", {}, { timeout: 10_000 })).toHaveTextContent("The board could not be read.");
@@ -363,5 +363,133 @@ describe("relations", () => {
     expect(await screen.findByRole("article", { name: /^acme\/demo#9 / })).toBeInTheDocument();
     expect(window.localStorage.getItem("branvil.relations.includeClosed")).toBe("true");
     expect(window.localStorage.getItem("branvil.board.includeClosed")).toBeNull();
+  });
+});
+
+describe("relations: order and new tickets", () => {
+  // #6 and #8 are new, #7 ready: none related, so among the other tickets with #5 (done).
+  const OTHERS: Card[] = [...CARDS, card("6", "new"), card("8", "new"), card("7", "ready")];
+  const REPO = { path: "acme/demo", default_branch: "main", clone_url: "", url: "", protected_branches: [], required_checks: [], labels: [], upstream: null, revision: 1 };
+  const withRepo = (extra: Routes = {}) => routes({ open: OTHERS }, { "GET /api/v1/repos": json(200, { items: [REPO], next_cursor: null }), ...extra });
+
+  /** Lays a 260×100 box at the top of the viewport under each anchor (jsdom does no layout). */
+  const layOut = (...keys: string[]) => {
+    for (const key of keys)
+      for (const el of [anchor(key), anchor(key).querySelector(":scope > .rel-card") as HTMLElement]) el.getBoundingClientRect = () => new DOMRect(0, 0, 260, 100);
+  };
+
+  /** A drag event at a height (jsdom's events built by fireEvent.dragOver carry no coordinates). */
+  const dragAt = (type: "dragover" | "drop", el: HTMLElement, clientY: number) => fireEvent(el, new MouseEvent(type, { bubbles: true, cancelable: true, clientY }));
+
+  async function others(user: ReturnType<typeof userEvent.setup>) {
+    await shown();
+    await user.click(screen.getByRole("button", { name: /Other tickets \(4\)/ }));
+  }
+
+  it("shows the other tickets in a column per lane, in the board's order", async () => {
+    const user = userEvent.setup();
+    fakeApi(withRepo());
+    await others(user);
+    const columns = [...document.querySelectorAll(".relations-lane")].map((lane) => [
+      lane.querySelector("h3")?.textContent,
+      [...lane.querySelectorAll("[data-ticket]")].map((e) => e.getAttribute("data-ticket")?.replace("acme/demo#", "")),
+    ]);
+    expect(columns).toEqual([
+      ["New 2", ["6", "8"]],
+      ["Ready 1", ["7"]],
+      ["In progress 0", []],
+      ["Done 1", ["5"]],
+    ]);
+  });
+
+  it("puts a card dropped near the edge of another of its lane beside it, on the board", async () => {
+    const user = userEvent.setup();
+    const fake = fakeApi(withRepo({ "PUT /api/v1/repos/acme/demo/tickets/8/board": json(200, {}) }));
+    await others(user);
+    layOut("6", "8");
+    fireEvent.dragStart(draggable("8"), { dataTransfer: dataTransfer() });
+    // The middle makes a child; the top quarter puts it above.
+    dragAt("dragover", article("6"), 50);
+    expect(anchor("6")).toHaveClass("drop-target");
+    dragAt("dragover", article("6"), 10);
+    expect(anchor("6")).toHaveClass("insert-before");
+    expect(anchor("6")).not.toHaveClass("refused");
+    dragAt("drop", article("6"), 10);
+    expect(await screen.findByText("acme/demo#8 moved to New.")).toBeInTheDocument();
+    expect(fake.calls("PUT", "/api/v1/repos/acme/demo/tickets/8/board")[0]?.body).toEqual({ lane: "new", before: "acme/demo#6" });
+  });
+
+  it("refuses a gap among another lane's tickets, says which lanes go there, and keeps saying it after the drag", async () => {
+    const user = userEvent.setup();
+    const fake = fakeApi(withRepo());
+    await others(user);
+    layOut("6", "8");
+    // #7 is ready; #6 and #8 new, so is the gap between them.
+    const ready = within(document.querySelectorAll(".relations-lane")[1] as HTMLElement).getByRole("article").closest(".rel-card") as HTMLElement;
+    const rel = ready.closest("[data-ticket]") as HTMLElement;
+    // Siblings only: move #7 into the new lane's column for the test.
+    anchor("6").parentElement?.append(rel);
+    fireEvent.dragStart(ready, { dataTransfer: dataTransfer() });
+    const over = dragAt("dragover", article("8"), 10);
+    expect(over).toBe(true); // not prevented: no drop here
+    expect(anchor("8")).toHaveClass("insert-before", "refused");
+    expect(within(anchor("8")).getByRole("status")).toHaveTextContent("Only New tickets can go here");
+    fireEvent.dragEnd(ready);
+    expect(within(anchor("8")).getByRole("status")).toHaveTextContent("Only New tickets can go here");
+    expect(fake.requests.some((r) => r.method === "PUT")).toBe(false);
+  });
+
+  it("adds a ticket from the header and opens the other tickets, where it is", async () => {
+    const user = userEvent.setup();
+    const fake = fakeApi(withRepo({ "POST /api/v1/repos/acme/demo/tickets": json(201, card("9", "new")) }));
+    await shown();
+    await user.click(screen.getByRole("button", { name: "Add ticket" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "A new one");
+    await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Other tickets/ })).toHaveAttribute("aria-expanded", "true"));
+    expect(fake.calls("POST", "/api/v1/repos/acme/demo/tickets")[0]?.body).toEqual({ title: "A new one", body: "", labels: [], lane: "new" });
+  });
+
+  it.each([
+    {
+      item: "Add parent ticket",
+      on: "2",
+      note: "Made as the parent of acme/demo#2, between it and its parent acme/demo#1.",
+      done: "Created acme/demo#9 as the parent of acme/demo#2.",
+      writes: [
+        ["9", { parent: url("1") }],
+        ["2", { parent: url("9") }],
+      ],
+    },
+    { item: "Add parent ticket", on: "4", note: "Made as the parent of acme/demo#4.", done: "Created acme/demo#9 as the parent of acme/demo#4.", writes: [["4", { parent: url("9") }]] },
+    { item: "Add child ticket", on: "4", note: "Made as a child of acme/demo#4.", done: "Created acme/demo#9 as a child of acme/demo#4.", writes: [["9", { parent: url("4") }]] },
+    {
+      item: "Add next ticket",
+      on: "4",
+      note: "Made as the next ticket after acme/demo#4: it waits for acme/demo#4.",
+      done: "Created acme/demo#9, which waits for acme/demo#4.",
+      writes: [["9", { add_blocked_by: [url("4")] }]],
+    },
+  ])("$item on #$on makes the new ticket related to it, in order", async ({ item, on, note, done, writes }) => {
+    const user = userEvent.setup();
+    const fake = fakeApi(
+      withRepo({
+        "POST /api/v1/repos/acme/demo/tickets": json(201, card("9", "new")),
+        "PATCH /api/v1/repos/acme/demo/tickets/9": json(200, {}),
+        "PATCH /api/v1/repos/acme/demo/tickets/2": json(200, {}),
+        "PATCH /api/v1/repos/acme/demo/tickets/4": json(200, {}),
+      }),
+    );
+    await shown();
+    if (on === "2") await openParent(user);
+    await pickFromMenu(user, `Actions of acme/demo#${on}`, item, article(on));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(note);
+    await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Related");
+    await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
+    expect(await screen.findByText(done)).toBeInTheDocument();
+    const patches = fake.requests.filter((r) => r.method === "PATCH").map((r) => [r.path.split("/").pop(), r.body]);
+    expect(patches).toEqual(writes);
   });
 });

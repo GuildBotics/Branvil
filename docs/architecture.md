@@ -428,17 +428,24 @@ The GUI is built with Mantine and looks like GuildBotics Desktop: the same
 Mantine version and theme (`web/src/theme.ts`), and GuildBotics' design tokens
 and component overrides copied into `web/src/styles.css` (kept identical), so
 it can sit beside or inside Desktop. Its pages: a sidebar (the workspace, its
-board, relations and pull requests, settings), the board (lanes as tall as the window, a
+task board, task flow and pull requests, settings), the task board (lanes as tall as the window, a
 ticket added at the foot of a lane, a card marked when a blocker is open and
 counting its closed children, its lane and assignee changed from the card),
-the relations (the board's cards laid out left to right by their blockers,
+the task flow (the board's cards laid out left to right by their blockers, a
+column's tickets in progress first, then ready, new, and done, each lane in the
+board's order,
 children inside their parent once it is opened, lines drawn in SVG over a CSS
-layout; dragging a card onto another makes it a child, a line drawn from a
-card's handle makes the other card wait for it, each change with an undo;
-`web/src/views/relations/`), a ticket (body and comments, its lane, labels,
+layout, the tickets without relations folded below in a column per lane as on
+the board; dragging a card onto another makes it a child, near the top or
+bottom of a card of its own lane puts it there on the board, and a line drawn
+from a card's handle makes the other card wait for it, each relation with an
+undo; a ticket added from the header, or from a card's menu as its parent,
+child, or next ticket, is scrolled to once shown; `web/src/views/relations/`), a ticket (body and comments, its lane, labels,
 upstream issue, relations to other tickets, and assignee), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
 settings (the shown workspace with its repositories, and Branvil's members).
+While a card is dragged, the box under the pointer scrolls when the pointer is
+near its edge, faster the nearer (`web/src/dragScroll.ts`).
 The service's state is not a page: the GUI warns at the top of every page only
 when the page has lost its event stream for 5 seconds (it may be out of date
 until the stream is back), CI cannot run, or an upstream cannot be followed.

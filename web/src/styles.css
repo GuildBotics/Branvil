@@ -722,6 +722,63 @@ pre {
   padding: 16px;
 }
 
+/* Where a dropped card goes among its siblings: a line in the gap beside one,
+   drawn over the gap so nothing moves under the pointer. */
+.rel-node,
+.rel-frame {
+  position: relative;
+}
+
+.insert-before::before,
+.insert-after::before {
+  background: var(--color-brand);
+  border-radius: 2px;
+  content: "";
+  height: 3px;
+  left: 0;
+  position: absolute;
+  right: 0;
+}
+
+.insert-before::before {
+  top: -10px;
+}
+
+.insert-after::before {
+  bottom: -10px;
+}
+
+/* A gap the card cannot go into: a dashed line, and why. */
+.refused::before {
+  background: none;
+  border-top: 2px dashed var(--color-text-muted);
+}
+
+.rel-refused {
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-premium);
+  color: var(--color-text-subtle);
+  font-size: 12px;
+  left: 8px;
+  padding: 2px 8px;
+  pointer-events: none;
+  position: absolute;
+  right: 8px;
+  text-align: center;
+  transform: translateY(-50%);
+  z-index: 3;
+}
+
+.rel-refused.before {
+  top: -9px;
+}
+
+.rel-refused.after {
+  top: calc(100% + 9px);
+}
+
 .rel-node.drop-target .card,
 .rel-frame.drop-target {
   outline: 2px solid var(--color-brand);
@@ -760,10 +817,27 @@ pre {
   z-index: 1;
 }
 
-.relations-tiles {
-  display: flex;
-  flex-wrap: wrap;
+/* Like the board: a column per lane, its tickets in the board's order. */
+.relations-lanes {
+  align-items: start;
+  display: grid;
   gap: 16px;
+  grid-auto-columns: 260px;
+  grid-auto-flow: column;
+}
+
+.relations-lane {
+  display: grid;
+  gap: 8px;
+}
+
+.relations-lane-head {
+  align-items: center;
+  display: flex;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 8px;
+  margin: 0;
 }
 
 .rel-lines,

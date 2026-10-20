@@ -2,7 +2,7 @@
 // pages, and the display language at the bottom.
 
 import { Select, Stack, Text } from "@mantine/core";
-import { GitPullRequest, Network, Settings, SquareKanban } from "lucide-react";
+import { GitPullRequest, Settings, SquareKanban, Workflow } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useI18n, type Language } from "../i18n";
 import { Link, navigate } from "../router/Router";
@@ -89,7 +89,7 @@ export function Sidebar({
             <NavItem to={href.workspace(workspace)} active={page === "board"} icon={<SquareKanban size={18} />}>
               {t("nav.board")}
             </NavItem>
-            <NavItem to={href.relations(workspace)} active={page === "relations"} icon={<Network size={18} />}>
+            <NavItem to={href.relations(workspace)} active={page === "relations"} icon={<Workflow size={18} />}>
               {t("nav.relations")}
             </NavItem>
             <NavItem to={href.pulls(workspace)} active={page === "pulls"} icon={<GitPullRequest size={18} />}>

@@ -1,17 +1,34 @@
 // The relations figure: the levels of cards and frames laid out by CSS, the
-// lines between them drawn over it in SVG, and the drags that relate tickets.
+// lines between them drawn over it in SVG, and the drags that relate and order tickets.
 
+import { Badge } from "@mantine/core";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent, type RefObject } from "react";
 import { ticketRef, type Card, type Lane } from "../../api/types";
 import type { Person } from "../../components/PeoplePicker";
 import { useT } from "../../i18n";
-import { matchesFilter, type CardFilter } from "../board/ordering";
+import { groupByLane, matchesFilter, type CardFilter } from "../board/ordering";
 import { linkEdit, parentEdit, unlinkEdit, type Edit } from "./edits";
 import type { Graph, GraphEdge, Level } from "./graph";
-import { RelationCard } from "./RelationCard";
+import { RelationCard, type Addition } from "./RelationCard";
+
+/** How long a gap the card could not go into stays marked after the drag: the dragged card hid it. */
+const REFUSAL_MS = 4000;
 
 /** The drop target meaning "the figure's background": out of every parent. */
 const BACKGROUND = "\u0000background";
+
+/** Where in its lane a card is put: just before or after another ticket. */
+type Place = { before: string } | { after: string };
+
+/** Where a drop goes: onto a card or frame, or the background (`ref`), or beside a card among its siblings (`side`). */
+interface Aim {
+  ref: string;
+  side?: "before" | "after";
+  /** What the drop does; null beside a card where it cannot go (only among tickets of its own lane). */
+  drop: Edit | Place | null;
+  /** Beside a card where it cannot go: the lanes of the tickets around that gap, the only ones that can go there. */
+  refused?: Lane[];
+}
 
 /** What the figure is drawn with and reports back. */
 interface Props {
@@ -28,25 +45,49 @@ interface Props {
   editable: boolean;
   onToggle: (ref: string) => void;
   onLane: (card: Card, lane: Lane) => void;
+  /** Puts a card in its lane just before or after another ticket. */
+  onPlace: (card: Card, at: Place) => void;
   onEdit: (edit: Edit) => void;
+  onAdd: (card: Card, addition: Addition) => void;
+  /** A ticket to bring into view once the figure shows it (a new one); `onRevealed` is called then. */
+  reveal: string | null;
+  onRevealed: () => void;
+  unrelatedOpen: boolean;
+  onUnrelatedOpen: (open: boolean) => void;
 }
-
-/** The ticket an event happened over: its anchor's ref, or null. */
-const refUnder = (target: EventTarget | null) => (target instanceof Element ? (target.closest("[data-ticket]")?.getAttribute("data-ticket") ?? null) : null);
 
 const edgeKey = (e: GraphEdge) => `${e.from}>${e.to}`;
 
-export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, moving, editable, onToggle, onLane, onEdit }: Props) {
+export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, moving, editable, onToggle, onLane, onPlace, onEdit, onAdd, reveal, onRevealed, unrelatedOpen, onUnrelatedOpen }: Props) {
   const t = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const linkingRef = useRef(false);
   const startLinkRef = useRef<(card: Card, e: PointerEvent<HTMLElement>) => void>(() => {});
+  const draggedRef = useRef<Element | null>(null);
   const [dragging, setDragging] = useState<Card | null>(null);
-  const [target, setTarget] = useState<string | null>(null);
-  const [unrelatedOpen, setUnrelatedOpen] = useState(false);
+  const [target, setTarget] = useState<Aim | null>(null);
   const byRef = useMemo(() => new Map(cards.map((c) => [ticketRef(c), c])), [cards]);
+
+  // A ticket asked for is scrolled to once the figure shows it, and its card glows for a moment.
+  useEffect(() => {
+    const el = reveal && [...(contentRef.current?.querySelectorAll("[data-ticket]") ?? [])].find((e) => e.getAttribute("data-ticket") === reveal);
+    if (!el) return;
+    el.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+    el.querySelector(":scope > .rel-card > .card")?.animate?.(
+      [{ boxShadow: "0 0 0 4px var(--color-brand)" }, { boxShadow: "0 0 0 4px transparent" }],
+      { duration: 2000, easing: "ease-out" },
+    );
+    onRevealed();
+  }, [reveal, graph, unrelatedOpen, onRevealed]);
+
+  // A gap the card could not go into stays marked for a while after the drag.
+  useEffect(() => {
+    if (dragging || !target) return;
+    const timer = setTimeout(() => setTarget(null), REFUSAL_MS);
+    return () => clearTimeout(timer);
+  }, [dragging, target]);
 
   const onLinkStart = useCallback((card: Card, e: PointerEvent<HTMLElement>) => startLinkRef.current(card, e), []);
 
@@ -84,18 +125,38 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
     return () => observer.disconnect();
   }, [graph, unrelatedOpen]);
 
-  // A drop target is a card or frame (`data-ticket`) or, inside the figure, its background;
-  // it is offered only when dropping there changes something.
-  const editFor = (dragged: Card, e: DragEvent): [string | null, Edit | null] => {
-    const ref = refUnder(e.target) ?? (e.target instanceof Node && canvasRef.current?.contains(e.target) ? BACKGROUND : null);
-    if (ref === null) return [null, null];
+  // Near the top or bottom of a sibling, a drop puts the card into that gap:
+  // the board's order is the order the figure shows, so only a gap next to a
+  // ticket of its own lane takes it. Elsewhere a drop target is a card or
+  // frame (`data-ticket`) or, inside the figure, its background. A drop is
+  // offered only where it changes something.
+  const aimFor = (dragged: Card, e: DragEvent): Aim | null => {
+    const el = e.target instanceof Element ? e.target.closest("[data-ticket]") : null;
+    const from = draggedRef.current;
+    const refOf = (n: Element | null) => n?.getAttribute("data-ticket") ?? "";
+    if (el && from && el !== from && el.parentElement === from.parentElement) {
+      const box = el.getBoundingClientRect();
+      const band = (el.querySelector(":scope > .rel-card") ?? el).getBoundingClientRect().height / 4;
+      const side = e.clientY < box.top + band ? "before" : e.clientY > box.bottom - band ? "after" : null;
+      if (side) {
+        const [above, below] = side === "before" ? [el.previousElementSibling, el] : [el, el.nextElementSibling];
+        if (above === from || below === from) return null;
+        const inLane = (n: Element | null) => byRef.get(refOf(n))?.lane === dragged.lane;
+        const drop = inLane(below) ? { before: refOf(below) } : inLane(above) ? { after: refOf(above) } : null;
+        const lanes = [above, below].flatMap((n) => byRef.get(refOf(n))?.lane ?? []);
+        return drop ? { ref: refOf(el), side, drop } : { ref: refOf(el), side, drop, refused: [...new Set(lanes)] };
+      }
+    }
+    const ref = el ? refOf(el) : e.target instanceof Node && canvasRef.current?.contains(e.target) ? BACKGROUND : null;
+    if (ref === null) return null;
     const over = ref === BACKGROUND ? null : byRef.get(ref);
-    if (over === undefined) return [null, null];
-    return [ref, parentEdit(dragged, over)];
+    if (over === undefined) return null;
+    const drop = parentEdit(dragged, over);
+    return drop && { ref, drop };
   };
   const dragProps = (card: Card) => ({
     draggable: editable,
-    onDragStart: (e: DragEvent) => {
+    onDragStart: (e: DragEvent<HTMLElement>) => {
       e.stopPropagation();
       if (linkingRef.current) {
         e.preventDefault();
@@ -103,27 +164,29 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
       }
       e.dataTransfer.setData("text/plain", ticketRef(card));
       e.dataTransfer.effectAllowed = "move";
+      draggedRef.current = e.currentTarget.closest("[data-ticket]");
       setDragging(card);
     },
     onDragEnd: () => {
       setDragging(null);
-      setTarget(null);
+      setTarget((aim) => (aim?.refused ? aim : null));
     },
   });
   const onDragOver = (e: DragEvent) => {
     if (!dragging) return;
-    const [ref, edit] = editFor(dragging, e);
-    if (edit) e.preventDefault();
-    const next = edit ? ref : null;
-    setTarget((prev) => (prev === next ? prev : next));
+    const aim = aimFor(dragging, e);
+    if (aim?.drop) e.preventDefault();
+    setTarget((prev) => (prev?.ref === aim?.ref && prev?.side === aim?.side && !prev?.refused === !aim?.refused ? prev : aim));
   };
   const onDrop = (e: DragEvent) => {
     if (!dragging) return;
     e.preventDefault();
-    const [, edit] = editFor(dragging, e);
+    const drop = aimFor(dragging, e)?.drop;
     setDragging(null);
     setTarget(null);
-    if (edit) onEdit(edit);
+    if (!drop) return;
+    if ("change" in drop) onEdit(drop);
+    else onPlace(dragging, drop);
   };
 
   const node = (card: Card, isOpen: boolean | undefined) => (
@@ -138,9 +201,17 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
       onToggle={onToggle}
       onLane={onLane}
       onLinkStart={onLinkStart}
+      onAdd={onAdd}
     />
   );
-  const anchorClass = (base: string, ref: string) => `${base}${target === ref ? " drop-target" : ""}${dragging && ticketRef(dragging) === ref ? " dragging" : ""}`;
+  const anchorClass = (base: string, ref: string) =>
+    [
+      base,
+      target?.ref === ref && (target.side ? `insert-${target.side}${target.refused ? " refused" : ""}` : "drop-target"),
+      dragging && ticketRef(dragging) === ref && "dragging",
+    ]
+      .filter(Boolean)
+      .join(" ");
   // An anchor is a card, or an open parent's frame: its card as the header, then its children's level.
   // Opening keeps the card where it was in the tree, so it keeps the focus.
   const anchor = (card: Card, inner: Level | null, isOpen: boolean | undefined) => {
@@ -150,6 +221,13 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
         <div className="rel-card" {...dragProps(card)}>
           {node(card, isOpen)}
         </div>
+        {target?.ref === ref && target.refused && (
+          <span className={`rel-refused ${target.side}`} role="status">
+            {t("relations.lanesOnly", {
+              lanes: target.refused.map((lane) => t(`lane.${lane}`)).join(t("relations.or")),
+            })}
+          </span>
+        )}
         {inner && level(inner)}
       </div>
     );
@@ -172,17 +250,27 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
         onDragOver={onDragOver}
         onDrop={onDrop}
       >
-        <div ref={canvasRef} className={`relations-canvas${target === BACKGROUND ? " drop-target" : ""}`}>
+        <div ref={canvasRef} className={`relations-canvas${target?.ref === BACKGROUND ? " drop-target" : ""}`}>
           {graph.level.length === 0 ? <p className="relations-empty">{t("relations.empty")}</p> : level(graph.level)}
         </div>
         {graph.unrelated.length > 0 && (
           <section className="relations-unrelated" aria-label={t("relations.unrelated", { count: graph.unrelated.length })}>
-            <button type="button" className="card-control" aria-expanded={unrelatedOpen} onClick={() => setUnrelatedOpen(!unrelatedOpen)}>
+            <button type="button" className="card-control" aria-expanded={unrelatedOpen} onClick={() => onUnrelatedOpen(!unrelatedOpen)}>
               {unrelatedOpen ? "▾" : "▸"} {t("relations.unrelated", { count: graph.unrelated.length })}
             </button>
             {unrelatedOpen && (
-              <div className="relations-tiles">
-                {graph.unrelated.map((c) => anchor(c, null, undefined))}
+              <div className="relations-lanes">
+                {[...groupByLane(graph.unrelated, lanes)].map(([lane, inLane]) => (
+                  <div className="relations-lane" key={lane}>
+                    <h3 className="relations-lane-head">
+                      {t(`lane.${lane}`)}{" "}
+                      <Badge color="neutral" variant="light" size="sm">
+                        {inLane.length}
+                      </Badge>
+                    </h3>
+                    <div className="rel-column">{inLane.map((c) => anchor(c, null, undefined))}</div>
+                  </div>
+                ))}
               </div>
             )}
           </section>

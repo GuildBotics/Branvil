@@ -52,6 +52,13 @@ describe("relations graph", () => {
     expect(g.unrelated.map((c) => c.key)).toEqual(["E"]);
   });
 
+  it("puts the lanes that matter most first in a column, keeping the board's order within a lane", () => {
+    const lanes: Record<string, Card["lane"]> = { A: "new", B: "ready", C: "new", D: "done", E: "in_progress", F: "ready", Z: "new" };
+    const cards = board({ A: {}, B: {}, C: {}, D: {}, E: {}, F: {}, Z: { blockedBy: ["A", "B", "C", "D", "E", "F"] } }).map((c) => ({ ...c, lane: lanes[c.key]! }));
+    const g = buildGraph(cards, { includeClosed: false, open: new Set() });
+    expect(layout(g.level)).toBe("E B F A C D | Z");
+  });
+
   it("leaves out tickets with no relation, counting relations to tickets not loaded as none", () => {
     const g = graph({ B: { blockedBy: ["Z"] }, A: { parent: "Y" }, C: {} });
     expect(g.level).toEqual([]);
