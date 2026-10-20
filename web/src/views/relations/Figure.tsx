@@ -58,7 +58,9 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
     const draw = () => {
       const origin = content.getBoundingClientRect();
       const rects = new Map<string, DOMRect>();
-      for (const el of content.querySelectorAll<HTMLElement>("[data-ticket]")) rects.set(el.dataset["ticket"] as string, el.getBoundingClientRect());
+      // A line meets a ticket's own card: an open parent's is its frame's header, as wide as the frame.
+      for (const el of content.querySelectorAll<HTMLElement>("[data-ticket]"))
+        rects.set(el.dataset["ticket"] as string, (el.querySelector(":scope > .rel-card") ?? el).getBoundingClientRect());
       for (const g of content.querySelectorAll<SVGGElement>("g[data-from]")) {
         const a = rects.get(g.dataset["from"] as string);
         const b = rects.get(g.dataset["to"] as string);
@@ -139,7 +141,7 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
     />
   );
   const anchorClass = (base: string, ref: string) => `${base}${target === ref ? " drop-target" : ""}${dragging && ticketRef(dragging) === ref ? " dragging" : ""}`;
-  // An anchor is a card, or an open parent's frame: its card first, then its children's level.
+  // An anchor is a card, or an open parent's frame: its card as the header, then its children's level.
   // Opening keeps the card where it was in the tree, so it keeps the focus.
   const anchor = (card: Card, inner: Level | null, isOpen: boolean | undefined) => {
     const ref = ticketRef(card);

@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Card, TicketRef } from "../api/types";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { pickFromMenu } from "../test/mantine";
@@ -179,6 +179,34 @@ describe("relations", () => {
     expect(await screen.findByText("acme/demo#1 now waits for acme/demo#4.")).toBeInTheDocument();
     expect(fake.calls("PATCH", "/api/v1/repos/acme/demo/tickets/1")[0]?.body).toEqual({ add_blocked_by: [url("4")] });
     expect(screen.queryByText("acme/demo#1 waits for acme/demo#4")).not.toBeInTheDocument();
+  });
+
+  it("makes an open parent's card the header of its frame, where its lines start", async () => {
+    const user = userEvent.setup();
+    // #1 has the child #2 and blocks #9.
+    fakeApi(
+      routes({
+        open: [
+          card("1", "new", { children: [ref("2")], blocks: [ref("9")] }),
+          card("2", "new", { parent: ref("1") }),
+          card("9", "ready", { blocked_by: [ref("1")] }),
+        ],
+      }),
+    );
+    // jsdom lays nothing out: the frame is 600×400, its header 600×80 at its top, #9 to the right.
+    const box = (left: number, top: number, width: number, height: number) => DOMRect.fromRect({ x: left, y: top, width, height });
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      const ref = this.closest("[data-ticket]")?.getAttribute("data-ticket");
+      if (ref === "acme/demo#1") return this.matches(".rel-frame") ? box(0, 0, 600, 400) : box(0, 0, 600, 80);
+      if (ref === "acme/demo#9") return box(700, 100, 260, 80);
+      return box(0, 0, 0, 0);
+    });
+    await shown();
+    await openParent(user);
+    expect(article("1").closest(".rel-card")?.parentElement).toBe(anchor("1"));
+    expect(anchor("1").firstElementChild).toBe(article("1").closest(".rel-card"));
+    // From the header's right edge, at its middle; not from the middle of the frame.
+    await waitFor(() => expect(edge("1", "9")?.querySelector("path")?.getAttribute("d")).toMatch(/^M 600 40 /));
   });
 
   it("offers no line onto the card's own frame or a card inside it", async () => {
