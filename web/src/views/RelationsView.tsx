@@ -93,7 +93,7 @@ export function RelationsView({ workspace }: { workspace: string }) {
   );
   // Checks are loaded for the pull requests of the cards the figure shows.
   const ciUrls = useMemo(() => ciUrlsOf(cardsOf(graph)), [graph]);
-  const refresh = () => void client.invalidateQueries({ queryKey: ["board"] });
+  const refresh = () => client.invalidateQueries({ queryKey: ["board"] });
 
   // The figure changes once the service has the change: a refusal leaves it as it was.
   const relate = useMutation({
@@ -103,8 +103,11 @@ export function RelationsView({ workspace }: { workspace: string }) {
     onMutate: () => setNotice(null),
     onSuccess: (_ticket, { done, undo }) => setNotice({ tone: "info", text: done, undo }),
     onError: (error) => setNotice({ tone: "error", error }),
-    onSettled: (_ticket, _error, { reveal }) => {
-      refresh();
+    // The figure is changed only once the cards are read again with what was written (until then
+    // it is not editable), and only then is a new ticket asked into view: before, it would be found
+    // where it was (among the other tickets) and the request used up there.
+    onSettled: async (_ticket, _error, { reveal }) => {
+      await refresh();
       if (reveal) setReveal(reveal);
     },
   });
@@ -114,7 +117,7 @@ export function RelationsView({ workspace }: { workspace: string }) {
     onMutate: () => setNotice(null),
     onSuccess: (_ticket, { card, lane }) => setNotice({ tone: "info", text: t("board.moved", { key: ticketRef(card), lane: t(`lane.${lane}`) }) }),
     onError: (err, { card }) => setNotice(moveRefusal(err, card, t)),
-    onSettled: refresh,
+    onSettled: () => void refresh(),
   });
 
   const { mutate: write } = relate;
@@ -136,8 +139,6 @@ export function RelationsView({ workspace }: { workspace: string }) {
     const made = ticketRef(ticket);
     const to = adding?.to;
     if (!to) {
-      // A ticket without relations is among the other tickets.
-      setUnrelatedOpen(true);
       setReveal(made);
       return;
     }

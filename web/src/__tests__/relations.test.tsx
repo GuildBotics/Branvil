@@ -441,7 +441,16 @@ describe("relations: order and new tickets", () => {
 
   it("adds a ticket from the header and opens the other tickets, where it is", async () => {
     const user = userEvent.setup();
-    const fake = fakeApi(withRepo({ "POST /api/v1/repos/acme/demo/tickets": json(201, card("9", "new")) }));
+    let created = false;
+    const fake = fakeApi(
+      withRepo({
+        "GET /api/v1/workspaces/acme/board/cards": () => json(200, { items: created ? [...OTHERS, card("9", "new")] : OTHERS, next_cursor: null }),
+        "POST /api/v1/repos/acme/demo/tickets": () => {
+          created = true;
+          return json(201, card("9", "new"));
+        },
+      }),
+    );
     await shown();
     await user.click(screen.getByRole("button", { name: "Add ticket" }));
     const dialog = await screen.findByRole("dialog");
@@ -449,6 +458,70 @@ describe("relations: order and new tickets", () => {
     await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
     await waitFor(() => expect(screen.getByRole("button", { name: /Other tickets/ })).toHaveAttribute("aria-expanded", "true"));
     expect(fake.calls("POST", "/api/v1/repos/acme/demo/tickets")[0]?.body).toEqual({ title: "A new one", body: "", labels: [], lane: "new" });
+    expect(article("9")).toBeInTheDocument();
+  });
+
+  it("brings a new child into view only once the cards are read with its parent, opening the parent", async () => {
+    const user = userEvent.setup();
+    const made = card("9", "new");
+    let stage: "before" | "created" | "related" = "before";
+    const cardsNow = () =>
+      stage === "before"
+        ? OTHERS
+        : stage === "created"
+          ? [...OTHERS, made]
+          : [...OTHERS.map((c) => (c.key === "1" ? { ...c, children: [...c.children, ref("9")] } : c)), { ...made, parent: ref("1") }];
+    fakeApi(
+      withRepo({
+        // The cards with the relation take a while to come: the page renders meanwhile.
+        "GET /api/v1/workspaces/acme/board/cards": async () => {
+          const items = cardsNow();
+          if (stage === "related") await new Promise((resolve) => setTimeout(resolve, 50));
+          return json(200, { items, next_cursor: null });
+        },
+        "POST /api/v1/repos/acme/demo/tickets": () => {
+          stage = "created";
+          return json(201, made);
+        },
+        // The cards read after the creation, with #9 among the other tickets, are shown before the relation is written.
+        "PATCH /api/v1/repos/acme/demo/tickets/9": async () => {
+          await waitFor(() => expect(document.querySelector('[data-ticket="acme/demo#9"]')).not.toBeNull());
+          stage = "related";
+          return json(200, {});
+        },
+      }),
+    );
+    await others(user);
+    await pickFromMenu(user, "Actions of acme/demo#1", "Add child ticket", article("1"));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Related");
+    await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
+    expect(await screen.findByText("Created acme/demo#9 as a child of acme/demo#1.")).toBeInTheDocument();
+    await waitFor(() => expect(anchor("1")).toHaveClass("rel-frame"));
+    expect(anchor("9").parentElement?.closest("[data-ticket]")).toBe(anchor("1"));
+  });
+
+  it("shows a new ticket among the other tickets when its relation is refused", async () => {
+    const user = userEvent.setup();
+    const made = card("9", "new");
+    let created = false;
+    fakeApi(
+      withRepo({
+        "GET /api/v1/workspaces/acme/board/cards": () => json(200, { items: created ? [...OTHERS, made] : OTHERS, next_cursor: null }),
+        "POST /api/v1/repos/acme/demo/tickets": () => {
+          created = true;
+          return json(201, made);
+        },
+        "PATCH /api/v1/repos/acme/demo/tickets/9": apiError(409, "conflict", "Refused."),
+      }),
+    );
+    await shown();
+    await pickFromMenu(user, "Actions of acme/demo#4", "Add child ticket", article("4"));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Related");
+    await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Other tickets/ })).toHaveAttribute("aria-expanded", "true"));
+    expect(article("9")).toBeInTheDocument();
   });
 
   it.each([

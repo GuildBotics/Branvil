@@ -70,8 +70,10 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
   const [target, setTarget] = useState<Aim | null>(null);
   const byRef = useMemo(() => new Map(cards.map((c) => [ticketRef(c), c])), [cards]);
 
-  // A ticket asked for is scrolled to once the figure shows it, and its card glows for a moment.
+  // A ticket asked for is scrolled to once the figure shows it, and its card glows for a moment;
+  // the other tickets are opened when it is among them.
   useEffect(() => {
+    if (reveal && !unrelatedOpen && graph.unrelated.some((c) => ticketRef(c) === reveal)) return onUnrelatedOpen(true);
     const el = reveal && [...(contentRef.current?.querySelectorAll("[data-ticket]") ?? [])].find((e) => e.getAttribute("data-ticket") === reveal);
     if (!el) return;
     el.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
@@ -80,7 +82,7 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
       { duration: 2000, easing: "ease-out" },
     );
     onRevealed();
-  }, [reveal, graph, unrelatedOpen, onRevealed]);
+  }, [reveal, graph, unrelatedOpen, onRevealed, onUnrelatedOpen]);
 
   // A gap the card could not go into stays marked for a while after the drag.
   useEffect(() => {
