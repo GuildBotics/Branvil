@@ -1,9 +1,11 @@
 // Pure layout logic of the relations graph (unit tested).
 
-import { ticketRef, type Card } from "../../api/types";
+import { ticketRef, type Card, type Lane } from "../../api/types";
 
-// Cards are identified by their ticketRef and arrive in board order (lane order, then rank);
-// that order is kept inside a column, among children, and in `unrelated`.
+// Cards are identified by their ticketRef and arrive in board order (lane order, then rank).
+// The figure puts the lanes that matter most first and keeps the board's order
+// within a lane: inside a column, among children, and in `unrelated`.
+const PRIORITY: readonly Lane[] = ["in_progress", "ready", "new", "done"];
 
 export interface GraphNode {
   card: Card;
@@ -35,7 +37,8 @@ export interface Graph {
   unrelated: Card[];
 }
 
-export function buildGraph(cards: Card[], options: { includeClosed: boolean; open: ReadonlySet<string> }): Graph {
+export function buildGraph(board: Card[], options: { includeClosed: boolean; open: ReadonlySet<string> }): Graph {
+  const cards = board.toSorted((a, b) => PRIORITY.indexOf(a.lane) - PRIORITY.indexOf(b.lane));
   const loaded = new Map(cards.map((c) => [ticketRef(c), c]));
   // A closed ticket with an open descendant stays shown.
   const kept = new Set<string>();

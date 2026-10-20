@@ -62,7 +62,7 @@ describe("ticket view", () => {
     // Within its repository a ticket reads #1; the way back is the board.
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("#1 Title of 1");
     // (The sidebar's Board link is the other one.)
-    expect(screen.getAllByRole("link", { name: "Board" }).map((a) => a.getAttribute("href"))).toEqual(["/acme", "/acme"]);
+    expect(screen.getAllByRole("link", { name: "Task board" }).map((a) => a.getAttribute("href"))).toEqual(["/acme", "/acme"]);
 
     await user.click(screen.getByRole("button", { name: "Assignee: aiko — click to change" }));
     // Runners take no tickets.

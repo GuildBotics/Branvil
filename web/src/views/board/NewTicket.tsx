@@ -4,12 +4,22 @@
 import { Anchor, Button, Chip, Group, Modal, Select, Stack, Text, Textarea, TextInput, UnstyledButton } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import * as api from "../../api/endpoints";
 import { ticketRef, type Lane, type Repository, type Ticket } from "../../api/types";
 import { ErrorMessage, Notice } from "../../components/common";
 import { useT } from "../../i18n";
+import { useRepos } from "../../query/hooks";
 import { keys } from "../../query/keys";
+import { useStored } from "../../storage";
+
+/** The workspace's repositories, and the one new tickets go to by default: the last one chosen in this workspace. */
+export function useTicketRepos(workspace: string) {
+  const query = useRepos();
+  const repos = useMemo(() => (query.data?.items ?? []).filter((r) => r.path.startsWith(`${workspace}/`)), [query.data, workspace]);
+  const [chosen, choose] = useStored(`branvil.repo.${workspace}`);
+  return { query, repos, repo: repos.find((r) => r.path === chosen)?.path ?? repos[0]?.path ?? "", chooseRepo: choose };
+}
 
 interface Draft {
   repo: string;
@@ -148,6 +158,8 @@ export function NewTicketModal({
   repo,
   onRepo,
   onClose,
+  note,
+  onCreated,
 }: {
   workspace: string;
   lanes: Lane[];
@@ -157,6 +169,9 @@ export function NewTicketModal({
   repo: string;
   onRepo: (repo: string) => void;
   onClose: () => void;
+  /** What the new ticket is made as, said above the form. */
+  note?: ReactNode;
+  onCreated?: (ticket: Ticket) => void;
 }) {
   const t = useT();
   const [lane, setLane] = useState<Lane | null>(null);
@@ -164,7 +179,10 @@ export function NewTicketModal({
   const current = draft ?? { title: start?.title ?? "", body: "", labels: [] };
   const chosenLane = lane ?? start?.lane ?? lanes[0] ?? "new";
   const repository = repos.find((r) => r.path === repo);
-  const create = useCreate(workspace, () => close());
+  const create = useCreate(workspace, (ticket) => {
+    onCreated?.(ticket);
+    close();
+  });
   function close() {
     setLane(null);
     setDraft(null);
@@ -188,6 +206,7 @@ export function NewTicketModal({
         }}
       >
         <Stack gap="md">
+          {note && <Text size="sm">{note}</Text>}
           <Group grow align="flex-start">
             {repos.length > 1 && <RepoChoice repos={repos} value={repo} onChange={(r) => {
               onRepo(r);

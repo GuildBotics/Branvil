@@ -8,11 +8,11 @@ import { PageHeader } from "../components/PageHeader";
 import { useStored } from "../storage";
 import type { Person } from "../components/PeoplePicker";
 import { useT } from "../i18n";
-import { useBoard, useCards, useMembers, useRepos } from "../query/hooks";
+import { useBoard, useCards, useMembers } from "../query/hooks";
 import { keys } from "../query/keys";
 import { CardFilters } from "./board/CardFilters";
 import { BoardCard, ciUrlsOf, moveRefusal, type Notice } from "./board/CardView";
-import { LaneAdd, NewTicketModal } from "./board/NewTicket";
+import { LaneAdd, NewTicketModal, useTicketRepos } from "./board/NewTicket";
 import {
   applyMove,
   groupByLane,
@@ -29,18 +29,12 @@ interface MoveVars {
   index: number;
 }
 
-/** The repository new tickets go to by default: the last one chosen in this workspace. */
-function useLastRepo(workspace: string, paths: string[]): [string, (repo: string) => void] {
-  const [chosen, choose] = useStored(`branvil.repo.${workspace}`);
-  return [paths.find((p) => p === chosen) ?? paths[0] ?? "", choose];
-}
-
 /** A workspace's page: its board. */
 export function BoardView({ workspace }: { workspace: string }) {
   const t = useT();
   const client = useQueryClient();
   const boardQuery = useBoard(workspace);
-  const repos = useRepos();
+  const { query: repos, repos: wsRepos, repo, chooseRepo } = useTicketRepos(workspace);
   const members = useMembers();
   const [closedShown, showClosed] = useStored("branvil.board.includeClosed");
   const includeClosed = closedShown === "true";
@@ -55,11 +49,6 @@ export function BoardView({ workspace }: { workspace: string }) {
 
   const lanes = useMemo(() => boardQuery.data?.lanes ?? [], [boardQuery.data]);
   const cards = useMemo(() => cardsQuery.data?.items ?? [], [cardsQuery.data]);
-  const wsRepos = useMemo(() => (repos.data?.items ?? []).filter((r) => r.path.startsWith(`${workspace}/`)), [repos.data, workspace]);
-  const [repo, chooseRepo] = useLastRepo(
-    workspace,
-    wsRepos.map((r) => r.path),
-  );
   // Who can take a ticket: the owner and the agents.
   const people = useMemo<Person[]>(
     () => (members.data?.items ?? []).filter((m) => m.kind !== "runner").map((m) => ({ name: m.name, kind: m.kind })),
