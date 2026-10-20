@@ -2,7 +2,7 @@
 // pages, and the display language at the bottom.
 
 import { Select, Stack, Text } from "@mantine/core";
-import { GitPullRequest, Settings, SquareKanban } from "lucide-react";
+import { GitPullRequest, Network, Settings, SquareKanban } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useI18n, type Language } from "../i18n";
 import { Link, navigate } from "../router/Router";
@@ -11,13 +11,15 @@ import { NewWorkspaceModal } from "./NewWorkspace";
 
 const NEW_WORKSPACE = "\u0000new";
 
-type Page = "board" | "pulls" | "settings" | null;
+type Page = "board" | "relations" | "pulls" | "settings" | null;
 
 function pageOf(route: Route): Page {
   switch (route.name) {
     case "workspace":
     case "ticket":
       return "board";
+    case "relations":
+      return "relations";
     case "pulls":
     case "repo":
     case "pull":
@@ -59,7 +61,9 @@ export function Sidebar({
     }
     if (!name || name === workspace) return;
     // Stay on the same kind of page in the other workspace.
-    navigate(page === "pulls" ? href.pulls(name) : page === "settings" ? href.settings() : href.workspace(name));
+    navigate(
+      page === "pulls" ? href.pulls(name) : page === "relations" ? href.relations(name) : page === "settings" ? href.settings() : href.workspace(name),
+    );
   };
   return (
     <aside className="sidebar">
@@ -84,6 +88,9 @@ export function Sidebar({
           <>
             <NavItem to={href.workspace(workspace)} active={page === "board"} icon={<SquareKanban size={18} />}>
               {t("nav.board")}
+            </NavItem>
+            <NavItem to={href.relations(workspace)} active={page === "relations"} icon={<Network size={18} />}>
+              {t("nav.relations")}
             </NavItem>
             <NavItem to={href.pulls(workspace)} active={page === "pulls"} icon={<GitPullRequest size={18} />}>
               {t("nav.pulls")}

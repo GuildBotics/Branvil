@@ -428,9 +428,14 @@ The GUI is built with Mantine and looks like GuildBotics Desktop: the same
 Mantine version and theme (`web/src/theme.ts`), and GuildBotics' design tokens
 and component overrides copied into `web/src/styles.css` (kept identical), so
 it can sit beside or inside Desktop. Its pages: a sidebar (the workspace, its
-board and pull requests, settings), the board (lanes as tall as the window, a
+board, relations and pull requests, settings), the board (lanes as tall as the window, a
 ticket added at the foot of a lane, a card marked when a blocker is open and
-counting its closed children), a ticket (body and comments, its lane, labels,
+counting its closed children, its lane and assignee changed from the card),
+the relations (the board's cards laid out left to right by their blockers,
+children inside their parent once it is opened, lines drawn in SVG over a CSS
+layout; dragging a card onto another makes it a child, a line drawn from a
+card's handle makes the other card wait for it, each change with an undo;
+`web/src/views/relations/`), a ticket (body and comments, its lane, labels,
 upstream issue, relations to other tickets, and assignee), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
 settings (the shown workspace with its repositories, and Branvil's members).

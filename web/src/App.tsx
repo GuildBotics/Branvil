@@ -20,6 +20,7 @@ import { EnterView, GuidanceView } from "./views/EnterView";
 import { JobView } from "./views/JobView";
 import { PullsView } from "./views/PullsView";
 import { PullView } from "./views/PullView";
+import { RelationsView } from "./views/RelationsView";
 import { SettingsView } from "./views/SettingsView";
 import { TicketView } from "./views/TicketView";
 import { useCurrentWorkspace } from "./workspace";
@@ -86,6 +87,8 @@ function RouteView({ route, workspace, workspaces }: { route: AppRoute; workspac
       return <BoardView key={route.workspace} workspace={route.workspace} />;
     case "pulls":
       return <PullsView key={route.workspace} workspace={route.workspace} repo={null} />;
+    case "relations":
+      return <RelationsView key={route.workspace} workspace={route.workspace} />;
     case "repo":
       return <PullsView key={route.repo} workspace={route.repo.split("/")[0] as string} repo={route.repo} />;
     case "ticket":

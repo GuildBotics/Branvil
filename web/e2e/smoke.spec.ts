@@ -94,10 +94,12 @@ test("adds a ticket to a lane, drags it, moves it with its menu, and assigns and
   await fromCardMenu(page, new RegExp(`^(Actions of ${ref}|${ref} の操作)$`), /^(Ready|着手可)$/);
   await expect(lane(page, /^(Ready|着手可)/).getByText(title)).toBeVisible();
 
-  await fromCardMenu(page, new RegExp(`^(Actions of ${ref}|${ref} の操作)$`), new RegExp(`^${env.member}$`));
+  // The assignee is changed by pressing it.
+  const assignee = new RegExp(`^(Assignee of ${ref}: |${ref} の担当者: )`);
+  await fromCardMenu(page, assignee, new RegExp(`^${env.member}$`));
   await expect(card.locator(".assignee")).toHaveText(env.member as string);
   // One assignee: "No one" clears it.
-  await fromCardMenu(page, new RegExp(`^(Actions of ${ref}|${ref} の操作)$`), /^(No one|担当なし)$/);
+  await fromCardMenu(page, assignee, /^(No one|担当なし)$/);
   await expect(card.locator(".assignee")).toHaveCount(0);
 
   // A fresh load shows the server's state, not the optimistic one.
