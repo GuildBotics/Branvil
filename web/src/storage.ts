@@ -2,7 +2,7 @@
 // repository, the board's filter). A browser without storage still works; it
 // just does not remember.
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 export function readStored(key: string): string | null {
   try {
@@ -20,14 +20,15 @@ export function writeStored(key: string, value: string): void {
   }
 }
 
-/** A value kept in this browser under `key`, and the setter that keeps it. */
+/** A value kept in this browser under `key`, and the setter that keeps it (stable while `key` is). */
 export function useStored(key: string): [string | null, (value: string) => void] {
   const [value, setValue] = useState(() => readStored(key));
-  return [
-    value,
-    (next) => {
+  const keep = useCallback(
+    (next: string) => {
       setValue(next);
       writeStored(key, next);
     },
-  ];
+    [key],
+  );
+  return [value, keep];
 }

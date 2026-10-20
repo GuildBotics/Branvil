@@ -123,8 +123,8 @@ export const useTicketPulls = (repo: string, key: string) =>
 export const useBoard = (workspace: string) =>
   useQuery({ queryKey: keys.board(workspace), queryFn: () => api.workspaces.get(workspace) });
 
-export const useCards = (workspace: string, state: "open" | "all") =>
-  useQuery({ queryKey: keys.cards(workspace, state), queryFn: () => api.workspaces.cards(workspace, state) });
+export const useCards = (workspace: string, state: "open" | "all", enabled = true) =>
+  useQuery({ queryKey: keys.cards(workspace, state), queryFn: () => api.workspaces.cards(workspace, state), enabled });
 
 export const usePull = (repo: string, number: number) =>
   useQuery({ queryKey: keys.pull(repo, number), queryFn: () => api.pulls.get(repo, number) });

@@ -123,15 +123,15 @@ describe("kanban board", () => {
     expect(["1", "2", "3"].map(renders.of)).toEqual([0, 0, 0]);
   });
 
-  it("mounts a card's menu only once asked for, and assigns from it", async () => {
+  it("mounts a card's assignee menu only once asked for, and assigns from it", async () => {
     const fake = fakeApi(boardRoutes({ "PUT /api/v1/repos/acme/web/tickets/2/assignee": json(200, {}) }));
     const user = userEvent.setup();
     renderApp("/acme");
     await screen.findByText("Title of 2");
     expect(screen.queryAllByRole("menu")).toHaveLength(0);
 
-    // The menu offers the owner and agents, not runners.
-    await user.click(screen.getByRole("button", { name: "Actions of acme/web#2" }));
+    // The assignee offers the owner and agents, not runners.
+    await user.click(screen.getByRole("button", { name: "Assignee of acme/web#2: Unassigned — click to change" }));
     expect(await screen.findByRole("menuitem", { name: "owner" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "ci" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("menuitem", { name: "aiko" }));
@@ -140,16 +140,27 @@ describe("kanban board", () => {
     expect(fake.calls("PUT", "/api/v1/repos/acme/web/tickets/2/assignee")[0]?.body).toEqual({ name: "aiko" });
   });
 
-  it("shows a card's one assignee and clears it from the menu", async () => {
+  it("shows a card's one assignee and clears it", async () => {
     const fake = fakeApi(boardRoutes({ "DELETE /api/v1/repos/acme/demo/tickets/1/assignee": json(200, {}) }));
     const user = userEvent.setup();
     renderApp("/acme");
     const card1 = await screen.findByRole("article", { name: "acme/demo#1 Title of 1" });
     expect(within(card1).getAllByText("aiko", { selector: ".assignee" })).toHaveLength(1);
 
-    await pickFromMenu(user, "Actions of acme/demo#1", "No one");
+    await pickFromMenu(user, "Assignee of acme/demo#1: aiko — click to change", "No one");
 
     await waitFor(() => expect(fake.calls("DELETE", "/api/v1/repos/acme/demo/tickets/1/assignee")).toHaveLength(1));
+  });
+
+  it("offers a card's lanes and its place in the lane in its menu, not its assignee", async () => {
+    fakeApi(boardRoutes());
+    const user = userEvent.setup();
+    renderApp("/acme");
+    await screen.findByText("Title of 1");
+
+    await user.click(screen.getByRole("button", { name: "Actions of acme/demo#1" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual(["New", "Ready", "In progress", "Done", "Up", "Down"]);
   });
 
   it("moves a card to another lane from its menu (no drag needed)", async () => {

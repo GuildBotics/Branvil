@@ -1,8 +1,6 @@
-import { Badge, Checkbox, Select, Text, TextInput } from "@mantine/core";
+import { Badge, Text } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Search } from "lucide-react";
 import { useCallback, useMemo, useState, type DragEvent } from "react";
-import { isApiError } from "../api/client";
 import * as api from "../api/endpoints";
 import { ticketRef, type Card, type Lane } from "../api/types";
 import { ErrorMessage, Loading, Refusal } from "../components/common";
@@ -12,10 +10,9 @@ import type { Person } from "../components/PeoplePicker";
 import { useT } from "../i18n";
 import { useBoard, useCards, useMembers, useRepos } from "../query/hooks";
 import { keys } from "../query/keys";
-import { routeOfUrl } from "../router/routes";
-import { CardView } from "./board/CardView";
+import { CardFilters } from "./board/CardFilters";
+import { BoardCard, ciUrlsOf, moveRefusal, type Notice } from "./board/CardView";
 import { LaneAdd, NewTicketModal } from "./board/NewTicket";
-import { relationRefusal } from "./ticket/Relations";
 import {
   applyMove,
   groupByLane,
@@ -26,20 +23,11 @@ import {
   type CardFilter,
 } from "./board/ordering";
 
-/** The most pull requests whose checks the board loads (one request each). */
-const CI_BUDGET = 30;
-
-/** Select values for "any" and "nobody" in the filters (Mantine needs a value). */
-const ANY = "*";
-const NOBODY = "-";
-
 interface MoveVars {
   card: Card;
   lane: Lane;
   index: number;
 }
-
-type Notice = { tone: "error" | "info"; text: string } | null;
 
 /** The repository new tickets go to by default: the last one chosen in this workspace. */
 function useLastRepo(workspace: string, paths: string[]): [string, (repo: string) => void] {
@@ -61,7 +49,7 @@ export function BoardView({ workspace }: { workspace: string }) {
   const [filter, setFilter] = useState<CardFilter>({ assignee: "", label: "", text: "" });
   const [dragging, setDragging] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ lane: Lane; raw: number } | null>(null);
-  const [notice, setNotice] = useState<Notice>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [modal, setModal] = useState<{ lane: Lane; title: string } | null>(null);
   const cardsKey = keys.cards(workspace, state);
 
@@ -94,9 +82,7 @@ export function BoardView({ workspace }: { workspace: string }) {
     },
     onError: (err, { card }, context) => {
       if (context?.previous) client.setQueryData(cardsKey, context.previous);
-      // A neighbour card that moved meanwhile is answered with 404: also a concurrent change.
-      if (isApiError(err, "conflict") || isApiError(err, "not_found")) setNotice({ tone: "info", text: t("board.moveConflict", { key: ticketRef(card) }) });
-      else setNotice({ tone: "error", text: t("board.moveFailed", { key: ticketRef(card), message: relationRefusal(err, t) ?? (err as Error).message }) });
+      setNotice(moveRefusal(err, card, t));
     },
     onSuccess: (_data, { card, lane }) => setNotice({ tone: "info", text: t("board.moved", { key: ticketRef(card), lane: t(`lane.${lane}`) }) }),
     onSettled: () => void client.invalidateQueries({ queryKey: keys.board(workspace) }),
@@ -115,27 +101,15 @@ export function BoardView({ workspace }: { workspace: string }) {
   );
 
   const groups = useMemo(() => groupByLane(cards, lanes), [cards, lanes]);
-  const assigneeNames = useMemo(
-    () => [...new Set(cards.flatMap((c) => (c.assignee ? [c.assignee.name] : [])).concat(people.map((p) => p.name)))].sort(),
-    [cards, people],
-  );
   // Where each card stands in its lane (filters hide cards but do not move them).
   const positions = useMemo(() => {
     const at = new Map<Card, number>();
     for (const laneCards of groups.values()) laneCards.forEach((c, i) => at.set(c, i));
     return at;
   }, [groups]);
-  const labels = useMemo(() => [...new Set(cards.flatMap((c) => c.labels))].sort(), [cards]);
   const openCount = cards.filter((c) => c.state === "open").length;
 
-  // Checks are loaded for the first CI_BUDGET open pull requests on the board.
-  const ciUrls = useMemo(() => {
-    const urls: string[] = [];
-    for (const c of cards)
-      for (const p of c.pull_requests)
-        if (p.state === "open" && urls.length < CI_BUDGET && routeOfUrl(p.url)?.name === "pull") urls.push(p.url);
-    return new Set(urls);
-  }, [cards]);
+  const ciUrls = useMemo(() => ciUrlsOf(cards), [cards]);
 
   // A drag over the same place again changes nothing (no re-render).
   const aim = (lane: Lane, raw: number) =>
@@ -166,42 +140,21 @@ export function BoardView({ workspace }: { workspace: string }) {
         }
       />
 
-      <form className="board-toolbar" role="search" aria-label={t("board.filters")} onSubmit={(e) => e.preventDefault()}>
-        <TextInput
-          className="board-search"
-          aria-label={t("board.filterText")}
-          placeholder={t("board.filterTextPlaceholder")}
-          leftSection={<Search size={16} />}
-          value={filter.text}
-          onChange={(e) => setFilter({ ...filter, text: e.currentTarget.value })}
-        />
-        <Select
-          aria-label={t("board.filterAssignee")}
-          w={190}
-          value={filter.assignee || ANY}
-          onChange={(v) => setFilter({ ...filter, assignee: !v || v === ANY ? "" : v })}
-          allowDeselect={false}
-          data={[
-            { value: ANY, label: `${t("board.filterAssignee")}: ${t("board.any")}` },
-            ...assigneeNames.map((n) => ({ value: n, label: n })),
-            { group: " ", items: [{ value: NOBODY, label: t("board.unassigned") }] },
-          ]}
-        />
-        <Select
-          aria-label={t("board.filterLabel")}
-          w={180}
-          value={filter.label || ANY}
-          onChange={(v) => setFilter({ ...filter, label: !v || v === ANY ? "" : v })}
-          allowDeselect={false}
-          data={[{ value: ANY, label: `${t("board.filterLabel")}: ${t("board.any")}` }, ...labels.map((l) => ({ value: l, label: l }))]}
-        />
-        <Checkbox label={t("board.includeClosed")} checked={includeClosed} onChange={(e) => showClosed(String(e.currentTarget.checked))} />
-        <Text size="xs" c="dimmed" aria-live="polite" role="status" className="board-status">
-          {move.isPending && t("board.moving")}
-          {dragging && t("board.dragging")}
-          {cardsQuery.isFetching && !cardsQuery.isPending && t("common.refreshing")}
-        </Text>
-      </form>
+      <CardFilters
+        cards={cards}
+        people={people}
+        filter={filter}
+        onFilter={setFilter}
+        includeClosed={includeClosed}
+        onIncludeClosed={(include) => showClosed(String(include))}
+        status={
+          <>
+            {move.isPending && t("board.moving")}
+            {dragging && t("board.dragging")}
+            {cardsQuery.isFetching && !cardsQuery.isPending && t("common.refreshing")}
+          </>
+        }
+      />
       {notice &&
         (notice.tone === "error" ? (
           <Refusal>{notice.text}</Refusal>
@@ -277,7 +230,7 @@ export function BoardView({ workspace }: { workspace: string }) {
                             aim(lane, after ? pos + 1 : pos);
                           }}
                         >
-                          <CardView
+                          <BoardCard
                             card={card}
                             lanes={lanes}
                             position={pos}

@@ -1,16 +1,43 @@
-import { ActionIcon, Badge, Menu, Text } from "@mantine/core";
+import { ActionIcon, Badge, Menu, Text, Tooltip } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Ellipsis, GitPullRequest } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useState, type ReactElement, type ReactNode } from "react";
+import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
 import { ticketRef, type Card, type Lane, type PullSummary } from "../../api/types";
 import { ErrorMessage, MemberAvatar, StateBadge, type Tone } from "../../components/common";
 import { CheckSlot, PeopleItems, type Person } from "../../components/PeoplePicker";
-import { useT } from "../../i18n";
+import { type Translate, useT } from "../../i18n";
 import { useChecks } from "../../query/hooks";
 import { Link, ServiceLink } from "../../router/Router";
 import { href, routeOfUrl } from "../../router/routes";
+import { relationRefusal } from "../ticket/Relations";
 import { rollup, type CiRollup } from "./ordering";
+
+/** The most pull requests whose checks a page of cards loads (one request each). */
+const CI_BUDGET = 30;
+
+/** The pull requests whose checks `cards` load: the first CI_BUDGET open ones that are this Branvil's. */
+export function ciUrlsOf(cards: Card[]): Set<string> {
+  const urls: string[] = [];
+  for (const c of cards)
+    for (const p of c.pull_requests) if (p.state === "open" && urls.length < CI_BUDGET && routeOfUrl(p.url)?.name === "pull") urls.push(p.url);
+  return new Set(urls);
+}
+
+/** A line the page says about a change it made. */
+export interface Notice {
+  tone: "error" | "info";
+  text: string;
+}
+
+/** What the page says when moving `card` to another lane or place failed. */
+export function moveRefusal(err: unknown, card: Card, t: Translate): Notice {
+  const key = ticketRef(card);
+  // A neighbour card that moved meanwhile is answered with 404: also a concurrent change.
+  if (isApiError(err, "conflict") || isApiError(err, "not_found")) return { tone: "info", text: t("board.moveConflict", { key }) };
+  return { tone: "error", text: t("board.moveFailed", { key, message: relationRefusal(err, t) ?? (err as Error).message }) };
+}
 
 const CI_TONE: Record<CiRollup, Tone> = {
   passing: "success",
@@ -43,102 +70,89 @@ function PullBadges({ pull, loadChecks }: { pull: PullSummary; loadChecks: boole
 }
 
 /**
- * The card's menu: its lane, its place in the lane, and its assignee, for
- * whoever cannot or does not drag. Mounted only once asked for: a menu in every
- * card costs a board of 1,700 cards seconds.
+ * A menu built only once its trigger is pressed: a menu in every card costs a
+ * board of 1,700 cards seconds. `trigger` gets the function that opens it.
  */
-function CardMenu({
-  card,
-  lanes,
-  position,
-  laneSize,
-  busy,
-  people,
-  onMove,
-  onAssign,
-}: {
-  card: Card;
-  lanes: Lane[];
-  position: number;
-  laneSize: number;
-  busy: boolean;
-  people: Person[];
-  onMove: (card: Card, lane: Lane, index: number) => void;
-  onAssign: (name: string | null) => void;
-}) {
-  const t = useT();
+export function LazyMenu({ trigger, children }: { trigger: (open: () => void) => ReactElement; children: ReactNode }) {
   const [opened, setOpened] = useState(false);
-  const ref = ticketRef(card);
-  const trigger = (
-    <ActionIcon variant="subtle" color="gray" size="sm" aria-label={t("board.cardMenu", { key: ref })} onClick={() => setOpened(true)} disabled={busy}>
-      <Ellipsis size={16} />
-    </ActionIcon>
-  );
-  if (!opened) return <div className="card-menu">{trigger}</div>;
+  const target = trigger(() => setOpened(true));
+  if (!opened) return target;
   return (
-    <div className="card-menu">
-      <Menu opened onChange={setOpened} position="bottom-end" withinPortal>
-        <Menu.Target>{trigger}</Menu.Target>
-        <Menu.Dropdown>
-          <Menu.Label>{t("ticket.lane")}</Menu.Label>
-          {lanes.map((l) => (
-            <Menu.Item
-              key={l}
-              leftSection={<CheckSlot on={l === card.lane} />}
-              onClick={() => l !== card.lane && onMove(card, l, Number.MAX_SAFE_INTEGER)}
-            >
-              {t(`lane.${l}`)}
-            </Menu.Item>
-          ))}
-          <Menu.Divider />
-          <Menu.Item
-            leftSection={<ArrowUp size={14} />}
-            aria-label={t("board.moveUp", { key: ref })}
-            disabled={position <= 0}
-            onClick={() => onMove(card, card.lane, position - 1)}
-          >
-            {t("board.up")}
-          </Menu.Item>
-          <Menu.Item
-            leftSection={<ArrowDown size={14} />}
-            aria-label={t("board.moveDown", { key: ref })}
-            disabled={position >= laneSize - 1}
-            onClick={() => onMove(card, card.lane, position + 1)}
-          >
-            {t("board.down")}
-          </Menu.Item>
-          <Menu.Divider />
-          <Menu.Label>{t("ticket.assignee")}</Menu.Label>
-          <PeopleItems current={card.assignee?.name ?? null} people={people} onChoose={(name) => name !== (card.assignee?.name ?? null) && onAssign(name)} />
-        </Menu.Dropdown>
-      </Menu>
-    </div>
+    <Menu opened onChange={setOpened} position="bottom-end" withinPortal>
+      <Menu.Target>{target}</Menu.Target>
+      <Menu.Dropdown>{children}</Menu.Dropdown>
+    </Menu>
+  );
+}
+
+/** Menu items choosing a lane; choosing the current one does nothing. */
+export function LaneItems({ lanes, current, onChoose }: { lanes: Lane[]; current: Lane; onChoose: (lane: Lane) => void }) {
+  const t = useT();
+  return lanes.map((l) => (
+    <Menu.Item key={l} leftSection={<CheckSlot on={l === current} />} onClick={() => l !== current && onChoose(l)}>
+      {t(`lane.${l}`)}
+    </Menu.Item>
+  ));
+}
+
+/** A card's lane, pressed to move the card to another one. */
+export function LaneButton({ card, lanes, onLane, disabled }: { card: Card; lanes: Lane[]; onLane: (card: Card, lane: Lane) => void; disabled?: boolean }) {
+  const t = useT();
+  const lane = t(`lane.${card.lane}`);
+  return (
+    <LazyMenu
+      trigger={(open) => (
+        <button type="button" className="card-control" aria-label={t("relations.lane", { key: ticketRef(card), lane })} onClick={open} disabled={disabled}>
+          {lane}
+        </button>
+      )}
+    >
+      <LaneItems lanes={lanes} current={card.lane} onChoose={(l) => onLane(card, l)} />
+    </LazyMenu>
+  );
+}
+
+const childrenText = (card: Card, t: Translate) =>
+  t("board.children", { closed: card.children.filter((c) => c.state === "closed").length, total: card.children.length });
+
+/** Opens or closes a card's children; `onToggle` gets the card's reference. */
+export function ChildrenToggle({ card, open, onToggle }: { card: Card; open: boolean; onToggle: (ref: string) => void }) {
+  const t = useT();
+  const label = t(open ? "relations.closeChildren" : "relations.openChildren");
+  return (
+    <Tooltip label={label}>
+      <button type="button" className="card-control" aria-label={label} aria-expanded={open} onClick={() => onToggle(ticketRef(card))}>
+        {open ? "▼" : "▶"}
+      </button>
+    </Tooltip>
   );
 }
 
 /**
- * One card. Memoised: the board passes stable props, so a change elsewhere on
- * the board (a drag position, another card, a filter) does not re-render it.
+ * One card: its key, state, title, labels, pull requests, and its assignee,
+ * pressed to change. `lead` comes before the key (the toggle of a parent's
+ * children), `lane` follows it, and `children` are laid over the card (its
+ * menu).
  */
-export const CardView = memo(function CardView({
+export function CardView({
   card,
-  lanes,
-  position,
-  laneSize,
-  busy,
-  loadChecks,
   people,
-  onMove,
+  loadChecks,
+  busy,
+  className,
+  lane,
+  lead,
+  children,
 }: {
   card: Card;
-  lanes: Lane[];
-  position: number;
-  laneSize: number;
-  busy: boolean;
+  people: Person[];
   /** URLs of the pull requests whose checks this card loads. */
   loadChecks: Set<string>;
-  people: Person[];
-  onMove: (card: Card, lane: Lane, index: number) => void;
+  busy: boolean;
+  className?: string;
+  lane?: ReactNode;
+  lead?: ReactNode;
+  children?: ReactNode;
 }) {
   const t = useT();
   const client = useQueryClient();
@@ -147,20 +161,22 @@ export const CardView = memo(function CardView({
     mutationFn: (name: string | null) => (name ? api.tickets.assign(card.repository, card.key, name) : api.tickets.unassign(card.repository, card.key)),
     onSettled: () => void client.invalidateQueries({ queryKey: ["board"] }),
   });
-  const assignee = card.assignee?.name;
+  const assignee = card.assignee?.name ?? null;
   const kind = people.find((p) => p.name === assignee)?.kind;
 
   return (
-    <article className={`card${busy ? " busy" : ""}`} aria-busy={busy} aria-label={`${ref} ${card.title}`}>
+    <article className={["card", busy && "busy", className].filter(Boolean).join(" ")} aria-busy={busy} aria-label={`${ref} ${card.title}`}>
       <div className="card-row">
+        {lead}
         <Link to={href.ticket(card.repository, card.key)} className="key">
           {ref}
         </Link>
+        {lane}
         {card.state === "closed" && <StateBadge>{t("ticket.closed")}</StateBadge>}
         {card.state === "open" && card.blocked_by.some((b) => b.state === "open") && <StateBadge tone="warning">{t("board.blocked")}</StateBadge>}
         {card.children.length > 0 && (
           <Text span size="xs" c="dimmed">
-            {t("board.children", { closed: card.children.filter((c) => c.state === "closed").length, total: card.children.length })}
+            {childrenText(card, t)}
           </Text>
         )}
         {busy && (
@@ -184,16 +200,28 @@ export const CardView = memo(function CardView({
             ))}
           </ul>
         )}
-        <span className="card-who">
-          {assignee ? (
-            <>
-              <MemberAvatar name={assignee} kind={kind} size={20} />
-              <span className="assignee">{assignee}</span>
-            </>
-          ) : (
-            t("board.unassigned")
+        <LazyMenu
+          trigger={(open) => (
+            <button
+              type="button"
+              className="card-control card-who"
+              aria-label={t("board.assignee", { key: ref, name: assignee ?? t("board.unassigned") })}
+              onClick={open}
+              disabled={busy}
+            >
+              {assignee ? (
+                <>
+                  <MemberAvatar name={assignee} kind={kind} size={20} />
+                  <span className="assignee">{assignee}</span>
+                </>
+              ) : (
+                t("board.unassigned")
+              )}
+            </button>
           )}
-        </span>
+        >
+          <PeopleItems current={assignee} people={people} onChoose={(name) => name !== assignee && assign.mutate(name)} />
+        </LazyMenu>
       </div>
       {card.pull_requests.length > 0 && (
         <ul className="card-row" aria-label={t("ticket.linkedPulls")} style={{ listStyle: "none", margin: 0, padding: 0 }}>
@@ -203,16 +231,89 @@ export const CardView = memo(function CardView({
         </ul>
       )}
       {assign.isError && <ErrorMessage error={assign.error} />}
-      <CardMenu
-        card={card}
-        lanes={lanes}
-        position={position}
-        laneSize={laneSize}
-        busy={busy}
-        people={people}
-        onMove={onMove}
-        onAssign={(name) => assign.mutate(name)}
-      />
+      {children}
     </article>
+  );
+}
+
+/** The board's menu of a card: its lane and its place in the lane, for whoever cannot or does not drag. */
+function CardMenu({
+  card,
+  lanes,
+  position,
+  laneSize,
+  busy,
+  onMove,
+}: {
+  card: Card;
+  lanes: Lane[];
+  position: number;
+  laneSize: number;
+  busy: boolean;
+  onMove: (card: Card, lane: Lane, index: number) => void;
+}) {
+  const t = useT();
+  const ref = ticketRef(card);
+  return (
+    <div className="card-menu">
+      <LazyMenu
+        trigger={(open) => (
+          <ActionIcon variant="subtle" color="gray" size="sm" aria-label={t("board.cardMenu", { key: ref })} onClick={open} disabled={busy}>
+            <Ellipsis size={16} />
+          </ActionIcon>
+        )}
+      >
+        <Menu.Label>{t("ticket.lane")}</Menu.Label>
+        <LaneItems lanes={lanes} current={card.lane} onChoose={(l) => onMove(card, l, Number.MAX_SAFE_INTEGER)} />
+        <Menu.Divider />
+        <Menu.Item
+          leftSection={<ArrowUp size={14} />}
+          aria-label={t("board.moveUp", { key: ref })}
+          disabled={position <= 0}
+          onClick={() => onMove(card, card.lane, position - 1)}
+        >
+          {t("board.up")}
+        </Menu.Item>
+        <Menu.Item
+          leftSection={<ArrowDown size={14} />}
+          aria-label={t("board.moveDown", { key: ref })}
+          disabled={position >= laneSize - 1}
+          onClick={() => onMove(card, card.lane, position + 1)}
+        >
+          {t("board.down")}
+        </Menu.Item>
+      </LazyMenu>
+    </div>
+  );
+}
+
+/**
+ * A card on the board, with its menu. Memoised: the board passes stable props,
+ * so a change elsewhere on the board (a drag position, another card, a filter)
+ * does not re-render it.
+ */
+export const BoardCard = memo(function BoardCard({
+  card,
+  lanes,
+  position,
+  laneSize,
+  busy,
+  loadChecks,
+  people,
+  onMove,
+}: {
+  card: Card;
+  lanes: Lane[];
+  position: number;
+  laneSize: number;
+  busy: boolean;
+  loadChecks: Set<string>;
+  people: Person[];
+  onMove: (card: Card, lane: Lane, index: number) => void;
+}) {
+  return (
+    <CardView card={card} people={people} loadChecks={loadChecks} busy={busy}>
+      <CardMenu card={card} lanes={lanes} position={position} laneSize={laneSize} busy={busy} onMove={onMove} />
+    </CardView>
   );
 });
