@@ -467,11 +467,15 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
     }
     let problems = check(&layout, &manifest)?;
     if problems.is_empty() {
-        println!(
-            "restored into {}; `branvil serve --data-dir {}` starts it",
-            data_dir.display(),
-            data_dir.display()
-        );
+        let next = if store::needs_check(&layout.db())? {
+            store::check_step(&layout.db())
+        } else {
+            format!(
+                "`branvil serve --data-dir {}` starts it",
+                data_dir.display()
+            )
+        };
+        println!("restored into {}; {next}", data_dir.display());
         Ok(0)
     } else {
         for p in &problems {

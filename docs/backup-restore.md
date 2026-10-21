@@ -104,12 +104,14 @@ the restored service when its lease runs out (`docs/ci.md`).
    against the records) plus a Git directory for every repository record, and
    exits `1` when one fails.
 
-The restored directory starts like any other with `branvil serve`; at startup
-it re-applies Branvil's Git configuration and hooks, finishes or drops pending
-journal entries, and records refs the database had not seen. Because a backup
-has no `secrets/owner.token`, the first start also writes a new owner token
-into the restored data directory, revokes the backed-up one, and starts with no
-GUI sessions; enter the GUI again with `branvil open`.
+The restored directory starts like any other with `branvil serve` (after a
+passing `branvil admin check` when the restore upgraded it; its last line says
+which); at startup it re-applies Branvil's Git configuration and hooks,
+finishes or drops pending journal entries, and records refs the database had
+not seen. Because a backup has no `secrets/owner.token`, the first start also
+writes a new owner token into the restored data directory, revokes the
+backed-up one, and starts with no GUI sessions; enter the GUI again with
+`branvil open`.
 
 Restoring over the original: stop the original service, restore into a new
 directory, and start the restored one with the same `listen` and `base_url`
@@ -164,7 +166,8 @@ branvil serve --data-dir /srv/branvil
 4. applies the upgrade and the new version in one write transaction, so a
    failure leaves the database at the previous version; the same transaction
    marks the database as upgraded and not yet checked (`meta["unchecked"]`);
-5. prints what it changed and where the copy is.
+5. prints what it changed, where the copy is, and that `branvil admin check`
+   has to pass before `branvil serve` starts it.
 
 While the database is marked, `branvil serve` refuses it; a passing
 `branvil admin check` removes the mark. So whatever cut an upgrade off from

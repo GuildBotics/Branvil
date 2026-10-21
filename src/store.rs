@@ -723,13 +723,23 @@ pub fn upgrade_report(db: &Path, done: &Option<Upgraded>) -> String {
             db.display()
         ),
         Some(u) => format!(
-            "upgraded {} from schema version {} to {SCHEMA_VERSION}: {}\nthe database as it was: {}",
+            "upgraded {} from schema version {} to {SCHEMA_VERSION}: {}\nthe database as it was: {}\n{}",
             db.display(),
             u.from,
             u.summary,
-            u.copy.display()
+            u.copy.display(),
+            check_step(db)
         ),
     }
+}
+
+/// The next step for the upgraded database `db`: it is marked until
+/// `branvil admin check` passes, and `branvil serve` refuses it till then.
+pub fn check_step(db: &Path) -> String {
+    let dir = db.parent().unwrap_or(Path::new(".")).display();
+    format!(
+        "`branvil admin check --data-dir {dir}` has to pass before `branvil serve --data-dir {dir}` starts it"
+    )
 }
 
 /// What an upgrade did.

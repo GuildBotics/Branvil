@@ -1297,6 +1297,11 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
         data.join("branvil-schema-10-").display()
     );
     assert!(text.contains(&copy), "{text}");
+    let next = format!(
+        "\n`branvil admin check --data-dir {0}` has to pass before `branvil serve --data-dir {0}` starts it",
+        data.display()
+    );
+    assert!(text.contains(&next), "{text}");
     assert!(
         code == 3 && text.contains(
             "2 open ticket(s) off the board went to the end of new and 1 closed one(s) to the end of done"
