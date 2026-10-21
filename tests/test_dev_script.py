@@ -1081,6 +1081,34 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(self.admins("check"), [self.binary(new)])
         self.assertEqual(self.steps()[-3:], ["admin upgrade", "admin check", "serve"])
 
+    def test_a_check_cut_off_after_an_upgrade_outside_an_update_runs_at_the_next_start(self):
+        # The first start upgrades a database of the version before, and is
+        # cut off before its check: no builds/update records anything.
+        (self.data / "branvil.redb").write_text("10", encoding="utf-8")
+        hold = self.root / "hold"
+        hold.touch()
+        self.control(DEV_TEST_HOLD_UPGRADED=str(hold))
+        proc, _ = self.watch("--interval", "3600", running=False)
+        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
+        self.kill_watcher(proc)
+        hold.unlink()
+        self.assertEqual(self.database(), "11", "Upgraded before the kill")
+        self.assertFalse((self.builds / "update").exists())
+        # The check that was cut off runs now, and its failure keeps it stopped.
+        self.control(DEV_TEST_CHECK_EXIT="1")
+        proc, _ = self.watch("--interval", "3600", running=False)
+        self.wait_until(lambda: self.current() is None, proc)
+        self.assertEqual(self.admins("check"), [self.binary(self.base)])
+        self.assertEqual(self.serves(), [], "Never served unchecked")
+        [message] = self.notifications()  # told before builds/current goes
+        self.assertIn(f"{self.base} stopped while checking the data directory", message)
+        # Once the cause is fixed, naming the build checks it again first.
+        self.control()
+        (self.builds / "current").write_text(f"{self.base}\n", encoding="utf-8")
+        self.assert_runs(self.base)
+        self.assertEqual(self.admins("check"), [self.binary(self.base)] * 2)
+        self.assertFalse((self.builds / "unchecked").exists())
+
     def test_failed_checks_are_not_installed_nor_read_again(self):
         new = self.merge({
             "checks": [
@@ -1213,7 +1241,7 @@ class ServeScriptTests(ScriptTestCase):
                 # yet switched, or its failure recorded but not concluded.
                 shutil.rmtree(self.builds / "other", ignore_errors=True)
                 shutil.copytree(self.builds / self.base, self.builds / "other")
-                (self.builds / "update").write_text(f"other {self.base} -{failure}\n", encoding="utf-8")
+                (self.builds / "update").write_text(f"other {self.base}{failure}\n", encoding="utf-8")
                 (self.builds / "current").write_text(f"{self.base}\n", encoding="utf-8")
                 self.watch("--interval", "3600")
                 self.assert_runs(runs)

@@ -97,13 +97,12 @@ EOF
   local builds="$repo_root/builds" serve_pid= serve_build= update_pid= build status
   local started=0 quick=0 next_update=$SECONDS slow= message
   # The update being started (builds/update, written by scripts/update.sh):
-  # its new build, the build it replaces, "check" while admin check must run
-  # on the database before it serves (- otherwise), and, once it has failed,
-  # the step that failed.
-  local target previous check failure
+  # its new build, the build it replaces, and, once it has failed, the step
+  # that failed.
+  local target previous failure
   record() {
-    target= previous= check= failure=
-    if [[ -e "$builds/update" ]]; then read -r target previous check failure <"$builds/update"; fi
+    target= previous= failure=
+    if [[ -e "$builds/update" ]]; then read -r target previous failure <"$builds/update"; fi
   }
   # Whether the serve started last has said that it is ready.
   ready() { grep -q '^branvil listening on ' "$builds/serve.out" 2>/dev/null; }
@@ -170,35 +169,40 @@ EOF
     record
     if [[ "$target" == "$1" ]]; then
       failure="$2"
-      put "$builds/update" "$target $previous $check $failure"
+      put "$builds/update" "$target $previous $failure"
       give_up
     else
-      rm -f "$builds/current"
-      quick=0
+      # Told before builds/current goes, so a cut off start is told again
+      # rather than never (the same failure can come back after a fix).
       message="$1 stopped while $2; Branvil is stopped. See \"Upgrading\" in docs/backup-restore.md."
       log "$message"
       notify "$message"
+      rm -f "$builds/current"
+      quick=0
     fi
   }
   # Starts build $1: its admin upgrade, its admin check when the upgrade
-  # changed the database (for an update, recorded before the stop), then
-  # branvil serve.
+  # changed the database, then branvil serve. builds/unchecked is written
+  # before the upgrade can change the database and removed once nothing is
+  # left to check, so the next start checks what a cut off start upgraded.
   start() {
-    local status=0
+    local status=0 unchecked=false
     log "starting $1"
-    record
+    if [[ -e "$builds/unchecked" ]]; then unchecked=true; fi
+    put "$builds/unchecked" "$1"
     client "$1" admin upgrade || status=$?
+    if (( status == 3 )); then unchecked=true; fi
     if (( status != 0 && status != 3 )); then
+      # A failed upgrade leaves the database as it was.
+      "$unchecked" || rm -f "$builds/unchecked"
       failed "$1" "upgrading the data directory"
       return
     fi
-    if (( status == 3 )) || [[ "$target" == "$1" && "$check" == check ]]; then
-      if ! client "$1" admin check; then
-        failed "$1" "checking the data directory"
-        return
-      fi
-      if [[ "$target" == "$1" ]]; then put "$builds/update" "$target $previous -"; fi
+    if "$unchecked" && ! client "$1" admin check; then
+      failed "$1" "checking the data directory"
+      return
     fi
+    rm -f "$builds/unchecked"
     if [[ "$1" != "$serve_build" ]]; then quick=0; fi
     # Its standard output carries the line that says it is ready.
     "$builds/$1/branvil" serve --data-dir "$data_dir" >"$builds/serve.out" &

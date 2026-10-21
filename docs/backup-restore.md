@@ -196,7 +196,8 @@ doing any of them.
 `scripts/serve.sh` is the only process that starts or stops `branvil` and
 runs updates. To start a build it runs that build's `branvil admin upgrade`
 (nothing changes when the database already has its version), then
-`branvil admin check` when the upgrade changed the database, then
+`branvil admin check` when the upgrade changed the database (or a start cut
+off after an upgrade left the check undone: `builds/unchecked`), then
 `branvil serve`, which is ready when it prints `branvil listening on …`; it
 starts the service again when it exits. At its start and every interval,
 while the service is ready, it runs `scripts/update.sh`, which decides
@@ -238,7 +239,8 @@ the disk, and renamed. Write them by hand the same way, for instance
 | --- | --- |
 | `builds/current` | The commit of the build that runs (the checkout's `HEAD` can differ). Missing: Branvil is stopped on purpose. |
 | `builds/<commit>/branvil` | An installed build. |
-| `builds/update` | An update in flight: `<new> <previous> <check> [<failed step>]`. `check` means `admin check` must still run on the database before the new build serves. |
+| `builds/update` | An update in flight: `<new> <previous> [<failed step>]`. |
+| `builds/unchecked` | Written by a start before its upgrade, removed once nothing is left to check: when it is there at a start, that start runs `admin check` before it serves. |
 | `builds/attempted` | The last commit an update gave up on; not tried again until `main` moves on. |
 | `builds/notified` | The last failure notified (so it is notified once). |
 | `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line). |
@@ -259,7 +261,7 @@ once.
 | --- | --- |
 | A step up to the rehearsal fails (a build, the rehearsal's upgrade or check) | The previous build keeps running. A failed fetch, reading of the checks, or backup is tried again in the next round. |
 | The new build's upgrade, check, or start fails | The previous build again, when its own `branvil admin upgrade` finds the database at its version (nothing changed it). Otherwise (the upgrade changed it) nothing: `builds/current` is removed, and the log names the database copy the upgrade kept. |
-| A reboot, power loss, logout, or `launchctl bootout` at any moment | At its next start `scripts/serve.sh` goes on from these files: an update not yet recorded runs again in the next round, a recorded one is switched to and started (with its pending check), and one whose failure was recorded is concluded. |
+| A reboot, power loss, logout, or `launchctl bootout` at any moment | At its next start `scripts/serve.sh` goes on from these files: an update not yet recorded runs again in the next round, a recorded one is switched to and started, and one whose failure was recorded is concluded. A start cut off after its upgrade changed the database checks it at the next start. |
 
 **Operations.** After each, read the files and the log again to see that it
 took effect. Write files as above, never with a plain `>`.
@@ -284,17 +286,18 @@ took effect. Write files as above, never with a plain `>`.
   When an upgrade changed the database, stop Branvil first (remove
   `builds/current`, wait for the log line that the serve exited), put the
   copy the log names in place of `branvil.redb`, then write `builds/current`.
-- Start a build that was stopped after its upgrade, once the cause is fixed:
-  `builds/<commit>/branvil admin check --data-dir <data directory>`; when it
-  reports index problems, `builds/<commit>/branvil admin reindex --data-dir
-  <data directory>` and check again; when it passes, write the commit into
-  `builds/current`.
+- Start a build that was stopped after its upgrade, once the cause is fixed
+  (when `admin check` reported index problems, `builds/<commit>/branvil admin
+  reindex --data-dir <data directory>`): write the commit into
+  `builds/current`. `builds/unchecked` is still there, so the start runs
+  `admin check` again before it serves.
 - Restore from a backup:
   1. remove `builds/current` and wait for the log line that the serve exited;
   2. restore with a build that reads the backup's schema version (the
      manifest's `schema_version`; `branvil restore` takes that version or the
-     one before it): `builds/<commit>/branvil restore --from <backup>
-     --data-dir <new directory>`;
+     one before it, which it upgrades): `builds/<commit>/branvil restore
+     --from <backup> --data-dir <new directory>`, then
+     `builds/<commit>/branvil admin check --data-dir <new directory>`;
   3. move the data directory aside (`mv <data> <data>.before-restore`) and
      the restored one into its place; or keep both and point the agent at the
      new one (`launchctl bootout …`, print the plist again with

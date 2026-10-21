@@ -197,19 +197,14 @@ main() {
   # The running build restores the backup into builds/rehearsal, and the new
   # build upgrades and checks that copy, while the service runs.
   stage="rehearsing the upgrade on a copy of the backup"
-  local status=0 check=-
+  local status=0
   rm -rf -- "$builds/rehearsal"
   ( data_dir="$builds/rehearsal"; client "$previous" restore --from "$backup" )
   ( data_dir="$builds/rehearsal"; client "$target" admin upgrade ) || status=$?
-  if (( status == 3 )); then
-    check=check
-  elif (( status != 0 )); then
-    exit "$status"
-  fi
+  if (( status != 0 && status != 3 )); then exit "$status"; fi
   ( data_dir="$builds/rehearsal"; client "$target" admin check )
-  # The update, which scripts/serve.sh carries out: "check" when the upgrade
-  # changes the database.
-  put "$builds/update" "$target $previous $check"
+  # The update, which scripts/serve.sh carries out.
+  put "$builds/update" "$target $previous"
 }
 
 main "$@"; exit
