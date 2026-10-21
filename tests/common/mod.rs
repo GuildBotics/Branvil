@@ -530,41 +530,14 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Makes the database file `db` (the service stopped) look as schema
-/// version 10 wrote it, with the tickets `off_board` picks off the board: no
-/// lane, no rank, and no card.
-pub fn as_schema_10(db: &Path, off_board: impl Fn(&Value) -> bool) {
-    // A card key ends with the ticket's repository id and number.
-    let mut cards: Vec<Vec<u8>> = Vec::new();
-    edit_records(db, "tickets", |t| {
-        if off_board(t) {
-            let mut card = t["repo"].as_str().unwrap().as_bytes().to_vec();
-            card.extend([0, 1]);
-            card.extend(t["number"].as_u64().unwrap().to_be_bytes());
-            cards.push(card);
-            t["lane"] = Value::Null;
-            t["rank"] = Value::Null;
-        }
+/// version 11 wrote it: no member has reviewers.
+pub fn as_schema_11(db: &Path) {
+    edit_records(db, "members", |m| {
+        assert!(m.as_object_mut().unwrap().remove("reviewers").is_some());
     });
-    let database = redb::Database::open(db).unwrap();
-    let txn = database.begin_write().unwrap();
-    {
-        let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("ix_cards");
-        let mut t = txn.open_table(def).unwrap();
-        let keys: Vec<Vec<u8>> = redb::ReadableTable::iter(&t)
-            .unwrap()
-            .map(|item| item.unwrap().0.value().to_vec())
-            .filter(|k| cards.iter().any(|c| k.ends_with(c)))
-            .collect();
-        assert_eq!(keys.len(), cards.len());
-        for k in keys {
-            t.remove(k.as_slice()).unwrap();
-        }
-    }
-    txn.commit().unwrap();
-    drop(database);
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(10);
+            *v = json!(11);
         }
     });
 }

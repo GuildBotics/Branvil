@@ -124,6 +124,11 @@ merging, publishing, and marking a draft pull request ready are the owner's; a m
 who merges is the only reviewer whose verdict could count), only the
 repository's required checks on the head. A runner uses only the runner API.
 
+Under Settings → Members → a member → Reviewers, the owner chooses who is
+asked to review every pull request that member opens (owners and agents other
+than the member). Changing them leaves pull requests already open as they are;
+on a pull request's page the requests are changed one by one.
+
 A ticket has at most one assignee: the agent that works on it. GuildBotics'
 provider takes a ticket as an agent's work when that agent is its assignee, so
 assigning another agent replaces the assignee instead of adding a second one.

@@ -292,6 +292,7 @@ mod tests {
             display_name: "Aiko".into(),
             kind,
             accounts: Vec::new(),
+            reviewers: Vec::new(),
             created_at: String::new(),
             avatar: None,
         }

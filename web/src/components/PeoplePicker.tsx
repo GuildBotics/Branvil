@@ -1,5 +1,6 @@
 // Choosing people with an avatar menu, as GuildBotics' MemberSelector does:
-// a ticket's one assignee, and a pull request's reviewers with their state.
+// a ticket's one assignee, a pull request's reviewers with their state, and
+// the reviewers a member's pull requests ask.
 
 import { Avatar, Menu, Text, UnstyledButton } from "@mantine/core";
 import { Check, MessageSquare, UserPlus, X } from "lucide-react";
@@ -110,6 +111,83 @@ function stateKey(state: ReviewState): "requested" | "requestedAgain" | "approve
 }
 
 /**
+ * Several people: the avatars of those `shown` (each with its `mark`) and an
+ * empty one open the menu, where choosing a person toggles them (the menu
+ * stays open). `except` is not offered. The menu opens from the trigger's
+ * `position` edge, which stays put as avatars come and go.
+ */
+export function PeopleToggle({
+  people,
+  except,
+  shown,
+  on,
+  mark,
+  note,
+  label,
+  help,
+  onToggle,
+  disabled,
+  position = "bottom-end",
+}: {
+  people: Person[];
+  except: string;
+  shown: string[];
+  on: (name: string) => boolean;
+  mark?: (name: string) => ReactNode;
+  note?: (name: string) => string | null;
+  label: string;
+  help: string;
+  onToggle: (name: string, on: boolean) => void;
+  disabled?: boolean;
+  position?: "bottom-start" | "bottom-end";
+}) {
+  const kindOf = (name: string) => people.find((p) => p.name === name)?.kind;
+  const avatar = (name: string, size: number) => (
+    <span key={name} className="review-mark-anchor">
+      <MemberAvatar name={name} kind={kindOf(name)} size={size} />
+      {mark?.(name)}
+    </span>
+  );
+  return (
+    <Menu position={position} withinPortal closeOnItemClick={false}>
+      <Menu.Target>
+        <UnstyledButton className="people-trigger" aria-label={label} title={label} disabled={disabled}>
+          {shown.map((name) => avatar(name, 28))}
+          <NoOne size={28} />
+        </UnstyledButton>
+      </Menu.Target>
+      <Menu.Dropdown>
+        {people
+          .filter((p) => p.name !== except)
+          .map((p) => {
+            const checked = on(p.name);
+            const text = note?.(p.name);
+            return (
+              <Menu.Item
+                key={p.name}
+                aria-checked={checked}
+                leftSection={<Lead on={checked} avatar={avatar(p.name, 20)} />}
+                rightSection={
+                  text ? (
+                    <Text size="xs" c="dimmed" ml="md">
+                      {text}
+                    </Text>
+                  ) : null
+                }
+                onClick={() => onToggle(p.name, !checked)}
+              >
+                {p.name}
+              </Menu.Item>
+            );
+          })}
+        <Menu.Divider />
+        <Menu.Label>{help}</Menu.Label>
+      </Menu.Dropdown>
+    </Menu>
+  );
+}
+
+/**
  * Reviewers: everyone requested or who reviewed, each avatar marked with their
  * state. The menu requests or withdraws a review (several at once); the author
  * is not offered.
@@ -130,60 +208,27 @@ export function ReviewersPicker({
   const t = useT();
   const text = (s: ReviewState) => t(`people.review.${stateKey(s)}`) + (s.stale && !s.requested ? t("people.review.stale") : "");
   const involved = [...states.entries()].filter(([, s]) => s.requested || s.verdict);
-  const kindOf = (name: string) => people.find((p) => p.name === name)?.kind;
-  const label = t("people.reviewersTrigger", {
-    names: involved.map(([n, s]) => `${n} (${text(s)})`).join(", ") || t("people.nobody"),
-  });
+  const state = (name: string) => states.get(name);
   return (
-    <Menu position="bottom-end" withinPortal closeOnItemClick={false}>
-      <Menu.Target>
-        <UnstyledButton className="people-trigger" aria-label={label} title={label} disabled={disabled}>
-          {involved.map(([name, s]) => (
-            <span key={name} className="review-mark-anchor">
-              <MemberAvatar name={name} kind={kindOf(name)} size={28} />
-              <Mark state={s} />
-            </span>
-          ))}
-          <NoOne size={28} />
-        </UnstyledButton>
-      </Menu.Target>
-      <Menu.Dropdown>
-        {people
-          .filter((p) => p.name !== author)
-          .map((p) => {
-            const s = states.get(p.name);
-            const on = !!s?.requested;
-            return (
-              <Menu.Item
-                key={p.name}
-                aria-checked={on}
-                leftSection={
-                  <Lead
-                    on={on}
-                    avatar={
-                      <span className="review-mark-anchor">
-                        <MemberAvatar name={p.name} kind={p.kind} size={20} />
-                        {s && <Mark state={s} />}
-                      </span>
-                    }
-                  />
-                }
-                rightSection={
-                  s && (s.requested || s.verdict) ? (
-                    <Text size="xs" c="dimmed" ml="md">
-                      {text(s)}
-                    </Text>
-                  ) : null
-                }
-                onClick={() => onToggle(p.name, !on)}
-              >
-                {p.name}
-              </Menu.Item>
-            );
-          })}
-        <Menu.Divider />
-        <Menu.Label>{t("people.reviewersHelp", { author })}</Menu.Label>
-      </Menu.Dropdown>
-    </Menu>
+    <PeopleToggle
+      people={people}
+      except={author}
+      shown={involved.map(([name]) => name)}
+      on={(name) => !!state(name)?.requested}
+      mark={(name) => {
+        const s = state(name);
+        return s && <Mark state={s} />;
+      }}
+      note={(name) => {
+        const s = state(name);
+        return s && (s.requested || s.verdict) ? text(s) : null;
+      }}
+      label={t("people.reviewersTrigger", {
+        names: involved.map(([n, s]) => `${n} (${text(s)})`).join(", ") || t("people.nobody"),
+      })}
+      help={t("people.reviewersHelp", { author })}
+      onToggle={onToggle}
+      disabled={disabled}
+    />
   );
 }

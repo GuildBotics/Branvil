@@ -70,10 +70,10 @@ export const useRepoPulls = (repo: string, state: "open" | "closed" | "all") =>
 
 export const useMembers = () => useQuery({ queryKey: keys.members(), queryFn: () => api.members.list() });
 
-/** Member names for pickers (the assignee, reviewers); empty while loading or on failure. */
-export function useMemberNames(): string[] {
+/** Those pickers offer (an assignee, reviewers): everyone but runners; empty while loading or on failure. */
+export function usePeople(): { name: string; kind: MemberKind }[] {
   const { data } = useMembers();
-  return useMemo(() => (data?.items ?? []).filter((m) => m.kind !== "runner").map((m) => m.name), [data]);
+  return useMemo(() => (data?.items ?? []).filter((m) => m.kind !== "runner").map((m) => ({ name: m.name, kind: m.kind })), [data]);
 }
 
 /** A member's kind by name (avatars color agents); undefined while loading or for a stranger. */

@@ -15,6 +15,8 @@ export interface Member {
   kind: MemberKind;
   /** Accounts on upstream hosts, one per provider (tokens are never returned). */
   accounts: Account[];
+  /** The members asked to review every pull request this member opens. */
+  reviewers: string[];
   /** Where the member's picture is (the address changes with it); null for none. */
   avatar_url?: string | null;
 }

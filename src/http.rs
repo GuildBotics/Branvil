@@ -247,6 +247,26 @@ async fn member_patch(
     Ok(ok(members::update(&app, &c, name, patch).await?))
 }
 
+async fn member_reviewer_put(
+    State(app): State<Shared>,
+    c: Caller,
+    P((name, reviewer)): P<(String, String)>,
+) -> R {
+    Ok(ok(
+        members::set_reviewer(&app, &c, name, reviewer, true).await?
+    ))
+}
+
+async fn member_reviewer_delete(
+    State(app): State<Shared>,
+    c: Caller,
+    P((name, reviewer)): P<(String, String)>,
+) -> R {
+    Ok(ok(
+        members::set_reviewer(&app, &c, name, reviewer, false).await?
+    ))
+}
+
 async fn tokens_create(
     State(app): State<Shared>,
     c: Caller,
@@ -1147,6 +1167,10 @@ pub fn router(app: Shared) -> Router {
         .route(
             "/members/{name}/tokens",
             get(tokens_list).post(tokens_create),
+        )
+        .route(
+            "/members/{name}/reviewers/{reviewer}",
+            put(member_reviewer_put).delete(member_reviewer_delete),
         )
         .route(
             "/members/{name}/tokens/{id}",

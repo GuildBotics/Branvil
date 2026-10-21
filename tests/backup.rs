@@ -69,7 +69,6 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     // it, a review, a conversation comment, an inline thread with a reply,
     // and an upstream read with the owner's account and its token.
     let t = w.ticket("Back me up").await;
-    w.ticket("Off the board").await;
     let one = format!("/repos/{}/tickets/1", encode(REPO));
     let (st, _) = s
         .put(
@@ -261,15 +260,14 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     );
     assert!(text(&out).contains(&serves), "{}", text(&out));
 
-    // A backup of the previous schema version: what version 10 wrote, with
-    // ticket 2 off the board.
+    // A backup of the previous schema version: what version 11 wrote.
     let previous = out_dir.path().join("previous");
     copy_backup(&backup, &previous, &manifest);
     let db = previous.join("branvil.redb");
-    as_schema_10(&db, |t| t["number"] == 2);
+    as_schema_11(&db);
     let bytes = std::fs::read(&db).unwrap();
     let mut old = manifest.clone();
-    old["schema_version"] = json!(10);
+    old["schema_version"] = json!(11);
     for f in old["files"].as_array_mut().unwrap() {
         if f["path"] == "branvil.redb" {
             f["bytes"] = json!(bytes.len());
@@ -303,12 +301,12 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         text(&out)
     );
     assert!(
-        text(&out).contains("from schema version 10 to 11"),
+        text(&out).contains("from schema version 11 to 12"),
         "{}",
         text(&out)
     );
     assert!(
-        text(&out).contains("1 open ticket(s) off the board went to the end of new"),
+        text(&out).contains("member(s) got no reviewers"),
         "{}",
         text(&out)
     );
@@ -382,16 +380,16 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         )
         .await;
     assert_eq!(cards["items"][0]["key"], "1");
-    let cards = r
-        .ok(&format!("/workspaces/{WS}/board/cards?lane=new"), &w.aiko)
-        .await;
-    assert_eq!(cards["items"][0]["key"], "2");
     // The ticket comment made after the backup is not there.
     let tc = r.ok(&format!("{one}/comments"), &w.aiko).await;
     assert!(tc["items"].as_array().unwrap().is_empty());
-    // The account and the upstream are there; the token must be set again.
+    // The account and the upstream are there (every member with no
+    // reviewers, as the upgrade left them); the token must be set again.
     let members = r.ok("/members?limit=100", &owner).await;
     assert!(members.to_string().contains("alice-gh"), "{members}");
+    for m in members["items"].as_array().unwrap() {
+        assert_eq!(m["reviewers"], json!([]), "{m}");
+    }
     let (st, v) = r
         .post(
             &format!("/repos/{}/upstream/refresh", encode(REPO)),

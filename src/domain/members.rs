@@ -21,6 +21,8 @@ pub struct MemberView {
     pub kind: MemberKind,
     /// Accounts on upstream hosts (their tokens are never returned).
     pub accounts: Vec<Account>,
+    /// The members asked to review every pull request this member opens.
+    pub reviewers: Vec<String>,
     /// Where the member's picture is, changing with the picture; `null` for none.
     pub avatar_url: Option<String>,
 }
@@ -31,6 +33,7 @@ pub fn member_view(m: &Member) -> MemberView {
         display_name: m.display_name.clone(),
         kind: m.kind,
         accounts: m.accounts.clone(),
+        reviewers: m.reviewers.clone(),
         avatar_url: m
             .avatar
             .as_ref()
@@ -143,6 +146,7 @@ pub fn insert_member(w: &Wtx, input: &NewMember) -> AppResult<Member> {
             .unwrap_or_else(|| input.name.clone()),
         kind: input.kind,
         accounts: Vec::new(),
+        reviewers: Vec::new(),
         created_at: util::now(),
         avatar: None,
     };
@@ -200,6 +204,53 @@ pub async fn update(
         .write(move |w| {
             let mut m = member_by_name(w, &name)?;
             m.display_name = patch.display_name;
+            w.put(store::MEMBERS, &Member::key(&name), &m)?;
+            Ok(m)
+        })
+        .await?;
+    Ok(member_view(&m))
+}
+
+/// Asks (`add`) or stops asking `reviewer` to review every pull request
+/// member `name` opens. A reviewer is an owner or an agent other than the
+/// member, which is not a runner (a runner opens no pull requests).
+pub async fn set_reviewer(
+    app: &App,
+    caller: &Caller,
+    name: String,
+    reviewer: String,
+    add: bool,
+) -> AppResult<MemberView> {
+    caller.require_owner()?;
+    let m = app
+        .store
+        .write(move |w| {
+            let mut m = member_by_name(w, &name)?;
+            let r = member_by_name(w, &reviewer)?;
+            if m.kind == MemberKind::Runner {
+                return Err(AppError::invalid(
+                    "A runner opens no pull requests and has no reviewers.",
+                ));
+            }
+            if add && r.kind == MemberKind::Runner {
+                return Err(AppError::invalid(format!(
+                    "{} is a runner, which reviews nothing.",
+                    r.name
+                )));
+            }
+            if add && fold(&r.name) == fold(&m.name) {
+                return Err(AppError::invalid(
+                    "A member cannot review their own pull requests.",
+                ));
+            }
+            let present = m.reviewers.iter().any(|x| fold(x) == fold(&r.name));
+            if add && !present {
+                m.reviewers.push(r.name);
+            } else if !add && present {
+                m.reviewers.retain(|x| fold(x) != fold(&r.name));
+            } else {
+                return Ok(m);
+            }
             w.put(store::MEMBERS, &Member::key(&name), &m)?;
             Ok(m)
         })

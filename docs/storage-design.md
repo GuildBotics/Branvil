@@ -51,9 +51,9 @@ closure returns `Ok` and aborts otherwise.
 
 ## Schema version
 
-`meta["schema_version"]` is written on creation (currently `11`: members are
+`meta["schema_version"]` is written on creation (currently `12`: members are
 the owner, agents, and runners, whose kind alone decides what they may do, and
-have accounts on upstream hosts, each a token or an app; a ticket has at most one assignee and may name
+have accounts on upstream hosts, each a token or an app, and the members asked to review the pull requests they open; a ticket has at most one assignee and may name
 an upstream issue, a parent, and tickets it is blocked by; tickets belong to repositories, which hold their labels and
 may have an upstream; repositories belong to workspaces, each with one board,
 on which every ticket is in a lane;
@@ -74,7 +74,7 @@ not change the stored format of any record or raise the version.
 | --- | --- | --- | --- | --- |
 | `meta` | `(name)` | schema version; `unchecked` while an upgrade has not passed `branvil admin check` (absent otherwise) | open, upgrade, `admin check` | open, `serve`, `admin upgrade` |
 | `counters` | `(name)` | `u64` | ticket numbers `ticket:<repo>`, PR numbers `pull:<repo>`, `entry` sequence | allocation in the same txn as the insert |
-| `members` | `(fold(name))` | member, kind (`owner`, `agent`, `runner`), accounts on upstream hosts (provider, login; the token is a file) | owner API, `init`, automatic runner | auth, kind checks, upstream |
+| `members` | `(fold(name))` | member, kind (`owner`, `agent`, `runner`), accounts on upstream hosts (provider, login; the token is a file), reviewers of the pull requests it opens | owner API, `init`, automatic runner | auth, kind checks, upstream |
 | `tokens` | `(token id)` | member, label, SHA-256 of the secret, last use | token API | auth (by id, constant-time hash compare) |
 | `sessions` | `(sha256(session id))` | member, CSRF secret, expiry | entry-code exchange (expired rows pruned there); all deleted when the owner's token file is replaced | cookie auth |
 | `workspaces` | `(workspace id)` | name | workspace API | repository creation, cards, closed |

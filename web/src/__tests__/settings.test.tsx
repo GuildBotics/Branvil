@@ -48,7 +48,7 @@ describe("settings", () => {
   });
 
   it("lists the owner, agents, and runners and creates agents or runners", async () => {
-    const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [] };
+    const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], reviewers: [] };
     const fake = fakeApi({
       ...SHELL,
       "GET /api/v1/members": page([ME, aiko]),
@@ -145,7 +145,7 @@ describe("settings", () => {
   });
 
   it("sets an agent's code host account with a token that is sent once and never shown", async () => {
-    const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [] };
+    const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], reviewers: [] };
     const withAccount = { ...aiko, accounts: [{ provider: "github", login: "aiko-bot", kind: "token", set_at: "2026-10-16T00:00:00Z" }] };
     const fake = fakeApi({
       ...SHELL,
@@ -167,7 +167,7 @@ describe("settings", () => {
   });
 
   it("sets a member's picture from a file, shows it wherever the member appears, and removes it", async () => {
-    const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], avatar_url: null };
+    const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], reviewers: [], avatar_url: null };
     const pictured = { ...aiko, avatar_url: "/api/v1/members/aiko/avatar?v=1234" };
     const fake = fakeApi({
       ...SHELL,
@@ -196,8 +196,48 @@ describe("settings", () => {
     await waitFor(() => expect(within(row).queryByRole("img")).not.toBeInTheDocument());
   });
 
+  it("chooses who is asked to review every pull request a member opens, one at a time", async () => {
+    const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], reviewers: [] };
+    const ken = { name: "ken", display_name: "Ken", kind: "agent", accounts: [], reviewers: [] };
+    const ci = { name: "ci", display_name: "CI", kind: "runner", accounts: [], reviewers: [] };
+    const asked = { ...aiko, reviewers: ["ken"] };
+    const fake = fakeApi({
+      ...SHELL,
+      "GET /api/v1/members": [page([ME, aiko, ken, ci]), page([ME, asked, ken, ci]), page([ME, aiko, ken, ci])],
+      "PUT /api/v1/members/aiko/reviewers/ken": json(200, asked),
+      "DELETE /api/v1/members/aiko/reviewers/ken": json(200, aiko),
+      "GET /api/v1/members/aiko/tokens": page([]),
+      "GET /api/v1/members/ci/tokens": page([]),
+    });
+    const user = userEvent.setup();
+    renderApp("/-/settings/members");
+    const row = (await screen.findByText("Aiko (aiko)")).closest("[role=listitem]") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: "Edit" }));
+    await user.click(within(row).getByRole("tab", { name: "Reviewers" }));
+    expect(within(row).getByText("No one is asked yet.")).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Reviewers of aiko's pull requests: no one — click to change" }));
+    // The member itself and runners are not offered.
+    expect(await screen.findByRole("menuitem", { name: /^owner/ })).toHaveAttribute("aria-checked", "false");
+    expect(screen.queryByRole("menuitem", { name: /^aiko/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^ci/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("menuitem", { name: /^ken/ }));
+    await waitFor(() => expect(fake.calls("PUT", "/api/v1/members/aiko/reviewers/ken")).toHaveLength(1));
+    expect(fake.calls("PUT", "/api/v1/members/aiko/reviewers/ken")[0]?.headers["X-Branvil-CSRF"]).toBe("csrf-123");
+    expect(await within(row).findByRole("button", { name: "Reviewers of aiko's pull requests: ken — click to change" })).toBeInTheDocument();
+    expect(within(row).getByText("ken", { selector: "p" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: /^ken/ })).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("menuitem", { name: /^ken/ }));
+    await waitFor(() => expect(fake.calls("DELETE", "/api/v1/members/aiko/reviewers/ken")).toHaveLength(1));
+    expect(await within(row).findByText("No one is asked yet.")).toBeInTheDocument();
+
+    // A runner opens no pull requests: it has no reviewers.
+    const runner = screen.getByText("CI (ci)").closest("[role=listitem]") as HTMLElement;
+    await user.click(within(runner).getByRole("button", { name: "Edit" }));
+    expect(within(runner).queryByRole("tab", { name: "Reviewers" })).not.toBeInTheDocument();
+  });
+
   it("switches an account between a token and a GitHub App and sends each form's credential", async () => {
-    const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [{ provider: "github", login: "aiko-bot", kind: "token", set_at: "2026-10-16T00:00:00Z" }] };
+    const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [{ provider: "github", login: "aiko-bot", kind: "token", set_at: "2026-10-16T00:00:00Z" }], reviewers: [] };
     const asApp = { ...aiko, accounts: [{ provider: "github", login: "octo-app[bot]", kind: "app", set_at: "2026-10-16T01:00:00Z" }] };
     const fake = fakeApi({
       ...SHELL,
@@ -266,7 +306,7 @@ describe("settings", () => {
       "GET /api/v1/members": page([
         { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [account] },
         { name: "ken", display_name: "Ken", kind: "agent", accounts: [account] },
-        { name: "mia", display_name: "Mia", kind: "agent", accounts: [] },
+        { name: "mia", display_name: "Mia", kind: "agent", accounts: [], reviewers: [] },
       ]),
       "PUT /api/v1/repos/acme/demo/upstream": [
         { status: 409, body: { error: { code: "no_account", message: "No member has an account." } } },

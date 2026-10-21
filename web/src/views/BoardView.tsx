@@ -6,9 +6,8 @@ import { ticketRef, type Card, type Lane } from "../api/types";
 import { ErrorMessage, Loading, Refusal } from "../components/common";
 import { PageHeader } from "../components/PageHeader";
 import { useStored } from "../storage";
-import type { Person } from "../components/PeoplePicker";
 import { useT } from "../i18n";
-import { useBoard, useCards, useMembers } from "../query/hooks";
+import { useBoard, useCards, usePeople } from "../query/hooks";
 import { keys } from "../query/keys";
 import { CardFilters } from "./board/CardFilters";
 import { BoardCard, ciUrlsOf, moveRefusal, type Notice } from "./board/CardView";
@@ -35,7 +34,6 @@ export function BoardView({ workspace }: { workspace: string }) {
   const client = useQueryClient();
   const boardQuery = useBoard(workspace);
   const { query: repos, repos: wsRepos, repo, chooseRepo } = useTicketRepos(workspace);
-  const members = useMembers();
   const [closedShown, showClosed] = useStored("branvil.board.includeClosed");
   const includeClosed = closedShown === "true";
   const state = includeClosed ? "all" : "open";
@@ -50,10 +48,7 @@ export function BoardView({ workspace }: { workspace: string }) {
   const lanes = useMemo(() => boardQuery.data?.lanes ?? [], [boardQuery.data]);
   const cards = useMemo(() => cardsQuery.data?.items ?? [], [cardsQuery.data]);
   // Who can take a ticket: the owner and the agents.
-  const people = useMemo<Person[]>(
-    () => (members.data?.items ?? []).filter((m) => m.kind !== "runner").map((m) => ({ name: m.name, kind: m.kind })),
-    [members.data],
-  );
+  const people = usePeople();
 
   const move = useMutation({
     mutationFn: ({ card, lane, index }: MoveVars) => {

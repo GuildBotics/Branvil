@@ -41,9 +41,9 @@ describe("ticket view", () => {
       ticketRoutes({
         "GET /api/v1/members": json(200, {
           items: [
-            { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [] },
-            { name: "mia", display_name: "Mia", kind: "agent", accounts: [] },
-            { name: "ci", display_name: "", kind: "runner", accounts: [] },
+            { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], reviewers: [] },
+            { name: "mia", display_name: "Mia", kind: "agent", accounts: [], reviewers: [] },
+            { name: "ci", display_name: "", kind: "runner", accounts: [], reviewers: [] },
           ],
           next_cursor: null,
         }),

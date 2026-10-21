@@ -351,6 +351,8 @@ pub async fn create(
             let links = resolve_links(w, &base_url, &r2, &input.tickets)?;
             let number = w.next(&format!("pull:{}", r2.id))?;
             let now = util::now();
+            // Those the author asks to review every pull request it opens.
+            let reviewers = domain::member_by_name(w, &author)?.reviewers;
             let p = Pull {
                 repo: r2.id.clone(),
                 number,
@@ -362,7 +364,7 @@ pub async fn create(
                 author,
                 head: input.head,
                 base,
-                reviewers: Vec::new(),
+                reviewers,
                 tickets: links,
                 labels: Vec::new(),
                 reviewed_by: Vec::new(),

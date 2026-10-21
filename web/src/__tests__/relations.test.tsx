@@ -10,8 +10,8 @@ const WORKSPACE = { name: "acme", lanes: ["new", "ready", "in_progress", "done"]
 
 const MEMBERS = {
   items: [
-    { name: "owner", display_name: "Owner", kind: "owner", accounts: [] },
-    { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [] },
+    { name: "owner", display_name: "Owner", kind: "owner", accounts: [], reviewers: [] },
+    { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], reviewers: [] },
   ],
   next_cursor: null,
 };
