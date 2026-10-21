@@ -890,6 +890,26 @@ fn copy_tables(txn: &ReadTransaction, path: &Path) -> AppResult<Vec<(String, u64
 mod tests {
     use super::*;
 
+    /// scripts/update.sh reads these lines: a database is left as it is only
+    /// when the whole report is the first, and the copy comes from the second.
+    #[test]
+    fn upgrade_report_has_the_lines_scripts_update_reads() {
+        let db = Path::new("/data dir/branvil.redb");
+        assert_eq!(
+            upgrade_report(db, &None),
+            format!("/data dir/branvil.redb already has schema version {SCHEMA_VERSION}")
+        );
+        let done = Upgraded {
+            from: SCHEMA_VERSION - 1,
+            copy: PathBuf::from("/data dir/branvil-schema-10-x.redb"),
+            summary: "test".into(),
+        };
+        assert_eq!(
+            upgrade_report(db, &Some(done)).lines().nth(1),
+            Some("the database as it was: /data dir/branvil-schema-10-x.redb")
+        );
+    }
+
     #[test]
     fn only_the_current_schema_version_opens_and_only_the_previous_upgrades() {
         let dir = tempfile::tempdir().unwrap();

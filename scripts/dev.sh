@@ -4,14 +4,16 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/dev.sh [--data-dir PATH] [--owner NAME] [--no-open] [--build-only]
+Usage: scripts/dev.sh [--data-dir PATH] [--owner NAME] [--no-open] [--install DIR]
 
 Build and run Branvil until Ctrl-C. Open the GUI after the server is ready.
   --data-dir PATH  Data directory (default: BRANVIL_DATA_DIR or <repo>/data).
                   Relative paths are resolved from the repository root.
   --owner NAME     Owner name for first initialization (default: owner).
   --no-open        Start the server without opening a browser.
-  --build-only     Build the GUI and server, then exit (scripts/update.sh).
+  --install DIR    Build the GUI and a release server with the GUI built in,
+                  copy the server to DIR/branvil, and exit (scripts/serve.sh
+                  and scripts/update.sh install builds so).
   -h, --help       Show this help.
 
 Existing data and branvil.toml are reused. Restart to pick up code changes.
@@ -22,19 +24,22 @@ repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 data_dir="${BRANVIL_DATA_DIR:-$repo_root/data}"
 owner=owner
 open_browser=true
-build_only=false
+install_dir=
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --data-dir|--owner)
+    --data-dir|--owner|--install)
       if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
         echo "Missing value for $1" >&2
         exit 2
       fi
-      if [[ "$1" == --data-dir ]]; then data_dir="$2"; else owner="$2"; fi
+      case "$1" in
+        --data-dir) data_dir="$2" ;;
+        --owner) owner="$2" ;;
+        *) install_dir="$2" ;;
+      esac
       shift 2
       ;;
     --no-open) open_browser=false; shift ;;
-    --build-only) build_only=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -50,8 +55,8 @@ cleanup() {
   if [[ -n "$startup_log" ]]; then rm -f "$startup_log"; fi
 }
 trap cleanup EXIT
-# Set before the build: a TERM during it (scripts/update.sh forwards Ctrl-C so)
-# ends the launcher once the running step returns, before any server starts.
+# Set before the build: a TERM during it ends the launcher once the running
+# step returns, before any server starts.
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -71,10 +76,16 @@ target="$repo_root/target"
 "$repo_root/scripts/clean-stale-target.sh" "$target"
 # Mark even a failed build: its outputs were made under the current conditions.
 build_status=0
-cargo build --target-dir "$target" || build_status=$?
+# An installed build is a release build: it carries the GUI built into it, so
+# later GUI builds (which empty web/dist) do not change what it serves.
+cargo build ${install_dir:+--release} --target-dir "$target" || build_status=$?
 "$repo_root/scripts/clean-stale-target.sh" --mark "$target"
 if (( build_status != 0 )); then exit "$build_status"; fi
-if "$build_only"; then exit 0; fi
+if [[ -n "$install_dir" ]]; then
+  mkdir -p "$install_dir"
+  cp "$target/release/branvil" "$install_dir/branvil"
+  exit 0
+fi
 binary="$target/debug/branvil"
 
 if [[ ! -f "$data_dir/branvil.redb" ]]; then

@@ -148,14 +148,43 @@ branvil admin upgrade --data-dir /srv/branvil
 branvil serve --data-dir /srv/branvil
 ```
 
-A development service run by `scripts/dev.sh` is updated this way by one
-command, `scripts/update.sh` (README, "Development"): it takes the backup with
-the old build while the service runs (into `~/branvil-backups`, keeping the
-newest three it made), fast-forwards the checkout to `origin/main`, stops the
-service, builds, runs `branvil admin upgrade` and `branvil admin check`, and
-starts the service again. When a step fails before the new service answers, it
-prints where it stopped, the checkout's previous commit, the backup, and the
-database copy below.
+The service that `scripts/serve.sh` runs from a checkout (README,
+"Running the service from this checkout") is updated this way by
+`scripts/update.sh`, automatically once a commit on `main` has passed its
+checks: it takes the backup with the running build while the service runs
+(into `~/branvil-backups`, keeping the newest three it made), fast-forwards the
+checkout to `origin/main`, installs the new build as `builds/<commit>` while
+the old one serves, stops the service, runs `branvil admin upgrade` and
+`branvil admin check` with the new build, and names it in `builds/current`,
+which `scripts/serve.sh` starts. After a successful update, `builds/` keeps
+the new build and the one it replaced.
+
+`builds/current` always names a build that can open the database as it is, or
+is missing because Branvil was left stopped. Until `admin upgrade` changes the
+database, it names the previous build (an update holds the stopped service
+with `builds/hold` instead of removing it); when the upgrade has changed it,
+it names the new build at once, before `admin check`. A TERM or Ctrl-C takes
+effect only after `admin check` has returned. So when an update ends before
+the new build answers:
+
+| When | The database was not upgraded (the upgrade failed or had nothing to do) | It was upgraded |
+| --- | --- | --- |
+| A step fails before the service stops (a backup, a build) | The previous build keeps running. | — |
+| A later step fails | The previous build runs again. | Branvil stays stopped: `builds/current` is removed. |
+| TERM or Ctrl-C after the service stopped | The previous build runs again. | The new build runs. |
+| The update is killed (SIGKILL, as by launchd 120 seconds after `bootout`) | `scripts/serve.sh` starts `builds/current` again once the update's process is gone and no `branvil admin` it started has the database open. | The same; only a kill between the upgrade's write and the switch leaves the previous build named, which then exits at its start until `scripts/serve.sh` stops it and notifies. |
+
+A step that fails once the update has decided to install the commit records
+it in `builds/attempted`, so it is not tried again automatically until `main`
+moves on; a failed fetch or reading of the checks, and an interrupted or
+killed update, are tried again in the next round. When Branvil stays stopped, the message names
+the backup, the database copy, and the builds. To come back:
+
+- with the previous build: put the database copy in place of `branvil.redb`
+  and `echo <previous commit> >builds/current` (the previous build is kept);
+- with the new build, once the cause is fixed: `echo <new commit> >builds/current`;
+- with a later commit: start one of the builds above, merge the fix, and let
+  the next update install it.
 
 `branvil admin upgrade`:
 

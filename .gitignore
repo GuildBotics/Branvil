@@ -1,4 +1,5 @@
 target/
+/builds/
 web/node_modules/
 web/dist/
 /data/

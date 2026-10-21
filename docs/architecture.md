@@ -451,7 +451,9 @@ when the page has lost its event stream for 5 seconds (it may be out of date
 until the stream is back), CI cannot run, or an upstream cannot be followed.
 
 `web/dist` is embedded with rust-embed (`allow_missing`, so the service builds
-without it; debug builds read the folder from disk). Every GET path that is not
+without it). Debug builds read the folder from disk, so a GUI built again
+shows on reload; release builds, which `scripts/serve.sh` runs, carry the GUI
+of their build. Every GET path that is not
 `/api/…`, `/git/…`, or `/-/hooks/…` and not a file is answered with `index.html`, so
 the web URLs of `api.md` open the single-page GUI. Every response carries
 `Content-Security-Policy` (`script-src 'self'`, no inline scripts; `style-src
