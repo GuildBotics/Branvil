@@ -109,16 +109,20 @@ main() {
   cd "$repo_root"
   . "$repo_root/scripts/lib.sh"
   builds="$repo_root/builds"
-  for command in cargo npm node git; do
-    if ! command -v "$command" >/dev/null 2>&1; then
-      echo "Required command not found: $command (see README requirements)." >&2
-      exit 1
-    fi
-  done
   previous="$(cat "$builds/current" 2>/dev/null || true)"
   # A TERM (from scripts/serve.sh) ends the update after the running step.
   trap 'interrupted=true; exit 143' INT TERM
   trap 'finish $?' EXIT
+
+  # A launchd agent printed from a shell without these fails here every
+  # round, so this is told like any failure before the decision.
+  stage="checking the required commands"
+  for command in cargo npm node git; do
+    if ! type -P "$command" >/dev/null; then
+      echo "Required command not found: $command (see README requirements)." >&2
+      exit 1
+    fi
+  done
 
   stage="checking the checkout"
   if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then

@@ -1012,6 +1012,26 @@ class ServeScriptTests(ScriptTestCase):
                 self.assertIn("run by scripts/serve.sh only", result.stderr)
         self.assertEqual(self.events(), [])
 
+    def test_a_missing_required_command_is_told_once_and_decides_nothing(self):
+        # As launchd runs it from a plist printed in a shell without cargo:
+        # only the fake osascript and the system directories on the PATH.
+        self.builds.mkdir(exist_ok=True)
+        bare = self.root / "bare-tools"
+        bare.mkdir()
+        (bare / "osascript").symlink_to(self.tools / "osascript")
+        env = {**self.env, "PATH": os.pathsep.join([str(bare), "/usr/bin", "/bin"])}
+        for _ in range(2):
+            result = subprocess.run(
+                ["bash", str(self.repo / "scripts/update.sh"), "--data-dir", str(self.data)],
+                cwd=self.root, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Required command not found: cargo", result.stderr)
+            self.assertIn("stopped while checking the required commands", result.stderr)
+        [message] = self.notifications()
+        self.assertIn("stopped while checking the required commands", message)
+        self.assertIsNone(self.attempted())
+
     def test_nothing_is_done_while_main_is_the_running_build(self):
         self.watch()
         self.rounds_pass()

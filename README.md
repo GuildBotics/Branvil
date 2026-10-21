@@ -479,18 +479,29 @@ The agent runs `/bin/bash scripts/serve.sh` with the data directory chosen as
 `scripts/dev.sh` chooses it (it must be initialized already; `scripts/dev.sh`
 does that on its first run) and with the `PATH` of the shell that printed it,
 because launchd's own has no `cargo`, `npm`, or `node` (print and bootstrap it
-again when that changes). launchd starts it at login and again when it exits;
-its output goes to `~/Library/Logs/branvil.log`. A restart
+again when that changes). launchd starts it at login and again when it exits.
+Its output and that of what it runs, including the service's log, go to
+`~/Library/Logs/branvil.log`; the service's standard output, with the
+`branvil listening on …` line that says it is ready, goes to
+`builds/serve.out` instead. A restart
 (`launchctl kickstart -k gui/$(id -u)/com.guildbotics.branvil`) checks for an
 update at once and applies changes to `scripts/serve.sh`, as an update does.
-To switch from
-`scripts/dev.sh`, stop it (Ctrl-C) first: both cannot listen on the same
-address. Updates switch this checkout to `main` and fast-forward it, so
-develop in other worktrees (`git worktree add`), not in this one.
+To switch from `scripts/dev.sh`, stop it (Ctrl-C) first: both cannot listen
+on the same address.
+
+Run `scripts/serve.sh` from a clone of its own that nobody develops in, whose
+`origin` is the repository in this Branvil
+(`<base URL>/git/<workspace>/<repository>.git`, which `scripts/update.sh`
+fetches as the owner), and pass `--data-dir` when the service's data is not
+that clone's `data`. Updates switch the clone to `main` and fast-forward it;
+an uncommitted change to a tracked file, or a commit on its `main` that
+`origin` lacks, stops them. A worktree of the repository you develop in does
+not work: it cannot check out `main` while another worktree has it.
 
 On its first start it installs the checkout's `HEAD` as a release build under
-`builds/` (ignored by Git) and runs it; building the checkout, `npm run build`,
-or `cargo clean` never change what runs. It starts the service again when it
+`builds/` (ignored by Git) and runs it only once that release build has
+finished, which takes minutes; building the checkout, `npm run build`, or
+`cargo clean` never change what runs. It starts the service again when it
 exits, and at its start and every 5 minutes (`--interval`) it updates to
 `origin/main` when that commit's checks in this Branvil have all succeeded:
 it backs the service up, builds the new commit and rehearses its upgrade on a
