@@ -12,8 +12,11 @@ Build and run Branvil until Ctrl-C. Open the GUI after the server is ready.
   --owner NAME     Owner name for first initialization (default: owner).
   --no-open        Start the server without opening a browser.
   --install DIR    Build the GUI and a release server with the GUI built in,
-                  copy the server to DIR/branvil, and exit (scripts/serve.sh
-                  and scripts/update.sh install builds so).
+                  put the server at DIR/branvil, and exit (scripts/serve.sh
+                  and scripts/update.sh install builds so). DIR is named after
+                  the checkout's HEAD commit, and tracked files must have no
+                  uncommitted changes; DIR appears only when it is complete,
+                  and an existing DIR is left as it is.
   -h, --help       Show this help.
 
 Existing data and branvil.toml are reused. Restart to pick up code changes.
@@ -61,12 +64,28 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 cd "$repo_root"
+. "$repo_root/scripts/lib.sh"
 for command in cargo npm git; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "Required command not found: $command (see README requirements)." >&2
     exit 1
   fi
 done
+
+# A build named after a commit is built from exactly that commit.
+if [[ -n "$install_dir" ]]; then
+  head="$(git rev-parse HEAD)"
+  if [[ "$(basename -- "$install_dir")" != "$head" ]]; then
+    echo "--install $install_dir: the checkout's HEAD is $head." >&2
+    exit 1
+  fi
+  if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+    echo "--install $install_dir: the checkout has uncommitted changes." >&2
+    exit 1
+  fi
+  # It exists only complete, from this commit: nothing to do.
+  if [[ -e "$install_dir" ]]; then exit 0; fi
+fi
 
 if [[ ! -f web/node_modules/.package-lock.json || web/package-lock.json -nt web/node_modules/.package-lock.json ]]; then
   npm --prefix web ci
@@ -82,8 +101,11 @@ cargo build ${install_dir:+--release} --target-dir "$target" || build_status=$?
 "$repo_root/scripts/clean-stale-target.sh" --mark "$target"
 if (( build_status != 0 )); then exit "$build_status"; fi
 if [[ -n "$install_dir" ]]; then
-  mkdir -p "$install_dir"
-  cp "$target/release/branvil" "$install_dir/branvil"
+  # Assembled beside it and renamed into place.
+  rm -rf -- "$install_dir.new"
+  mkdir -p "$install_dir.new"
+  cp "$target/release/branvil" "$install_dir.new/branvil"
+  mv "$install_dir.new" "$install_dir"
   exit 0
 fi
 binary="$target/debug/branvil"

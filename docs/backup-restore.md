@@ -20,7 +20,7 @@ serving requests while the backup runs.
 
 ```
 branvil-2026-10-14/          (0700)
-├── manifest.json            versions, tables, repositories, checksums, exclusions
+├── manifest.json            versions, tables, repositories, checksums, exclusions (written last)
 ├── branvil.redb             the database as of one read transaction
 ├── branvil.toml             the configuration file
 ├── repos/<repo id>.bundle   `git bundle --all` of each repository with refs
@@ -57,6 +57,9 @@ locks, so during the backup:
   restored service exactly as after a crash;
 - no push is recorded, the default branch does not follow its upstream, no
   repository is created.
+
+The manifest is written last, to a temporary name that is synced and then
+renamed, so a backup with a `manifest.json` is complete.
 
 The database copy is one redb read transaction written into a new file
 (`Store::export_to`), so it is one consistent state even though API writes
@@ -148,44 +151,6 @@ branvil admin upgrade --data-dir /srv/branvil
 branvil serve --data-dir /srv/branvil
 ```
 
-The service that `scripts/serve.sh` runs from a checkout (README,
-"Running the service from this checkout") is updated this way by
-`scripts/update.sh`, automatically once a commit on `main` has passed its
-checks: it takes the backup with the running build while the service runs
-(into `~/branvil-backups`, keeping the newest three it made), fast-forwards the
-checkout to `origin/main`, installs the new build as `builds/<commit>` while
-the old one serves, stops the service, runs `branvil admin upgrade` and
-`branvil admin check` with the new build, and names it in `builds/current`,
-which `scripts/serve.sh` starts. After a successful update, `builds/` keeps
-the new build and the one it replaced.
-
-`builds/current` always names a build that can open the database as it is, or
-is missing because Branvil was left stopped. Until `admin upgrade` changes the
-database, it names the previous build (an update holds the stopped service
-with `builds/hold` instead of removing it); when the upgrade has changed it,
-it names the new build at once, before `admin check`. A TERM or Ctrl-C takes
-effect only after `admin check` has returned. So when an update ends before
-the new build answers:
-
-| When | The database was not upgraded (the upgrade failed or had nothing to do) | It was upgraded |
-| --- | --- | --- |
-| A step fails before the service stops (a backup, a build) | The previous build keeps running. | — |
-| A later step fails | The previous build runs again. | Branvil stays stopped: `builds/current` is removed. |
-| TERM or Ctrl-C after the service stopped | The previous build runs again. | The new build runs. |
-| The update is killed (SIGKILL, as by launchd 120 seconds after `bootout`) | `scripts/serve.sh` starts `builds/current` again once the update's process is gone and no `branvil admin` it started has the database open. | The same; only a kill between the upgrade's write and the switch leaves the previous build named, which then exits at its start until `scripts/serve.sh` stops it and notifies. |
-
-A step that fails once the update has decided to install the commit records
-it in `builds/attempted`, so it is not tried again automatically until `main`
-moves on; a failed fetch or reading of the checks, and an interrupted or
-killed update, are tried again in the next round. When Branvil stays stopped, the message names
-the backup, the database copy, and the builds. To come back:
-
-- with the previous build: put the database copy in place of `branvil.redb`
-  and `echo <previous commit> >builds/current` (the previous build is kept);
-- with the new build, once the cause is fixed: `echo <new commit> >builds/current`;
-- with a later commit: start one of the builds above, merge the fix, and let
-  the next update install it.
-
 `branvil admin upgrade`:
 
 1. refuses a database that another process has open, and any version other
@@ -198,6 +163,11 @@ the backup, the database copy, and the builds. To come back:
 4. applies the upgrade and the new version in one write transaction, so a
    failure leaves the database at the previous version;
 5. prints what it changed and where the copy is.
+
+It exits 0 when the database already has this version (nothing changed), 3
+when it upgraded it, and 1 when it failed, which leaves it unchanged.
+`branvil restore` runs the same upgrade as one of its steps and exits 0 when
+the restore succeeds, upgraded or not.
 
 To go back, stop the service, put the copy in place of `branvil.redb`, and run
 the previous build. The copy holds the database only; the backup taken before
@@ -212,6 +182,126 @@ workspace's board. A ticket that was off the board goes to the end of `new`
 when open and to the end of `done` when closed, after the cards already in
 that lane, in the order of the ticket table (by repository id, then number).
 Nothing else changes.
+
+### The service run by scripts/serve.sh
+
+The service that `scripts/serve.sh` runs from a checkout as a launchd user
+agent (README, "Running the service from this checkout") is updated this way
+with nobody watching. This section is the runbook for whoever handles its
+troubles, typically an agent the owner instructs: it reads the log and the
+files below, follows the operations, and checks the result by reading them
+again. The operations change the production service, so ask the owner before
+doing any of them.
+
+`scripts/serve.sh` is the only process that starts or stops `branvil` and
+runs updates. To start a build it runs that build's `branvil admin upgrade`
+(nothing changes when the database already has its version), then
+`branvil admin check` when the upgrade changed the database, then
+`branvil serve`, which is ready when it prints `branvil listening on …`; it
+starts the service again when it exits. At its start and every interval,
+while the service is ready, it runs `scripts/update.sh`, which decides
+whether to update: when `origin/main` is neither the running build nor
+`builds/attempted`, and that commit's checks in this Branvil have all
+completed with `success` (or it has no checks and expects none). While they
+run, it looks again in the next round; when one did not succeed, the commit
+goes to `builds/attempted`. An update:
+
+1. backs the running service up with the running build into
+   `~/branvil-backups/branvil-update-<UTC time>` (keeping the newest three of
+   these; only a backup with its `manifest.json` counts);
+2. switches the checkout to `main` and fast-forwards it to `origin/main`;
+3. installs the new build as `builds/<commit>` (from a checkout at exactly
+   that commit with no uncommitted changes; the directory appears only once
+   complete, and an existing one is kept);
+4. rehearses: the running build restores that backup into
+   `builds/rehearsal`, and the new build runs `admin upgrade` and
+   `admin check` on that copy, which is then removed;
+5. records the update in `builds/update`;
+6. `scripts/serve.sh` names the new build in `builds/current`, stops the
+   service, and goes on as the checkout's (possibly new) `scripts/serve.sh`;
+7. it starts the new build as above, and the update is done when that is
+   ready. Failure is only the new build exiting: a start that takes long is
+   waited for (after 30 minutes a notification says so, once). Then
+   `builds/` keeps the new build and the one it replaced.
+
+Steps 1 to 5 run while the old build serves, so the service is down only from
+step 6 until the new build is ready. When the schema does not change, nothing
+in that time works through the data (the database itself is checked only
+after an upgrade changed it); `branvil serve`'s own start still grows with
+the number of repositories.
+
+**Files.** Each state file is written whole: to a temporary name, synced to
+the disk, and renamed. Write them by hand the same way, for instance
+`printf '%s\n' <commit> >builds/current.new && mv builds/current.new builds/current`.
+
+| File | Meaning |
+| --- | --- |
+| `builds/current` | The commit of the build that runs (the checkout's `HEAD` can differ). Missing: Branvil is stopped on purpose. |
+| `builds/<commit>/branvil` | An installed build. |
+| `builds/update` | An update in flight: `<new> <previous> <check> [<failed step>]`. `check` means `admin check` must still run on the database before the new build serves. |
+| `builds/attempted` | The last commit an update gave up on; not tried again until `main` moves on. |
+| `builds/notified` | The last failure notified (so it is notified once). |
+| `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line). |
+| `builds/rehearsal`, `builds/*.new`, `builds/*.tmp`, `<data>/branvil-schema-*.redb.partial` | Left only by something cut off; removed at the next start. |
+| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh`, `scripts/update.sh`, and `branvil` print, with times; a failure is a line that starts "The update to … stopped while …" or "… stopped while starting …". |
+
+**The state.**
+
+- Running: `builds/current` names a build, and `launchctl print gui/$(id -u)/com.guildbotics.branvil` shows the agent running.
+- An update in flight: `builds/update` exists. It goes on by itself, also after a restart; wait for it.
+- The last failure: the last "stopped while" line of the log, and `builds/attempted`.
+- Stopped: no `builds/current`. The log says why.
+
+**What a failure leaves.** Nothing is retried automatically; a person is told
+once.
+
+| When | What runs then |
+| --- | --- |
+| A step up to the rehearsal fails (a build, the rehearsal's upgrade or check) | The previous build keeps running. A failed fetch, reading of the checks, or backup is tried again in the next round. |
+| The new build's upgrade, check, or start fails | The previous build again, when its own `branvil admin upgrade` finds the database at its version (nothing changed it). Otherwise (the upgrade changed it) nothing: `builds/current` is removed, and the log names the database copy the upgrade kept. |
+| A reboot, power loss, logout, or `launchctl bootout` at any moment | At its next start `scripts/serve.sh` goes on from these files: an update not yet recorded runs again in the next round, a recorded one is switched to and started (with its pending check), and one whose failure was recorded is concluded. |
+
+**Operations.** After each, read the files and the log again to see that it
+took effect. Write files as above, never with a plain `>`.
+
+- Start, restart, stop the agent. A restart also checks for an update at once
+  and applies changes to `scripts/serve.sh`; during an update it stops the
+  service and waits for the update's running step (a build, for instance)
+  before it goes on.
+
+  ```sh
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.guildbotics.branvil.plist
+  launchctl kickstart -k gui/$(id -u)/com.guildbotics.branvil
+  launchctl bootout gui/$(id -u)/com.guildbotics.branvil
+  ```
+
+- Try a failed commit again, once its cause is fixed: remove
+  `builds/attempted`, then restart the agent.
+- Go back to the previous build (kept in `builds/`), with no update in
+  flight: write `origin/main`'s commit into `builds/attempted` (otherwise the
+  next round updates again), then write the previous commit into
+  `builds/current`; the agent stops the running build and starts that one.
+  When an upgrade changed the database, stop Branvil first (remove
+  `builds/current`, wait for the log line that the serve exited), put the
+  copy the log names in place of `branvil.redb`, then write `builds/current`.
+- Start a build that was stopped after its upgrade, once the cause is fixed:
+  `builds/<commit>/branvil admin check --data-dir <data directory>`; when it
+  reports index problems, `builds/<commit>/branvil admin reindex --data-dir
+  <data directory>` and check again; when it passes, write the commit into
+  `builds/current`.
+- Restore from a backup:
+  1. remove `builds/current` and wait for the log line that the serve exited;
+  2. restore with a build that reads the backup's schema version (the
+     manifest's `schema_version`; `branvil restore` takes that version or the
+     one before it): `builds/<commit>/branvil restore --from <backup>
+     --data-dir <new directory>`;
+  3. move the data directory aside (`mv <data> <data>.before-restore`) and
+     the restored one into its place; or keep both and point the agent at the
+     new one (`launchctl bootout …`, print the plist again with
+     `--data-dir <new directory>`, `launchctl bootstrap …`);
+  4. when that build is older than `origin/main`, write `origin/main`'s
+     commit into `builds/attempted`; then write the build's commit into
+     `builds/current`.
 
 ## Tested
 

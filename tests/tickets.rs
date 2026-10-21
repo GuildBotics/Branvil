@@ -1249,10 +1249,13 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        (out.status.success(), text)
+        (out.status.code().unwrap(), text)
     };
-    let (ok, text) = admin("check");
-    assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
+    let (code, text) = admin("check");
+    assert!(
+        code != 0 && text.contains("branvil admin upgrade"),
+        "{text}"
+    );
     // A ticket it does not expect stops it before anything is written, the
     // copy of the database included.
     let four = |title: Value| {
@@ -1263,8 +1266,13 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
         })
     };
     four(Value::Null);
-    let (ok, text) = admin("upgrade");
-    assert!(!ok && text.contains("a ticket does not decode"), "{text}");
+    // The exit status says what happened (scripts/serve.sh reads it): 1, the
+    // database is left as it was.
+    let (code, text) = admin("upgrade");
+    assert!(
+        code == 1 && text.contains("a ticket does not decode"),
+        "{text}"
+    );
     let copies = std::fs::read_dir(&data)
         .unwrap()
         .filter(|e| {
@@ -1276,12 +1284,21 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
         })
         .count();
     assert_eq!(copies, 0);
-    let (ok, text) = admin("check");
-    assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
-    four(json!("Four"));
-    let (ok, text) = admin("upgrade");
+    let (code, text) = admin("check");
     assert!(
-        ok && text.contains(
+        code != 0 && text.contains("branvil admin upgrade"),
+        "{text}"
+    );
+    four(json!("Four"));
+    let (code, text) = admin("upgrade");
+    // scripts/serve.sh tells the owner that its log names the copy.
+    let copy = format!(
+        "\nthe database as it was: {}",
+        data.join("branvil-schema-10-").display()
+    );
+    assert!(text.contains(&copy), "{text}");
+    assert!(
+        code == 3 && text.contains(
             "2 open ticket(s) off the board went to the end of new and 1 closed one(s) to the end of done"
         ),
         "{text}"
@@ -1293,8 +1310,16 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
         expected.remove(t);
     }
     assert_eq!(after, expected);
-    let (ok, text) = admin("check");
-    assert!(ok && text.contains("indexes: ok"), "{text}");
+    let (code, text) = admin("check");
+    assert!(code == 0 && text.contains("indexes: ok"), "{text}");
+    // 0: the database already has this version, and nothing changed.
+    let upgraded = tables(&db);
+    let (code, text) = admin("upgrade");
+    assert!(
+        code == 0 && text.contains("already has schema version"),
+        "{text}"
+    );
+    assert_eq!(tables(&db), upgraded);
     w.restart(&[]);
     // The moved tickets follow the cards that were there, in number order.
     let lane = |lane: &'static str| {

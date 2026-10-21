@@ -230,7 +230,7 @@ pub async fn create(app: &App, to: &Path) -> AppResult<Manifest> {
         account_tokens_excluded,
     };
     let text = serde_json::to_string_pretty(&manifest).map_err(AppError::internal)?;
-    std::fs::write(target.join(MANIFEST), text).map_err(AppError::internal)?;
+    write_manifest(&target, &text).map_err(AppError::internal)?;
     tracing::info!(
         "backup written to {} ({} repositories)",
         target.display(),
@@ -288,6 +288,16 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Writes the manifest last and under its name only once it is complete: a
+/// backup with a manifest is a whole backup (scripts/update.sh counts those).
+fn write_manifest(target: &Path, text: &str) -> std::io::Result<()> {
+    let partial = target.join(format!("{MANIFEST}.partial"));
+    let mut file = std::fs::File::create(&partial)?;
+    std::io::Write::write_all(&mut file, text.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&partial, target.join(MANIFEST))
 }
 
 fn sha256_file(path: &Path) -> std::io::Result<(u64, String)> {
@@ -512,6 +522,20 @@ mod tests {
         assert!(inside(root, "/etc/passwd").is_err());
         assert!(inside(root, "repos/../../x").is_err());
         assert!(inside(root, "").is_err());
+    }
+
+    #[test]
+    fn the_manifest_gets_its_name_only_when_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join(format!("{MANIFEST}.partial"));
+        // What a write that was cut off left behind.
+        std::fs::write(&partial, "{\"serv").unwrap();
+        write_manifest(dir.path(), "{}").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(MANIFEST)).unwrap(),
+            "{}"
+        );
+        assert!(!partial.exists());
     }
 
     #[test]

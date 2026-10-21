@@ -52,6 +52,15 @@ def hold(step):
             time.sleep(0.01)
 
 
+def alive(path):
+    """Whether file `path` names a running process."""
+    try:
+        os.kill(int(path.read_text(encoding="utf-8")), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def record(event):
     with open(env["DEV_TEST_EVENTS"], "a", encoding="utf-8") as out:
         out.write(json.dumps(event) + "\n")
@@ -69,22 +78,17 @@ if tool == "cargo":
     target = Path(args[args.index("--target-dir") + 1])
     event["marked"] = (target / ".build-conditions").exists()
 record(event)
+if tool == "osascript":
+    hold("NOTIFY")  # recorded above, before it holds
 if tool == "rustc":
     print(env["DEV_TEST_RUSTC"])
-if tool == "lsof":
-    # The live processes of the fake branvil serve and admin.
-    pids = Path(env["DEV_TEST_SERVICE_PIDS"])
-    live = []
-    for holder in [pids, pids.with_suffix(".admin")]:
-        for pid in holder.read_text(encoding="utf-8").split() if holder.exists() else []:
-            try:
-                os.kill(int(pid), 0)
-                live.append(pid)
-            except ProcessLookupError:
-                pass
-    if not live:
-        sys.exit(1)
-    print("\n".join(live))
+if tool == "git":
+    while args[0] == "-c":
+        args = args[2:]
+    if args[0] == "rev-parse":
+        print(env.get("DEV_TEST_HEAD", "abc"))
+    if args[0] == "status":
+        print(env.get("DEV_TEST_STATUS", ""), end="")
 if tool == "cargo":
     if args[0] == "clean":
         shutil.rmtree(target)
@@ -95,12 +99,13 @@ if tool == "cargo":
             (target / "CACHEDIR.TAG").touch()
         made = target / ("release" if "--release" in args else "debug") / "branvil"
         made.parent.mkdir(parents=True, exist_ok=True)
-        made.write_text(
-            '#!/bin/sh\nexport DEV_TEST_BINARY="$0"\nexec '
-            + shlex.join([sys.executable, sys.argv[0], "branvil"]) + ' "$@"\n',
-            encoding="utf-8",
-        )
-        made.chmod(0o755)
+        if not setting("DEV_TEST_BUILD_NO_BINARY"):
+            made.write_text(
+                '#!/bin/sh\nexport DEV_TEST_BINARY="$0"\nexec '
+                + shlex.join([sys.executable, sys.argv[0], "branvil"]) + ' "$@"\n',
+                encoding="utf-8",
+            )
+            made.chmod(0o755)
         hold("BUILD")
         sys.exit(int(setting("DEV_TEST_BUILD_EXIT") or "0"))
 if tool == "npm" and args[-1] == "ci":
@@ -111,6 +116,14 @@ if tool == "branvil":
     command = args[0]
     serving = Path(env["DEV_TEST_SERVING"])
     pids = Path(env["DEV_TEST_SERVICE_PIDS"])
+    # The schema version of this build, and the one of the database (its
+    # content, 11 when empty).
+    schema = setting("DEV_TEST_SCHEMA") or "11"
+    data = Path(args[args.index("--data-dir") + 1]) if "--data-dir" in args else Path("/nonexistent")
+
+    def database():
+        db = data / "branvil.redb"
+        return (db.read_text(encoding="utf-8").strip() if db.exists() else "") or "11"
     if command == "init":
         data = Path(args[args.index("--data-dir") + 1])
         data.mkdir(parents=True, exist_ok=True)
@@ -118,6 +131,9 @@ if tool == "branvil":
     elif command == "serve":
         if setting("DEV_TEST_SERVE_EXIT"):
             sys.exit(int(setting("DEV_TEST_SERVE_EXIT")))
+        if database() != schema:
+            print(f"branvil: the database has schema version {database()}", file=sys.stderr)
+            sys.exit(1)
 
         def stop(*_):
             serving.unlink(missing_ok=True)
@@ -126,10 +142,10 @@ if tool == "branvil":
             record({"tool": "branvil", "args": ["stopped"], "pid": os.getpid(), "binary": binary})
             sys.exit(0)
 
-        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN if setting("DEV_TEST_SERVE_IGNORE_TERM") else stop)
         hold("SERVE")
-        serving.touch()
-        # What the fake lsof reports as having the database open.
+        serving.write_text(str(os.getpid()), encoding="utf-8")
+        # Its pid, for the tests.
         written = pids.with_suffix(f".{os.getpid()}.tmp")
         written.write_text(f"{os.getpid()}\n", encoding="utf-8")
         written.rename(pids)
@@ -139,7 +155,7 @@ if tool == "branvil":
             time.sleep(0.01)
         stop()
     elif command == "member":
-        if not serving.exists():
+        if not alive(serving):
             print("Branvil is not reachable", file=sys.stderr)
             sys.exit(1)
         print(json.dumps({"items": [
@@ -147,30 +163,38 @@ if tool == "branvil":
             {"name": "keeper", "kind": "owner"},
         ]}, indent=2))
     elif command == "backup":
+        if setting("DEV_TEST_BACKUP_EXIT"):
+            sys.exit(int(setting("DEV_TEST_BACKUP_EXIT")))
         to = Path(args[args.index("--to") + 1])
         to.mkdir(parents=True)
+        (to / "branvil.redb").write_text(database(), encoding="utf-8")
         (to / "manifest.json").write_text("{}", encoding="utf-8")
         print(f"backup written to {to}")
+    elif command == "restore":
+        data.mkdir(parents=True)
+        frm = Path(args[args.index("--from") + 1])
+        shutil.copy(frm / "branvil.redb", data / "branvil.redb")
+        print(f"restored into {data}")
     elif command == "admin":
-        db = Path(args[args.index("--data-dir") + 1]) / "branvil.redb"
-        # It has the database open while it runs.
-        pids.with_suffix(".admin").write_text(f"{os.getpid()}\n", encoding="utf-8")
-        hold(args[1].upper())
+        db = data / "branvil.redb"
+        # On the copy of the rehearsal, steps and failures have their own names.
+        step = ("REHEARSAL_" if data.name == "rehearsal" else "") + args[1].upper()
+        hold(step)
         if args[1] == "upgrade":
-            if setting("DEV_TEST_UPGRADE_EXIT"):
-                print("upgrade failed: test", file=sys.stderr)
-                sys.exit(int(setting("DEV_TEST_UPGRADE_EXIT")))
-            copy = setting("DEV_TEST_UPGRADE_COPY")
-            if setting("DEV_TEST_UPGRADE_OUTPUT"):
-                print(setting("DEV_TEST_UPGRADE_OUTPUT"))
-            elif copy:
-                Path(copy).touch()
-                print(f"upgraded {db} from schema version 10 to 11: test")
-                print(f"the database as it was: {copy}")
+            # As branvil admin upgrade: 0 left as it is, 3 upgraded, 1 failed.
+            if database() == schema:
+                print(f"{db} already has schema version {schema}")
+            elif int(database()) != int(schema) - 1 or setting(f"DEV_TEST_{step}_EXIT"):
+                print(f"branvil: cannot upgrade {db} (schema version {database()})", file=sys.stderr)
+                sys.exit(1)
             else:
-                print(f"{db} already has schema version 11")
-        elif args[1] == "check" and setting("DEV_TEST_CHECK_EXIT"):
-            sys.exit(int(setting("DEV_TEST_CHECK_EXIT")))
+                print(f"upgraded {db} to schema version {schema}: test")
+                print(f"the database as it was: {db.parent}/branvil-schema-{database()}-test.redb")
+                db.write_text(schema, encoding="utf-8")
+                hold(step + "D")
+                sys.exit(3)
+        elif args[1] == "check" and setting(f"DEV_TEST_{step}_EXIT"):
+            sys.exit(int(setting(f"DEV_TEST_{step}_EXIT")))
     elif command == "open":
         if "--print" in args:
             print("http://example.invalid/-/enter#test-only-link")
@@ -204,7 +228,7 @@ class ScriptTestCase(unittest.TestCase):
         self.repo = self.root / "checkout with spaces"
         (self.repo / "scripts").mkdir(parents=True)
         (self.repo / "web").mkdir()
-        for script in ["dev.sh", "clean-stale-target.sh", "notify.sh", "serve.sh", "update.sh"]:
+        for script in ["dev.sh", "clean-stale-target.sh", "lib.sh", "serve.sh", "update.sh"]:
             shutil.copy(ROOT / "scripts" / script, self.repo / "scripts" / script)
         self.manifest = self.repo / "Cargo.toml"
         self.manifest.write_text(CARGO_TOML, encoding="utf-8")
@@ -217,7 +241,7 @@ class ScriptTestCase(unittest.TestCase):
         helper = self.root / "helper.py"
         helper.write_text(HELPER, encoding="utf-8")
         # Every tool that could reach a real service or a real process is fake.
-        for tool in ["npm", "cargo", "git", "rustc", "lsof", "osascript"]:
+        for tool in ["npm", "cargo", "git", "rustc", "sync", "osascript"]:
             path = self.tools / tool
             path.write_text(
                 "#!/bin/sh\nexec "
@@ -281,7 +305,7 @@ class ScriptTestCase(unittest.TestCase):
                     proc.poll()
                     os.killpg(proc.pid, 0)
                     time.sleep(0.02)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):  # only zombies left: EPERM on macOS
                 break
         proc.wait(timeout=5)
 
@@ -463,6 +487,47 @@ class DevScriptTests(ScriptTestCase):
         self.assertTrue(os.access(installed, os.X_OK))
         self.assertEqual(self.events("branvil"), [], "Neither init nor serve")
 
+    def test_install_takes_only_a_clean_checkout_at_its_commit(self):
+        for name, extra, error in [
+            ("builds/def", {}, "HEAD is abc"),
+            ("builds/abc", {"DEV_TEST_STATUS": " M Cargo.toml\n"}, "uncommitted changes"),
+        ]:
+            with self.subTest(name=name):
+                result = subprocess.run(
+                    ["bash", str(self.repo / "scripts/dev.sh"), "--install", name],
+                    cwd=self.root,
+                    env={**self.env, **extra},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(error, result.stderr)
+                self.assertEqual(self.events("cargo"), [], "Refused before building")
+                self.assertFalse((self.repo / "builds").exists())
+
+    def test_installing_an_existing_build_does_nothing(self):
+        run = lambda: subprocess.run(
+            ["bash", str(self.repo / "scripts/dev.sh"), "--install", "builds/abc"],
+            cwd=self.root, env=self.env, capture_output=True,
+        ).returncode
+        self.assertEqual(run(), 0)
+        built = len(self.events())
+        (self.repo / "builds/abc/kept").touch()
+        self.assertEqual(run(), 0)
+        self.assertEqual([e["tool"] for e in self.events()[built:]], ["git", "git"],
+                         "Only the checkout is read")
+        self.assertTrue((self.repo / "builds/abc/kept").exists())
+
+    def test_an_install_that_fails_partway_leaves_no_build(self):
+        result = subprocess.run(
+            ["bash", str(self.repo / "scripts/dev.sh"), "--install", "builds/abc"],
+            cwd=self.root,
+            env={**self.env, "DEV_TEST_BUILD_NO_BINARY": "1"},
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.repo / "builds/abc").exists())
+
     def test_dependency_installation_tracks_the_lockfile(self):
         modules = self.repo / "web/node_modules"
         for state, should_install in [
@@ -640,9 +705,12 @@ def gone(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
+    except PermissionError:  # a group of zombies only, on macOS
+        return pid < 0
     return False
 
 
+RUNNING = {"checks": [], "checks_expected": True}
 SUCCESS = {"checks": [{"name": "test", "status": "completed", "conclusion": "success"}],
            "checks_expected": True}
 
@@ -728,22 +796,19 @@ class ServeScriptTests(ScriptTestCase):
         """Starts scripts/serve.sh and waits until its service runs."""
         output = self.output("serve")
         proc = self.spawn("serve.sh", "--interval", "1", *args, output=output, **extra_env)
+        self.runs_watcher = proc
         if running:
             self.wait_until(self.service_pid, proc)
         return proc, output
-
-    def update(self, *args, **extra_env):
-        """Runs scripts/update.sh to its end; returns its exit status and output."""
-        output = self.output("update")
-        proc = self.spawn("update.sh", *args, output=output, **extra_env)
-        return proc.wait(timeout=180), output.read_text(encoding="utf-8")
 
     def control(self, **settings):
         Path(self.env["DEV_TEST_CONTROL"]).write_text(json.dumps(settings), encoding="utf-8")
 
     def service_pid(self):
+        """The pid of the fake branvil serve that has the database open."""
         pids = Path(self.env["DEV_TEST_SERVICE_PIDS"])
-        return int(pids.read_text(encoding="utf-8")) if pids.exists() else None
+        pid = int(pids.read_text(encoding="utf-8")) if pids.exists() else None
+        return pid if pid is not None and not gone(pid) else None
 
 
     def current(self):
@@ -763,6 +828,11 @@ class ServeScriptTests(ScriptTestCase):
     def serves(self):
         return [e["binary"] for e in self.events("branvil") if e["args"][0] == "serve"]
 
+    def admins(self, what):
+        """The builds that ran branvil admin `what` on the database itself."""
+        return [e["binary"] for e in self.events("branvil")
+                if e["args"][:2] == ["admin", what] and e["args"][-1] == str(self.data)]
+
     def notifications(self):
         return [e["args"][-1] for e in self.events("osascript")]
 
@@ -777,7 +847,7 @@ class ServeScriptTests(ScriptTestCase):
         return steps
 
     def rounds_pass(self):
-        """Waits until a round of scripts/update.sh --auto that fetched after
+        """Waits until a round of scripts/update.sh that fetched after
         now has ended, so it saw everything set before: the round after it has
         fetched too. (The rounds run one at a time and start on the ticks of
         scripts/serve.sh, so the time between two of them is the same in
@@ -785,16 +855,37 @@ class ServeScriptTests(ScriptTestCase):
         fetches = self.server.fetches + 2
         self.wait_until(lambda: self.server.fetches >= fetches)
 
-    def finished(self, proc, output):
-        self.wait_until(lambda: "Update finished" in output.read_text(encoding="utf-8"), proc)
-
-    def assert_runs(self, sha, pid=None):
-        self.assertEqual(self.current(), sha)
+    def finished(self, proc, output, count=1):
         self.wait_until(
-            lambda: self.service_pid() is not None and self.serves()[-1] == self.binary(sha)
+            lambda: output.read_text(encoding="utf-8").count("Update finished") >= count, proc
+        )
+
+    def assert_runs(self, sha, pid=None, timeout=30):
+        self.wait_until(lambda: self.current() == sha)
+        self.wait_until(
+            lambda: self.service_pid() is not None and self.serves()[-1] == self.binary(sha),
+            timeout=timeout,
         )
         if pid is not None:
             self.assertEqual(self.service_pid(), pid)
+
+    def restart(self, *args):
+        """Stops scripts/serve.sh with TERM and starts it again."""
+        self.runs_watcher.terminate()
+        self.assertEqual(self.runs_watcher.wait(timeout=30), 143)
+        return self.watch(*args, running=False)
+
+    def database(self):
+        return (self.data / "branvil.redb").read_text(encoding="utf-8").strip() or "11"
+
+    def kill_watcher(self, proc):
+        """SIGKILL to scripts/serve.sh and everything it started."""
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+
+    BOOT = ["build", "admin upgrade", "serve"]
+    UPDATE = ["backup", "build", "restore", "admin upgrade", "admin check", "stopped",
+              "admin upgrade", "serve"]
 
     def test_head_is_installed_and_served_and_started_again_when_it_dies(self):
         proc, output = self.watch("--interval", "3600")
@@ -802,43 +893,49 @@ class ServeScriptTests(ScriptTestCase):
         self.assertIsNone(self.attempted())
         [build] = self.events("cargo")
         self.assertIn("--release", build["args"])
+        self.assertEqual(self.steps(), self.BOOT, "Upgraded before it serves")
         self.assertEqual(self.serves(), [self.binary(self.base)])
         [serve] = [e for e in self.events("branvil") if e["args"][0] == "serve"]
         self.assertEqual(serve["args"][-1], str(self.data))
         first = self.service_pid()
         os.kill(first, signal.SIGKILL)
         self.wait_until(lambda: self.service_pid() not in (None, first), proc)
-        self.assertEqual(self.serves(), [self.binary(self.base)] * 2)
+        self.assertEqual(self.steps(), self.BOOT + ["admin upgrade", "serve"])
         log = output.read_text(encoding="utf-8")
         self.assertIn(f"branvil serve of {self.base} exited with status 137", log)
-        self.assertEqual(self.cargo_commands(), ["build"], "Installed once")
 
     def test_a_build_that_keeps_exiting_at_its_start_is_stopped(self):
         proc, output = self.watch("--interval", "3600")
         self.control(DEV_TEST_SERVE_EXIT="1")
         os.kill(self.service_pid(), signal.SIGKILL)
-        self.wait_until(self.notifications, proc)
+        guard = f"{self.base} stopped while starting (it exited within 10 seconds 3 times)"
+        self.wait_until(lambda: any(guard in n for n in self.notifications()), proc)
         self.assertIsNone(self.current())
-        [message] = self.notifications()
-        self.assertIn(f"branvil serve of {self.base} exited at its start 3 times", message)
+        [message] = [n for n in self.notifications() if guard in n]
         self.assertIn(message, output.read_text(encoding="utf-8"))
         starts = len(self.serves())
         self.assertLessEqual(starts, 3)
-        time.sleep(2)
-        self.assertEqual(len(self.serves()), starts, "Not started again")
         # A start again installs nothing and starts nothing.
-        proc.terminate()
-        self.assertEqual(proc.wait(timeout=10), 143)
-        proc, output = self.watch("--interval", "3600", running=False)
+        proc, output = self.restart("--interval", "3600")
         time.sleep(2.5)
         self.assertIsNone(proc.poll())
-        self.assertEqual(output.read_text(encoding="utf-8"), "")
+        self.assertNotIn("starting", output.read_text(encoding="utf-8"))
         self.assertEqual(self.cargo_commands(), ["build"])
-        self.assertEqual(len(self.serves()), starts)
         self.control()
         (self.builds / "current").write_text(f"{self.base}\n", encoding="utf-8")
-        self.wait_until(lambda: len(self.serves()) > starts, proc)
         self.assert_runs(self.base)
+
+    def test_the_crash_count_starts_again_with_another_build(self):
+        proc, _ = self.watch("--interval", "3600")
+        for _ in range(2):
+            pid = self.service_pid()
+            os.kill(pid, signal.SIGKILL)
+            self.wait_until(lambda: self.service_pid() not in (None, pid), proc)
+        shutil.copytree(self.builds / self.base, self.builds / "other")
+        self.control(DEV_TEST_SERVE_EXIT_other="1")
+        (self.builds / "current").write_text("other\n", encoding="utf-8")
+        self.wait_until(lambda: any("other stopped while starting" in n for n in self.notifications()), proc)
+        self.assertEqual(self.serves().count(self.binary("other")), 3)
 
     def test_a_failed_first_install_is_tried_again_at_the_next_start(self):
         self.control(DEV_TEST_BUILD_EXIT="101")
@@ -846,67 +943,66 @@ class ServeScriptTests(ScriptTestCase):
         self.wait_until(self.notifications, proc)
         self.assertIn("Could not install the checkout's HEAD", self.notifications()[0])
         self.assertFalse(self.builds.exists())
-        proc.terminate()
-        self.assertEqual(proc.wait(timeout=10), 143)
         self.control()
+        self.restart("--interval", "3600")
+        self.assert_runs(self.base)
+        self.assertEqual(self.cargo_commands(), ["build", "build"])
+
+    def test_a_first_install_interrupted_by_term_is_done_again_at_the_next_start(self):
+        hold = self.root / "hold"
+        hold.touch()
+        self.control(DEV_TEST_HOLD_BUILD=str(hold))
+        proc, _ = self.watch(running=False)
+        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
+        proc.terminate()
+        time.sleep(0.2)
+        hold.unlink()
+        self.assertEqual(proc.wait(timeout=10), 143)
+        self.assertFalse(self.builds.exists(), "Not half made")
         self.watch("--interval", "3600")
         self.assertEqual(self.cargo_commands(), ["build", "build"])
         self.assert_runs(self.base)
-        self.assertIsNone(self.attempted())
+        self.assertEqual(sorted(p.name for p in self.repo.iterdir() if "builds" in p.name),
+                         ["builds"])
 
-    def test_nothing_starts_while_an_admin_command_has_the_database_open(self):
-        self.watch("--interval", "3600")
-        hold = self.root / "hold"
-        hold.touch()
-        new = self.merge()
-        self.control(**{f"DEV_TEST_HOLD_UPGRADE_{new}": str(hold)})
-        proc = self.spawn("update.sh", output=self.output("update"))
-        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
-        # Only the update is killed; its admin upgrade goes on.
-        os.kill(proc.pid, signal.SIGKILL)
-        proc.wait(timeout=5)
-        starts = len(self.serves())
-        time.sleep(2.5)
-        self.assertEqual(len(self.serves()), starts, "Not started beside admin upgrade")
-        hold.unlink()
-        self.assert_runs(self.base)
-        self.assertEqual(self.notifications(), [])
-
-    def test_a_second_signal_does_not_cut_the_report_short(self):
-        self.watch("--interval", "3600")
-        hold = self.root / "hold"
-        hold.touch()
-        new = self.merge()
-        self.control(**{f"DEV_TEST_SERVE_EXIT_{new}": "23",
-                        f"DEV_TEST_HOLD_SERVE_{self.base}": str(hold)})
-        output = self.output("update")
-        proc = self.spawn("update.sh", output=output)
-        # The report waits for the previous build, held at its start.
-        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
-        proc.terminate()
-        proc.send_signal(signal.SIGINT)
-        time.sleep(0.5)
-        hold.unlink()
-        self.assertEqual(proc.wait(timeout=30), 1)
-        [message] = self.notifications()
-        self.assertIn(f"not upgraded; Branvil runs {self.base} again", message)
-        self.assertFalse((self.builds / "updating").exists())
-        self.assertEqual(self.attempted(), new)
+    def test_a_checkout_with_uncommitted_changes_is_not_installed_first(self):
+        (self.repo / "Cargo.toml").write_text("changed", encoding="utf-8")
+        proc, _ = self.watch(running=False)
+        self.wait_until(self.notifications, proc)
+        self.assertIn("Could not install the checkout's HEAD", self.notifications()[0])
+        self.assertEqual(self.cargo_commands(), [])
+        self.assertFalse(self.builds.exists())
 
     def test_naming_another_build_switches_to_it(self):
         self.watch("--interval", "3600")
         first = self.service_pid()
         shutil.copytree(self.builds / self.base, self.builds / "other")
         (self.builds / "current").write_text("other\n", encoding="utf-8")
-        self.wait_until(lambda: self.service_pid() not in (None, first))
+        self.assert_runs("other")
         self.assertTrue(gone(first))
-        self.assertEqual(self.serves()[-1], self.binary("other"))
+        self.assertEqual(self.admins("upgrade")[-1], self.binary("other"))
+
+    def test_update_sh_is_not_for_hand_use(self):
+        for args in [[], ["--now"], ["--data-dir"]]:
+            with self.subTest(args=args):
+                result = subprocess.run(["bash", str(self.repo / "scripts/update.sh"), *args],
+                                        cwd=self.root, env=self.env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("run by scripts/serve.sh only", result.stderr)
+        self.assertEqual(self.events(), [])
 
     def test_nothing_is_done_while_main_is_the_running_build(self):
         self.watch()
         self.rounds_pass()
         self.assertEqual(self.server.check_requests, [])
-        self.assertEqual(self.steps(), ["build", "serve"])
+        self.assertEqual(self.steps(), self.BOOT)
+
+    def test_a_restart_checks_at_once(self):
+        self.watch("--interval", "3600")
+        new = self.merge(SUCCESS)
+        proc, output = self.restart("--interval", "3600")
+        self.finished(proc, output)
+        self.assert_runs(new)
 
     def test_unfinished_checks_are_waited_for_then_the_update_runs(self):
         new = self.merge({"checks": [], "checks_expected": True})
@@ -917,34 +1013,30 @@ class ServeScriptTests(ScriptTestCase):
             "checks_expected": True,
         }
         self.rounds_pass()
-        self.assertEqual(self.steps(), ["build", "serve"], "No update while checks run")
+        self.assertEqual(self.steps(), self.BOOT, "No update while checks run")
         self.assertIsNone(self.attempted())
         self.server.checks[new] = SUCCESS
         self.finished(proc, output)
-        self.assertEqual(
-            self.steps(),
-            ["build", "serve", "backup", "build", "stopped",
-             "admin upgrade", "admin check", "serve"],
-            "Built before the service stops",
-        )
+        self.assertEqual(self.steps(), self.BOOT + self.UPDATE,
+                         "Built and rehearsed before the service stops")
         self.assert_runs(new)
         self.assertEqual(self.serves(), [self.binary(self.base), self.binary(new)])
-        upgrade, check = [e for e in self.events("branvil") if e["args"][0] == "admin"]
-        self.assertEqual(upgrade["binary"], self.binary(new))
-        self.assertEqual(check["binary"], self.binary(new))
+        self.assertEqual(self.admins("upgrade")[-1], self.binary(new))
+        self.assertEqual(self.admins("check"), [], "Nothing changed the database itself")
         backup = next(e for e in self.events("branvil") if e["args"][0] == "backup")
         self.assertEqual(backup["binary"], self.binary(self.base), "Backed up by the old build")
         self.assertFalse(backup["token_present"])
         self.assertFalse(backup["url_present"])
         self.assertEqual(backup["args"][backup["args"].index("--data-dir") + 1], str(self.data))
-        self.assertEqual(self.installed(), sorted([self.base, new]), "The previous build stays")
         [made] = self.backups.iterdir()
         self.assertRegex(made.name, r"^branvil-update-\d{8}T\d{6}Z$")
+        restore = next(e for e in self.events("branvil") if e["args"][0] == "restore")
+        self.assertEqual(restore["binary"], self.binary(self.base), "Restored by the old build")
+        self.assertEqual(restore["args"][restore["args"].index("--from") + 1], str(made))
+        self.assertFalse((self.builds / "rehearsal").exists(), "The copy is removed")
+        self.assertEqual(self.installed(), sorted([self.base, new]), "The previous build stays")
         self.assertEqual(self.git("branch", "--show-current"), "main")
         self.assertEqual(self.git("rev-parse", "HEAD"), new)
-        self.assertEqual(
-            {e["args"][-1] for e in self.events("lsof")}, {str(self.data / "branvil.redb")}
-        )
         self.assertEqual(set(self.server.users), {"keeper"}, "Fetched as the owner")
         self.assertFalse(self.helper_used.exists(), "The user's credential helper")
         self.assertNotIn("test-owner-token", output.read_text(encoding="utf-8"))
@@ -955,11 +1047,39 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(len(self.server.check_requests), requests, "Not read again")
         # The next update keeps the build it replaces, and only that one.
         newer = self.merge(SUCCESS)
-        self.wait_until(
-            lambda: output.read_text(encoding="utf-8").count("Update finished") == 2, proc
-        )
+        self.finished(proc, output, 2)
         self.assert_runs(newer)
         self.assertEqual(self.installed(), sorted([new, newer]))
+
+    def test_an_upgrade_that_changes_the_database_is_checked_before_it_serves(self):
+        proc, output = self.watch()
+        new = self.merge(RUNNING)
+        self.control(**{f"DEV_TEST_SCHEMA_{new}": "12"})
+        self.server.checks[new] = SUCCESS
+        self.finished(proc, output)
+        self.assert_runs(new)
+        self.assertEqual(self.database(), "12")
+        self.assertEqual(self.steps()[-3:], ["admin upgrade", "admin check", "serve"])
+        self.assertEqual(self.admins("check"), [self.binary(new)])
+        self.assertIn(f"the database as it was: {self.data}/branvil-schema-11-test.redb",
+                      output.read_text(encoding="utf-8"))
+
+    def test_a_check_cut_off_after_the_upgrade_runs_at_the_next_start(self):
+        proc, output = self.watch()
+        hold = self.root / "hold"
+        hold.touch()
+        new = self.merge(RUNNING)
+        self.control(**{f"DEV_TEST_SCHEMA_{new}": "12", f"DEV_TEST_HOLD_UPGRADED_{new}": str(hold)})
+        self.server.checks[new] = SUCCESS
+        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
+        self.kill_watcher(proc)
+        hold.unlink()
+        self.assertEqual(self.database(), "12", "Upgraded before the kill")
+        proc, output = self.watch(running=False)
+        self.finished(proc, output)
+        self.assert_runs(new)
+        self.assertEqual(self.admins("check"), [self.binary(new)])
+        self.assertEqual(self.steps()[-3:], ["admin upgrade", "admin check", "serve"])
 
     def test_failed_checks_are_not_installed_nor_read_again(self):
         new = self.merge({
@@ -973,7 +1093,7 @@ class ServeScriptTests(ScriptTestCase):
         self.wait_until(lambda: self.attempted() == new)
         self.rounds_pass()
         self.assertEqual(self.server.check_requests, [new])
-        self.assertEqual(self.steps(), ["build", "serve"])
+        self.assertEqual(self.steps(), self.BOOT)
         self.assertEqual(self.current(), self.base)
         self.assertEqual(self.notifications(), [])
 
@@ -994,7 +1114,7 @@ class ServeScriptTests(ScriptTestCase):
             self.assertIn(text, log)
         [message] = self.notifications()
         self.assertIn(f"stopped while reading the checks of {new}", message)
-        self.assertEqual(self.steps(), ["build", "serve"])
+        self.assertEqual(self.steps(), self.BOOT)
         self.assertIsNone(self.attempted(), "Read again in the next round")
         token = self.data / "secrets/owner.token"
         token.unlink()
@@ -1007,6 +1127,40 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(len(self.notifications()), 2)
         self.assertFalse((self.builds / "notified").exists())
 
+    def check_checkout(self, change):
+        """A checkout the update cannot fast-forward to origin/main."""
+        new = self.merge(RUNNING)
+        if change != "uncommitted":
+            self.git("switch", "main")
+            if change == "ahead":
+                self.git("pull", "--ff-only", str(self.root / "git/acme/demo.git"), "main")
+            (self.repo / "LOCAL").write_text("local\n", encoding="utf-8")
+            self.git("add", "LOCAL")
+            self.git("commit", "-m", "local only")
+        head = self.git("rev-parse", "HEAD")
+        self.watch("--interval", "3600")
+        if change == "uncommitted":
+            (self.repo / "Cargo.toml").write_text("changed", encoding="utf-8")
+        self.server.checks[new] = SUCCESS
+        proc, _ = self.restart("--interval", "3600")
+        self.wait_until(self.notifications, proc)
+        [message] = self.notifications()
+        self.assertIn(f"The update to {'origin/main' if change == 'uncommitted' else new} "
+                      "stopped while checking the checkout", message)
+        self.assert_runs(head)
+        self.assertNotIn("backup", self.steps())
+        self.assertIsNone(self.attempted())
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+
+    def test_a_checkout_with_uncommitted_changes_is_not_updated(self):
+        self.check_checkout("uncommitted")
+
+    def test_a_main_ahead_of_origin_main_is_not_updated(self):
+        self.check_checkout("ahead")
+
+    def test_a_main_beside_origin_main_is_not_updated(self):
+        self.check_checkout("diverged")
+
     def test_a_failed_build_keeps_the_service_running_and_is_not_tried_again(self):
         proc, output = self.watch()
         pid = self.service_pid()
@@ -1014,29 +1168,31 @@ class ServeScriptTests(ScriptTestCase):
         failing = self.merge(SUCCESS)
         self.wait_until(self.notifications, proc)
         self.rounds_pass()
-        self.assertEqual(self.steps(), ["build", "serve", "backup", "build"])
+        self.assertEqual(self.steps(), self.BOOT + ["backup", "build"])
         self.assert_runs(self.base, pid)
         self.assertEqual(self.attempted(), failing)
         [message] = self.notifications()
         self.assertIn(f"The update to {failing} stopped while installing", message)
         self.assertIn(f"Branvil still runs {self.base}", message)
-        self.assertIn(message, output.read_text(encoding="utf-8"))
         self.control()
         new = self.merge(SUCCESS)
         self.finished(proc, output)
         self.assert_runs(new)
         self.assertEqual(self.installed(), sorted([self.base, new]))
 
-    def test_a_killed_update_is_tried_again(self):
+    def test_an_update_killed_alone_is_tried_again(self):
         proc, output = self.watch()
         hold = self.root / "hold"
         hold.touch()
         self.control(DEV_TEST_HOLD_BUILD=str(hold))
         new = self.merge(SUCCESS)
         self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
-        os.kill(int((self.builds / "updating").read_text(encoding="utf-8")), signal.SIGKILL)
-        self.control()
         builder = self.events("cargo")[-1]["pid"]
+        # scripts/update.sh is the parent of scripts/dev.sh, the parent of cargo.
+        parent = lambda pid: int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                                                capture_output=True, text=True).stdout)
+        os.kill(parent(parent(builder)), signal.SIGKILL)
+        self.control()
         hold.unlink()
         self.wait_until(lambda: gone(builder))
         self.finished(proc, output)
@@ -1044,41 +1200,137 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(self.steps().count("backup"), 2, "The killed run, then the retry")
         self.assertEqual(self.notifications(), [])
 
-    def test_a_failed_check_after_an_upgrade_stays_stopped(self):
-        new = self.merge(SUCCESS)
-        copy = self.data / "branvil-schema-10-test.redb"
-        proc, output = self.watch(**{
-            f"DEV_TEST_UPGRADE_COPY_{new}": str(copy),
-            f"DEV_TEST_CHECK_EXIT_{new}": "1",
-        })
-        self.wait_until(self.notifications, proc)
-        self.wait_until(lambda: not (self.builds / "updating").exists())
-        self.assertEqual(
-            self.steps(),
-            ["build", "serve", "backup", "build", "stopped", "admin upgrade", "admin check"],
-        )
-        self.assertIsNone(self.current())
-        self.assertIsNone(self.service_pid())
-        [message] = self.notifications()
-        self.assertIn("while checking the data directory", message)
-        self.assertIn("upgraded; Branvil is stopped", message)
-        [backup] = self.backups.iterdir()
-        log = output.read_text(encoding="utf-8")
-        for text in [
-            f"Backup taken before the update: {backup}",
-            f"Database before the upgrade: {copy}",
-            f"echo {self.base} >{self.builds}/current",
-            f"echo {new} >{self.builds}/current",
-            "docs/backup-restore.md",
-        ]:
-            self.assertIn(text, log)
-        self.assertEqual(self.installed(), sorted([self.base, new]), "Kept to go back")
-        fetches = self.server.fetches
-        time.sleep(2.5)
-        self.assertEqual(self.server.fetches, fetches, "No update round while stopped")
-        self.assertEqual(self.serves(), [self.binary(self.base)])
-        (self.builds / "current").write_text(f"{self.base}\n", encoding="utf-8")
+    def test_an_update_cut_off_by_a_kill_goes_on_at_the_next_start(self):
+        for failure, runs, attempted in [("", "other", None),
+                                         (" checking the data directory", self.base, "other")]:
+            with self.subTest(failure=failure):
+                # Not a commit to update to: "other" is no commit of origin.
+                self.server.checks[self.base] = RUNNING
+                self.watch("--interval", "3600")
+                self.runs_watcher.terminate()
+                self.runs_watcher.wait(timeout=30)
+                # As a kill left them: the update recorded, builds/current not
+                # yet switched, or its failure recorded but not concluded.
+                shutil.rmtree(self.builds / "other", ignore_errors=True)
+                shutil.copytree(self.builds / self.base, self.builds / "other")
+                (self.builds / "update").write_text(f"other {self.base} -{failure}\n", encoding="utf-8")
+                (self.builds / "current").write_text(f"{self.base}\n", encoding="utf-8")
+                self.watch("--interval", "3600")
+                self.assert_runs(runs)
+                self.wait_until(lambda: not (self.builds / "update").exists())
+                self.assertEqual(self.attempted(), attempted)
+                self.assertEqual(len(self.notifications()), 1 if attempted else 0)
+                self.runs_watcher.terminate()
+                self.runs_watcher.wait(timeout=30)
+
+    def check_conclusion_cut_off(self, hold_setting):
+        proc, _ = self.watch()
+        hold = self.root / "hold"
+        hold.touch()
+        new = self.merge(RUNNING)
+        self.control(**{f"DEV_TEST_SERVE_EXIT_{new}": "23", hold_setting: str(hold)})
+        self.server.checks[new] = SUCCESS
+        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
+        self.kill_watcher(proc)
+        hold.unlink()
+        self.watch(running=False)
         self.assert_runs(self.base)
+        self.wait_until(lambda: not (self.builds / "update").exists())
+        self.rounds_pass()
+        self.assertEqual(len(self.notifications()), 1)
+        self.assertIn(f"Branvil runs {self.base} again", self.notifications()[0])
+        self.assertEqual(self.attempted(), new)
+
+    def test_a_conclusion_cut_off_before_it_notifies_notifies_once(self):
+        # The previous build's admin upgrade, which decides where it goes back.
+        self.check_conclusion_cut_off(f"DEV_TEST_HOLD_UPGRADE_{self.base}")
+
+    def test_a_conclusion_cut_off_after_it_notified_does_not_notify_again(self):
+        self.check_conclusion_cut_off("DEV_TEST_HOLD_NOTIFY")
+
+    def test_an_update_that_changes_serve_sh_runs_the_new_one(self):
+        proc, output = self.watch()
+        script = self.upstream / "scripts/serve.sh"
+        text = script.read_text(encoding="utf-8")
+        marker = '  cd "$repo_root"\n'
+        self.assertEqual(text.count(marker), 1)
+        script.write_text(text.replace(marker, marker + '  log "this is the new scripts/serve.sh"\n'),
+                          encoding="utf-8")
+        self.git("add", "scripts/serve.sh", cwd=self.upstream)
+        new = self.merge(SUCCESS)
+        self.finished(proc, output)
+        self.assert_runs(new)
+        self.assertIn("this is the new scripts/serve.sh", output.read_text(encoding="utf-8"))
+
+    def test_every_state_file_is_written_whole_and_on_the_disk(self):
+        lib = (self.repo / "scripts/lib.sh").read_text(encoding="utf-8")
+        put = lib[lib.index("put() {"):]
+        self.assertLess(put.index("sync"), put.index("mv -f"), "On the disk before the rename")
+        for script in ["serve.sh", "update.sh"]:
+            text = (self.repo / "scripts" / script).read_text(encoding="utf-8")
+            # (builds/serve.out is the serve's standard output, no state.)
+            self.assertNotRegex(text, r'>\s*"\$builds/(?!serve\.out)', f"{script} writes under builds/ itself")
+        self.watch("--interval", "3600")
+        self.assertGreaterEqual(len(self.events("sync")), 1)
+
+    def test_a_failed_backup_is_tried_again_and_notified_once(self):
+        proc, output = self.watch()
+        self.control(DEV_TEST_BACKUP_EXIT="1")
+        new = self.merge(SUCCESS)
+        self.wait_until(self.notifications, proc)
+        self.rounds_pass()
+        self.assertGreaterEqual(self.steps().count("backup"), 2, "Tried again")
+        [message] = self.notifications()
+        self.assertIn(f"The update to {new} stopped while backing up", message)
+        self.assertIsNone(self.attempted())
+        self.control()
+        self.finished(proc, output)
+        self.assert_runs(new)
+
+    def test_a_new_build_slower_to_start_than_a_minute_is_waited_for(self):
+        proc, output = self.watch()
+        hold = self.root / "hold"
+        hold.touch()
+        new = self.merge(RUNNING)
+        self.control(**{f"DEV_TEST_HOLD_SERVE_{new}": str(hold)})
+        self.server.checks[new] = SUCCESS
+        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
+        time.sleep(65)
+        self.assertNotIn("Update finished", output.read_text(encoding="utf-8"))
+        self.assertIsNone(self.attempted())
+        hold.unlink()
+        self.finished(proc, output)
+        self.assert_runs(new)
+        self.assertEqual(self.notifications(), [])
+
+    def test_a_serve_that_ignores_term_is_killed(self):
+        proc, output = self.watch("--interval", "3600")
+        first = self.service_pid()
+        shutil.copytree(self.builds / self.base, self.builds / "other")
+        self.control(**{f"DEV_TEST_SERVE_IGNORE_TERM_{self.base}": "1"})
+        # Started again with the setting.
+        os.kill(first, signal.SIGKILL)
+        self.wait_until(lambda: self.service_pid() not in (None, first), proc)
+        stubborn = self.service_pid()
+        (self.builds / "current").write_text("other\n", encoding="utf-8")
+        self.assert_runs("other", timeout=60)  # after the 30 seconds it gives TERM
+        self.assertTrue(gone(stubborn))
+        self.assertIn("did not stop within 30 seconds of TERM; killing it",
+                      output.read_text(encoding="utf-8"))
+
+    def test_leftovers_are_removed_at_the_start(self):
+        self.watch("--interval", "3600")
+        leftovers = [self.builds / "rehearsal", self.builds / f"{self.base}.new"]
+        for path in leftovers:
+            path.mkdir()
+        files = [self.builds / "current.123.tmp", self.data / "branvil-schema-10-x.redb.partial"]
+        for path in files:
+            path.write_text("partial", encoding="utf-8")
+        self.restart("--interval", "3600")
+        self.assert_runs(self.base)
+        for path in leftovers + files:
+            self.assertFalse(path.exists(), path)
+        self.assertEqual(self.installed(), [self.base])
 
     def test_term_stops_the_service_and_a_running_update(self):
         proc, output = self.watch()
@@ -1094,11 +1346,41 @@ class ServeScriptTests(ScriptTestCase):
         self.assertIsNone(proc.poll(), "It waits for the update's running step")
         hold.unlink()
         self.assertEqual(proc.wait(timeout=10), 143)
-        self.assertTrue(gone(-proc.pid), "Nothing of it is left")
-        self.assertNotIn("admin upgrade", self.steps())
+        self.wait_until(lambda: gone(-proc.pid))  # nothing of it is left
         self.assertEqual(self.current(), self.base)
         self.assertIsNone(self.attempted(), "Tried again at the next start")
+        self.assertEqual(self.notifications(), [])
         self.assertIn("stopped while installing", output.read_text(encoding="utf-8"))
+
+    def test_only_the_newest_three_of_its_own_backups_are_kept(self):
+        def made(name, complete=True):
+            path = self.backups / name
+            path.mkdir(parents=True)
+            if complete:
+                (path / "manifest.json").write_text("{}", encoding="utf-8")
+            return path
+
+        oldest = made("branvil-update-20260101T000000Z")
+        older = made("branvil-update-20260201T000000Z")
+        old = made("branvil-update-20260301T000000Z")
+        failed = made("branvil-update-20260401T000000Z", complete=False)
+        others = [made("before-schema-11"), made("branvil-update-latest")]
+        notes = self.backups / "branvil-update-20250101T000000Z.txt"
+        notes.write_text("not a backup", encoding="utf-8")
+        new = self.merge(SUCCESS)
+        proc, output = self.watch()
+        self.finished(proc, output)
+        self.assert_runs(new)
+        made_now = [
+            p for p in self.backups.iterdir()
+            if p not in (older, old, *others, notes)
+        ]
+        self.assertEqual(len(made_now), 1)
+        self.assertTrue((made_now[0] / "manifest.json").is_file())
+        for path in (older, old, *others, notes):
+            self.assertTrue(path.exists(), path)
+        for path in (oldest, failed):
+            self.assertFalse(path.exists(), path)
 
     def test_plist_runs_this_script_with_the_options_and_path(self):
         result = subprocess.run(
@@ -1123,212 +1405,95 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(plist["StandardOutPath"], plist["StandardErrorPath"])
         self.assertEqual(self.events(), [], "Only printed")
 
-    def check_outcome(self, stage, applied, how, runs):
-        """An update run by hand that fails at `stage`, or is interrupted there
-        with TERM, after an upgrade that changed the database (`applied`) or
-        did not. `runs` is the build builds/current then names: the previous
-        one, the new one, or None (Branvil stays stopped)."""
-        self.watch("--interval", "3600")
+    def check_outcome(self, stage, upgraded, how):
+        """An update (with a new build of the database's version, or of the
+        next one: `upgraded`) that fails at `stage`, or whose scripts/serve.sh
+        gets a TERM there, or is killed with all it started, and is started
+        again."""
+        proc, output = self.watch()
         pid = self.service_pid()
-        new = self.merge()
-        settings = {}
-        if applied:
-            settings[f"DEV_TEST_UPGRADE_COPY_{new}"] = str(self.data / "copy.redb")
         hold = self.root / "hold"
+        new = self.merge(RUNNING)
+        settings = {f"DEV_TEST_SCHEMA_{new}": "12"} if upgraded else {}
         if how == "fails":
-            name, value = {
-                "install": ("DEV_TEST_BUILD_EXIT", "101"),
-                "upgrade": (f"DEV_TEST_UPGRADE_EXIT_{new}", "1"),
-                "check": (f"DEV_TEST_CHECK_EXIT_{new}", "1"),
-                "start": (f"DEV_TEST_SERVE_EXIT_{new}", "23"),
-            }[stage]
-            settings[name] = value
+            settings.update({
+                "install": {"DEV_TEST_BUILD_EXIT": "101"},
+                "rehearsal upgrade": {f"DEV_TEST_REHEARSAL_UPGRADE_EXIT_{new}": "1"},
+                "rehearsal check": {f"DEV_TEST_REHEARSAL_CHECK_EXIT_{new}": "1"},
+                "upgrade": {f"DEV_TEST_UPGRADE_EXIT_{new}": "1"},
+                "check": {f"DEV_TEST_CHECK_EXIT_{new}": "1"},
+                "start": {f"DEV_TEST_SERVE_EXIT_{new}": "23"},
+            }[stage])
         else:
             hold.touch()
-            step = {"install": "BUILD", "upgrade": "UPGRADE", "check": "CHECK", "start": "SERVE"}
-            suffix = "" if stage == "install" else f"_{new}"
-            settings[f"DEV_TEST_HOLD_{step[stage]}{suffix}"] = str(hold)
+            step = {"install": "BUILD", "rehearsal": "REHEARSAL_UPGRADE", "upgrade": "UPGRADE",
+                    "upgraded": "UPGRADED", "check": "CHECK", "start": "SERVE"}[stage]
+            settings[f"DEV_TEST_HOLD_{step}" + ("" if stage == "install" else f"_{new}")] = str(hold)
         self.control(**settings)
-        output = self.output("update")
-        proc = self.spawn("update.sh", output=output)
-        if how == "interrupted":
+        self.server.checks[new] = SUCCESS
+        if how != "fails":
             self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
-            proc.terminate()
-            time.sleep(0.2)
-            hold.unlink()
-        status = proc.wait(timeout=120)
-        log = output.read_text(encoding="utf-8")
-        self.assertNotEqual(status, 0, log)
-        self.assertEqual(status == 143, how == "interrupted", log)
-        expected = {"previous": self.base, "new": new, None: None}[runs]
-        self.assertEqual(self.current(), expected, log)
-        if expected is None:
+            if how == "term":
+                proc.terminate()
+                time.sleep(0.2)
+                hold.unlink()
+                self.assertEqual(proc.wait(timeout=30), 143)
+            else:
+                self.kill_watcher(proc)
+                hold.unlink()
+            # Nothing was concluded: the start again finishes the update.
+            proc, output = self.watch(running=False)
+            self.finished(proc, output)
+            self.assert_runs(new)
+            self.assertIsNone(self.attempted())
+            self.assertEqual(self.notifications(), [])
+            self.assertEqual(self.database(), "12" if upgraded else "11")
+            return
+        self.wait_until(self.notifications, proc)
+        self.assertEqual(self.attempted(), new)
+        [message] = self.notifications()
+        self.assertIn(message, output.read_text(encoding="utf-8"))
+        if stage in ("install", "rehearsal upgrade", "rehearsal check"):
+            self.assertIn(f"Branvil still runs {self.base}", message)
+            self.assert_runs(self.base, pid)
+            self.assertNotIn("stopped", self.steps(), "Never stopped")
+        elif stage == "check" or (stage == "start" and upgraded):
+            self.assertIn("after the data directory was upgraded; Branvil is stopped", message)
+            self.assertIsNone(self.current())
             time.sleep(1.5)
             self.assertIsNone(self.service_pid(), "Stopped")
         else:
-            self.assert_runs(expected, pid if stage == "install" else None)
-        self.assertFalse((self.builds / "hold").exists())
-        self.assertEqual(self.attempted(), new if how == "fails" else None, log)
-        # An interruption at the upgrade takes effect after the check.
-        words = {
-            "install": "installing builds/",
-            "upgrade": "checking" if how == "interrupted" else "upgrading",
-            "check": "checking the data directory",
-            "start": "starting the new build",
-        }[stage]
-        [message] = self.notifications()
-        self.assertIn(f"stopped while {words}", message)
-
-    # Updates run by hand, while scripts/serve.sh runs (it checks only hourly).
-
-    def test_an_upgrade_report_other_than_left_as_it_is_counts_as_an_upgrade(self):
-        self.watch("--interval", "3600")
-        new = self.merge()
-        for output in [f"{self.data}/branvil.redb already has schema version 11 (test)",
-                       "upgraded in a way this script does not know"]:
-            with self.subTest(output=output):
-                self.control(**{f"DEV_TEST_UPGRADE_OUTPUT_{new}": output,
-                                f"DEV_TEST_CHECK_EXIT_{new}": "1"})
-                status, log = self.update()
-                self.assertEqual(status, 1, log)
-                self.assertIsNone(self.current(), "Stopped: the database may be upgraded")
-                self.assertIn("Database before the upgrade: not reported", log)
-                (self.builds / "current").write_text(f"{self.base}\n", encoding="utf-8")
-                self.assert_runs(self.base)
-
-    def test_only_the_newest_three_of_its_own_backups_are_kept(self):
-        def made(name, complete=True):
-            path = self.backups / name
-            path.mkdir(parents=True)
-            if complete:
-                (path / "manifest.json").write_text("{}", encoding="utf-8")
-            return path
-
-        oldest = made("branvil-update-20260101T000000Z")
-        older = made("branvil-update-20260201T000000Z")
-        old = made("branvil-update-20260301T000000Z")
-        failed = made("branvil-update-20260401T000000Z", complete=False)
-        others = [made("before-schema-11"), made("branvil-update-latest")]
-        notes = self.backups / "branvil-update-20250101T000000Z.txt"
-        notes.write_text("not a backup", encoding="utf-8")
-        self.watch("--interval", "3600")
-        new = self.merge()
-        status, output = self.update()
-        self.assertEqual(status, 0, output)
-        self.assert_runs(new)
-        made_now = [
-            p for p in self.backups.iterdir()
-            if p not in (older, old, *others, notes)
-        ]
-        self.assertEqual(len(made_now), 1)
-        self.assertTrue((made_now[0] / "manifest.json").is_file())
-        for path in (older, old, *others, notes):
-            self.assertTrue(path.exists(), path)
-        for path in (oldest, failed):
-            self.assertFalse(path.exists(), path)
-        self.assertEqual(self.server.check_requests, [], "A manual update reads no checks")
-
-    def test_a_main_that_is_the_running_build_is_left_alone(self):
-        self.watch("--interval", "3600")
-        pid = self.service_pid()
-        status, output = self.update()
-        self.assertEqual(status, 0, output)
-        self.assertIn(f"Branvil already runs {self.base}; nothing to update.", output)
-        self.assert_runs(self.base, pid)
-        self.assertEqual(self.steps(), ["build", "serve"])
-        self.assertEqual(self.git("branch", "--show-current"), "work")
-        self.assertFalse(self.backups.exists())
-        self.assertEqual(self.notifications(), [])
-
-    def test_no_running_service_ends_the_update_before_anything(self):
-        status, output = self.update()
-        self.assertEqual(status, 1)
-        self.assertIn("Branvil is not running", output)
-        self.assertIn("scripts/serve.sh", output)
-        self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
-        self.assertEqual(self.steps(), [])
-        self.assertFalse(self.backups.exists())
-
-    def test_uncommitted_changes_end_the_update_before_anything(self):
-        self.watch("--interval", "3600")
-        pid = self.service_pid()
-        self.merge()
-        (self.repo / "Cargo.toml").write_text("changed", encoding="utf-8")
-        status, output = self.update()
-        self.assertEqual(status, 1)
-        self.assertIn("uncommitted changes", output)
-        self.assertIn("Cargo.toml", output)
-        self.assert_runs(self.base, pid)
-        self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
-        self.assertEqual(self.steps(), ["build", "serve"])
-        self.assertFalse(self.backups.exists())
-        self.assertFalse((self.builds / "updating").exists())
-
-    def test_another_running_update_is_waited_for(self):
-        self.watch("--interval", "3600")
-        self.merge()
-        lock = self.builds / "updating"
-        lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
-        status, output = self.update()
-        self.assertEqual(status, 1)
-        self.assertIn(f"Another update is running (pid {os.getpid()})", output)
-        self.assertEqual(self.steps(), ["build", "serve"])
-        # One whose process is gone does not count.
-        lock.write_text("999999\n", encoding="utf-8")
-        status, output = self.update()
-        self.assertEqual(status, 0, output)
-        self.assertFalse(lock.exists())
-
-    def test_a_main_that_cannot_fast_forward_stops_while_the_service_runs(self):
-        self.watch("--interval", "3600")
-        pid = self.service_pid()
-        self.git("switch", "main")
-        (self.repo / "LOCAL").write_text("local\n", encoding="utf-8")
-        self.git("add", "LOCAL")
-        self.git("commit", "-m", "local only")
-        local = self.git("rev-parse", "HEAD")
-        new = self.merge()
-        status, output = self.update()
-        self.assertNotEqual(status, 0)
-        self.assertIn(f"The update to {new} stopped while updating the checkout", output)
-        self.assertIn(f"Branvil still runs {self.base}", output)
-        self.assert_runs(self.base, pid)
-        self.assertEqual(self.git("rev-parse", "HEAD"), local)
-        self.assertEqual(self.steps(), ["build", "serve", "backup"])
-
-    def test_an_unreadable_owner_token_stops_before_the_fetch(self):
-        self.watch("--interval", "3600")
-        pid = self.service_pid()
-        (self.data / "secrets/owner.token").unlink()
-        status, output = self.update()
-        self.assertNotEqual(status, 0)
-        self.assertIn("stopped while fetching origin", output)
-        self.assertEqual(self.server.users, [], "No request without the token")
-        self.assert_runs(self.base, pid)
+            self.assertIn(f"Branvil runs {self.base} again", message)
+            self.assert_runs(self.base)
+            self.assertEqual(self.database(), "11")
 
 
-# What builds/current names after an update ends at each stage, by how it ends
-# and whether admin upgrade had changed the database: (stage, applied, how, runs).
+# How an update ends at each stage, when that stage fails, or when
+# scripts/serve.sh gets a TERM there or is killed with all it started (and is
+# started again), with a new build of the database's version or of the next
+# one: (stage, upgraded, how).
 OUTCOMES = [
-    ("install", False, "fails", "previous"),
-    ("install", False, "interrupted", "previous"),
-    ("upgrade", False, "fails", "previous"),
-    ("upgrade", False, "interrupted", "previous"),
-    ("upgrade", True, "interrupted", "new"),
-    ("check", False, "fails", "previous"),
-    ("check", True, "fails", None),
-    ("check", False, "interrupted", "previous"),
-    ("check", True, "interrupted", "new"),
-    ("start", False, "fails", "previous"),
-    ("start", True, "fails", None),
-    ("start", False, "interrupted", "previous"),
-    ("start", True, "interrupted", "new"),
-]
-for _stage, _applied, _how, _runs in OUTCOMES:
+    ("install", False, "fails"),
+    ("rehearsal upgrade", True, "fails"),
+    ("rehearsal check", False, "fails"),
+    ("upgrade", True, "fails"),  # an upgrade fails only when there is one to do
+    ("check", True, "fails"),  # the database itself is checked only when upgraded
+    ("start", False, "fails"),
+    ("start", True, "fails"),
+] + [
+    (stage, upgraded, how)
+    for how in ["term", "killed"]
+    for stage, upgraded in [
+        ("install", False), ("rehearsal", False), ("upgrade", False), ("upgrade", True),
+        ("check", True), ("start", False), ("start", True),
+    ]
+] + [("upgraded", True, "killed")]
+for _row in OUTCOMES:
     setattr(
         ServeScriptTests,
-        f"test_outcome_{_stage}_{'upgraded' if _applied else 'not_upgraded'}_{_how}",
-        lambda self, row=(_stage, _applied, _how, _runs): self.check_outcome(*row),
+        "test_outcome_{}_{}_{}".format(_row[0].replace(" ", "_"),
+                                       "upgraded" if _row[1] else "same_version", _row[2]),
+        lambda self, row=_row: self.check_outcome(*row),
     )
 
 

@@ -102,9 +102,14 @@ pub enum AdminCommand {
     /// Rebuild every derived index from the records
     Reindex,
     /// Upgrade the database from the previous schema version, keeping a copy
-    /// of it as it was (stop the service and take a backup first)
+    /// of it as it was (stop the service and take a backup first). Exits 0
+    /// when the database already has this version and nothing changed, 3
+    /// when it was upgraded, and 1 when it failed, which leaves it unchanged
     Upgrade,
 }
+
+/// The exit status of `branvil admin upgrade` that upgraded the database.
+pub const UPGRADED: u8 = 3;
 
 pub fn init(
     config_path: Option<&Path>,
@@ -279,7 +284,7 @@ pub async fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8>
         AdminCommand::Upgrade => {
             let done = crate::upgrade::upgrade(&layout)?;
             println!("{}", store::upgrade_report(&layout.db(), &done));
-            Ok(0)
+            Ok(if done.is_some() { UPGRADED } else { 0 })
         }
         AdminCommand::Check => {
             let store = open()?;
