@@ -778,10 +778,12 @@ class ServeScriptTests(ScriptTestCase):
 
     def rounds_pass(self):
         """Waits until a round of scripts/update.sh --auto that fetched after
-        now has ended: it saw everything set before."""
-        fetches = self.server.fetches + 1
+        now has ended, so it saw everything set before: the round after it has
+        fetched too. (The rounds run one at a time and start on the ticks of
+        scripts/serve.sh, so the time between two of them is the same in
+        every round and can be shorter than any polling interval.)"""
+        fetches = self.server.fetches + 2
         self.wait_until(lambda: self.server.fetches >= fetches)
-        self.wait_until(lambda: not (self.builds / "updating").exists())
 
     def finished(self, proc, output):
         self.wait_until(lambda: "Update finished" in output.read_text(encoding="utf-8"), proc)
