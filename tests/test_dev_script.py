@@ -909,8 +909,9 @@ class ServeScriptTests(ScriptTestCase):
         self.control(DEV_TEST_SERVE_EXIT="1")
         os.kill(self.service_pid(), signal.SIGKILL)
         guard = f"{self.base} stopped while starting (it exited within 10 seconds 3 times)"
-        self.wait_until(lambda: any(guard in n for n in self.notifications()), proc)
-        self.assertIsNone(self.current())
+        # Told first, then builds/current goes.
+        self.wait_until(lambda: any(guard in n for n in self.notifications())
+                        and self.current() is None, proc)
         [message] = [n for n in self.notifications() if guard in n]
         self.assertIn(message, output.read_text(encoding="utf-8"))
         starts = len(self.serves())
