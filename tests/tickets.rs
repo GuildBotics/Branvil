@@ -1249,10 +1249,13 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        (out.status.success(), text)
+        (out.status.code().unwrap(), text)
     };
-    let (ok, text) = admin("check");
-    assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
+    let (code, text) = admin("check");
+    assert!(
+        code != 0 && text.contains("branvil admin upgrade"),
+        "{text}"
+    );
     // A ticket it does not expect stops it before anything is written, the
     // copy of the database included.
     let four = |title: Value| {
@@ -1263,8 +1266,13 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
         })
     };
     four(Value::Null);
-    let (ok, text) = admin("upgrade");
-    assert!(!ok && text.contains("a ticket does not decode"), "{text}");
+    // The exit status says what happened (scripts/serve.sh reads it): 1, the
+    // database is left as it was.
+    let (code, text) = admin("upgrade");
+    assert!(
+        code == 1 && text.contains("a ticket does not decode"),
+        "{text}"
+    );
     let copies = std::fs::read_dir(&data)
         .unwrap()
         .filter(|e| {
@@ -1276,12 +1284,26 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
         })
         .count();
     assert_eq!(copies, 0);
-    let (ok, text) = admin("check");
-    assert!(!ok && text.contains("branvil admin upgrade"), "{text}");
-    four(json!("Four"));
-    let (ok, text) = admin("upgrade");
+    let (code, text) = admin("check");
     assert!(
-        ok && text.contains(
+        code != 0 && text.contains("branvil admin upgrade"),
+        "{text}"
+    );
+    four(json!("Four"));
+    let (code, text) = admin("upgrade");
+    // scripts/serve.sh tells the owner that its log names the copy.
+    let copy = format!(
+        "\nthe database as it was: {}",
+        data.join("branvil-schema-10-").display()
+    );
+    assert!(text.contains(&copy), "{text}");
+    let next = format!(
+        "\n`branvil admin check --data-dir {0}` has to pass before `branvil serve --data-dir {0}` starts it",
+        data.display()
+    );
+    assert!(text.contains(&next), "{text}");
+    assert!(
+        code == 3 && text.contains(
             "2 open ticket(s) off the board went to the end of new and 1 closed one(s) to the end of done"
         ),
         "{text}"
@@ -1293,8 +1315,68 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
         expected.remove(t);
     }
     assert_eq!(after, expected);
-    let (ok, text) = admin("check");
-    assert!(ok && text.contains("indexes: ok"), "{text}");
+    // Until a check passes, upgrade answers 3 with nothing left to upgrade,
+    // and serve refuses the database.
+    let unchecked = "has not passed `branvil admin check` since";
+    let (code, text) = admin("upgrade");
+    assert!(code == 3 && text.contains(unchecked), "{text}");
+    let mut serve = std::process::Command::new(BIN)
+        .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+        .arg(&data)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let refused = loop {
+        if let Some(status) = serve.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            serve.kill().unwrap();
+            panic!("serve did not refuse an unchecked database");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut serve.stderr.take().unwrap(), &mut err).unwrap();
+    assert!(!refused.success() && err.contains(unchecked), "{err}");
+    // A check that fails leaves the mark.
+    {
+        let database = redb::Database::open(&db).unwrap();
+        let txn = database.begin_write().unwrap();
+        {
+            let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("ix_cards");
+            let mut cards = txn.open_table(def).unwrap();
+            let key = redb::ReadableTable::iter(&cards)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .0
+                .value()
+                .to_vec();
+            cards.remove(key.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let (code, text) = admin("check");
+    assert!(code == 1 && text.contains("index problem"), "{text}");
+    let (code, text) = admin("upgrade");
+    assert!(code == 3 && text.contains(unchecked), "{text}");
+    let (code, text) = admin("reindex");
+    assert!(code == 0, "{text}");
+    // A passing check clears it.
+    let (code, text) = admin("check");
+    assert!(code == 0 && text.contains("indexes: ok"), "{text}");
+    // 0: the database already has this version, and nothing changed.
+    let upgraded = tables(&db);
+    let (code, text) = admin("upgrade");
+    assert!(
+        code == 0 && text.contains("already has schema version"),
+        "{text}"
+    );
+    assert_eq!(tables(&db), upgraded);
     w.restart(&[]);
     // The moved tickets follow the cards that were there, in number order.
     let lane = |lane: &'static str| {

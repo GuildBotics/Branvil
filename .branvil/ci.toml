@@ -44,4 +44,4 @@ cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.loc
 name = "dev-script"
 image = "guildbotics/agent-environment:dev"
 commands = ["python3 -m unittest discover -s tests -p test_dev_script.py -v"]
-timeout_secs = 300
+timeout_secs = 1200

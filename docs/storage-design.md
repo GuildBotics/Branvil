@@ -62,13 +62,17 @@ pipeline). A database of any other version is refused at open. One of the
 previous version is upgraded by `branvil admin upgrade` or `branvil restore`
 (`src/upgrade.rs`, the only code that reads the previous shapes; it is
 replaced when the version is raised again), which first keeps a copy of the
-database as it was (`docs/backup-restore.md`, "Upgrading").
+database as it was and, in the transaction that applies the upgrade, sets
+`meta["unchecked"]`; `branvil serve` refuses a database with it until a
+passing `branvil admin check` removes it (`docs/backup-restore.md`,
+"Upgrading"). A database without the entry is not marked, so adding it did
+not change the stored format of any record or raise the version.
 
 ## Primary tables
 
 | Table | Key | Value | Written by | Read by |
 | --- | --- | --- | --- | --- |
-| `meta` | `(name)` | schema version | open | open |
+| `meta` | `(name)` | schema version; `unchecked` while an upgrade has not passed `branvil admin check` (absent otherwise) | open, upgrade, `admin check` | open, `serve`, `admin upgrade` |
 | `counters` | `(name)` | `u64` | ticket numbers `ticket:<repo>`, PR numbers `pull:<repo>`, `entry` sequence | allocation in the same txn as the insert |
 | `members` | `(fold(name))` | member, kind (`owner`, `agent`, `runner`), accounts on upstream hosts (provider, login; the token is a file) | owner API, `init`, automatic runner | auth, kind checks, upstream |
 | `tokens` | `(token id)` | member, label, SHA-256 of the secret, last use | token API | auth (by id, constant-time hash compare) |

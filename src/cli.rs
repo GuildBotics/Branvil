@@ -97,14 +97,23 @@ pub enum WorkspaceCommand {
 
 #[derive(Subcommand)]
 pub enum AdminCommand {
-    /// Check the database structure and that every index matches the records
+    /// Check the database structure and that every index matches the records;
+    /// a passing check also clears the mark an upgrade leaves, which
+    /// `branvil serve` refuses
     Check,
     /// Rebuild every derived index from the records
     Reindex,
     /// Upgrade the database from the previous schema version, keeping a copy
-    /// of it as it was (stop the service and take a backup first)
+    /// of it as it was (stop the service and take a backup first). Exits 3
+    /// when the database was upgraded, now or before, and has not passed
+    /// `branvil admin check` since; 0 when it already has this version and
+    /// is checked; 1 when it failed, which leaves it unchanged
     Upgrade,
 }
+
+/// The exit status of `branvil admin upgrade` for a database that was
+/// upgraded and still needs `branvil admin check`.
+pub const UPGRADED: u8 = 3;
 
 pub fn init(
     config_path: Option<&Path>,
@@ -172,6 +181,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         config.storage.cache_size_mib << 20,
         config.storage.read_concurrency,
     )?;
+    if store.needs_check()? {
+        bail!(
+            "{} was upgraded and has not passed `branvil admin check` since; run it with the service stopped, then start the service",
+            layout.db().display()
+        );
+    }
     let cursor_key = layout.load_cursor_key()?;
     crate::auth::ensure_owner_token(&store, &layout)?;
     crate::hooks::install(&layout)?;
@@ -279,6 +294,16 @@ pub async fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8>
         AdminCommand::Upgrade => {
             let done = crate::upgrade::upgrade(&layout)?;
             println!("{}", store::upgrade_report(&layout.db(), &done));
+            if done.is_some() {
+                return Ok(UPGRADED);
+            }
+            if store::needs_check(&layout.db())? {
+                println!(
+                    "{} was upgraded and has not passed `branvil admin check` since",
+                    layout.db().display()
+                );
+                return Ok(UPGRADED);
+            }
             Ok(0)
         }
         AdminCommand::Check => {
@@ -293,6 +318,7 @@ pub async fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8>
             println!("pending ref operations: {pending} (finished or dropped at the next start)");
             if problems.is_empty() {
                 println!("indexes: ok");
+                open()?.checked()?;
                 Ok(0)
             } else {
                 for p in &problems {

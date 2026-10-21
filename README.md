@@ -383,8 +383,10 @@ branvil admin upgrade --data-dir ./data   # after updating Branvil, when the ser
 ```
 
 A build whose stored format changed refuses the data directory of the version
-before it until `branvil admin upgrade` upgrades it; take a backup first. See
-"Upgrading" in [`docs/backup-restore.md`](docs/backup-restore.md).
+before it until `branvil admin upgrade` upgrades it; take a backup first. An
+upgraded database is then refused by `branvil serve` until
+`branvil admin check` passes. See "Upgrading" in
+[`docs/backup-restore.md`](docs/backup-restore.md).
 
 Logging goes to stderr; `BRANVIL_LOG` takes a `tracing` filter
 (default `branvil=info`).
@@ -428,33 +430,21 @@ Relative data paths are resolved from the repository root. `--owner` applies
 only when initializing a new database. An existing configuration keeps its
 listen address and base URL (by default `http://127.0.0.1:7878`).
 
-To update the Branvil the script runs to `origin/main` after a merge, run this
-in another terminal while it runs:
-
-```sh
-./scripts/update.sh            # or: --data-dir PATH, --backup-dir PATH, --no-open
-```
-
-It backs the running service up into `~/branvil-backups/branvil-update-<UTC time>`
-(keeping the newest three of these), switches the checkout to `main` and
-fast-forwards it to `origin/main`, stops the `branvil serve` that has the data
-directory open (its `dev.sh` ends with it), builds, runs `branvil admin upgrade`
-and `branvil admin check`, and runs `scripts/dev.sh` in its terminal until
-Ctrl-C. `origin` must be this Branvil: the script fetches as its owner, with
-the owner's token from the data directory, and its Git reads neither your
-system or global Git configuration nor any credential helper. It refuses to start when the service
-is not running or the checkout has uncommitted changes. Until the new service
-answers, a failed step prints where it stopped, the checkout's previous commit,
-and where the backup and the upgrade's database copy are.
-`scripts/dev.sh --build-only` builds without starting the server.
-
 If the browser cannot open, the script prints a single-use GUI link valid for
 60 seconds and keeps the server running. Both attempts use this data
 directory's credentials and URL rather than `BRANVIL_TOKEN` or `BRANVIL_URL`
 from the calling shell. `--no-open` skips both attempts.
 
-To check the launcher without building or starting a real server (Python 3,
-POSIX only):
+Instead of starting a server, `scripts/dev.sh --install DIR` builds the GUI
+and a release server with the GUI built into it, puts the server at
+`DIR/branvil`, and exits (`scripts/serve.sh` and `scripts/update.sh` install
+builds so). `DIR` must be named after the checkout's `HEAD` commit, and the
+tracked files must have no uncommitted changes, so that a build named after a
+commit is that commit. It assembles `DIR.new` and renames it to `DIR`, so
+`DIR` exists only when it is complete.
+
+To check the scripts without building or starting a real server (Python 3,
+Node.js, Git, POSIX only):
 
 ```sh
 python3 -m unittest discover -s tests -p test_dev_script.py -v
@@ -473,6 +463,46 @@ ports and drive them with real Git clients isolated from the user's Git
 configuration and credential helpers. They are one test crate,
 [`tests/main.rs`](tests/main.rs), with a module per file:
 `cargo test --test main tickets::` runs the tests of `tests/tickets.rs`.
+
+### Running the service from this checkout
+
+`scripts/serve.sh` keeps a Branvil built from this checkout running and updates
+it after every merge to `main` whose checks have passed, with nobody watching.
+Run it as a launchd user agent (instead of `scripts/dev.sh` in a terminal):
+
+```sh
+./scripts/serve.sh --plist > ~/Library/LaunchAgents/com.guildbotics.branvil.plist   # or: --data-dir PATH, --interval SECONDS
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.guildbotics.branvil.plist
+```
+
+The agent runs `/bin/bash scripts/serve.sh` with the data directory chosen as
+`scripts/dev.sh` chooses it (it must be initialized already; `scripts/dev.sh`
+does that on its first run) and with the `PATH` of the shell that printed it,
+because launchd's own has no `cargo`, `npm`, or `node` (print and bootstrap it
+again when that changes). launchd starts it at login and again when it exits;
+its output goes to `~/Library/Logs/branvil.log`. A restart
+(`launchctl kickstart -k gui/$(id -u)/com.guildbotics.branvil`) checks for an
+update at once and applies changes to `scripts/serve.sh`, as an update does.
+To switch from
+`scripts/dev.sh`, stop it (Ctrl-C) first: both cannot listen on the same
+address. Updates switch this checkout to `main` and fast-forward it, so
+develop in other worktrees (`git worktree add`), not in this one.
+
+On its first start it installs the checkout's `HEAD` as a release build under
+`builds/` (ignored by Git) and runs it; building the checkout, `npm run build`,
+or `cargo clean` never change what runs. It starts the service again when it
+exits, and at its start and every 5 minutes (`--interval`) it updates to
+`origin/main` when that commit's checks in this Branvil have all succeeded:
+it backs the service up, builds the new commit and rehearses its upgrade on a
+copy of the backup while the old build serves, and stops the service only to
+switch builds. A failed commit is not tried again until `main` moves on.
+Failures are written to the log and shown once as a macOS notification
+(`osascript`, which macOS lists as Script Editor under System Settings →
+Notifications; allow it once, for instance after
+`osascript -e 'display notification "test" with title "Branvil"'`).
+
+How it works, how to read its state, and what to do when it needs a person
+are in "Upgrading" in [`docs/backup-restore.md`](docs/backup-restore.md).
 
 ### GitHub Actions
 

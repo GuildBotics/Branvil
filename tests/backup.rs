@@ -255,6 +255,11 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
     assert!(!text(&out).contains("upgraded"), "{}", text(&out));
+    let serves = format!(
+        "restored into {0}; `branvil serve --data-dir {0}` starts it",
+        current.display()
+    );
+    assert!(text(&out).contains(&serves), "{}", text(&out));
 
     // A backup of the previous schema version: what version 10 wrote, with
     // ticket 2 off the board.
@@ -307,13 +312,27 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         "{}",
         text(&out)
     );
-    let out = std::process::Command::new(BIN)
-        .args(["admin", "check", "--data-dir"])
-        .arg(target.path().join("data"))
-        .output()
-        .unwrap();
+    // Upgraded on the way: it has to pass its check before it serves.
+    let checks_first = format!(
+        "restored into {0}; `branvil admin check --data-dir {0}` has to pass before `branvil serve --data-dir {0}` starts it",
+        target.path().join("data").display()
+    );
+    assert!(text(&out).contains(&checks_first), "{}", text(&out));
+    // The restore upgraded it: it needs its check before it serves.
+    let admin = |what: &str| {
+        std::process::Command::new(BIN)
+            .args(["admin", what, "--data-dir"])
+            .arg(target.path().join("data"))
+            .output()
+            .unwrap()
+    };
+    let out = admin("upgrade");
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let out = admin("check");
     assert!(out.status.success(), "{}", text(&out));
     assert!(text(&out).contains("indexes: ok"), "{}", text(&out));
+    let out = admin("upgrade");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
 
     // Replace the original by the restored copy on the same base URL (URLs
     // recorded anywhere stay valid), and compare.
