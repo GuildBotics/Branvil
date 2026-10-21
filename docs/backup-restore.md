@@ -256,13 +256,13 @@ the disk, and renamed. Write them by hand the same way, for instance
 | `builds/notified` | The last failure notified (so it is notified once). |
 | `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line). |
 | `builds/rehearsal`, `builds/*.new`, `builds/*.tmp`, `<data>/branvil-schema-*.redb.partial` | Left only by something cut off; removed at the next start. |
-| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh`, `scripts/update.sh`, and `branvil` print, with times; a failure is a line that starts "The update to … stopped while …" or "… stopped while starting …". |
+| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's checks; recorded in `builds/attempted` but not notified), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. |
 
 **The state.**
 
-- Running: `builds/current` names a build, and `launchctl print gui/$(id -u)/com.guildbotics.branvil` shows the agent running.
+- Running: `builds/current` names a build, and `launchctl print gui/$(id -u)/com.guildbotics.branvil` shows the agent running. The build is ready once `builds/serve.out` has its `branvil listening on …` line (the log does not show it; the file is emptied only at the next start, so the line of a serve that has exited stays until then).
 - An update in flight: `builds/update` exists. It goes on by itself, also after a restart; wait for it.
-- The last failure: the last "stopped while" line of the log, and `builds/attempted`.
+- The last failure: the last failure line of the log (see the table), and `builds/attempted`.
 - Stopped: no `builds/current`. The log says why.
 
 **What a failure leaves.** Nothing is retried automatically; a person is told
@@ -270,7 +270,7 @@ once.
 
 | When | What runs then |
 | --- | --- |
-| A step up to the rehearsal fails (a build, the rehearsal's upgrade or check) | The previous build keeps running. A failed fetch, reading of the checks, or backup is tried again in the next round. |
+| A step up to the rehearsal fails (a build, the rehearsal's upgrade or check) | The previous build keeps running. A missing required command, the checkout check, reaching the running service, a failed fetch, reading of the checks, or backup is tried again in the next round. |
 | The new build's upgrade, check, or start fails | The previous build again, when its own `branvil admin upgrade` finds the database at its version (nothing changed it). Otherwise (the upgrade changed it) nothing: `builds/current` is removed, and the log names the database copy the upgrade kept. |
 | A reboot, power loss, logout, or `launchctl bootout` at any moment | At its next start `scripts/serve.sh` goes on from these files: an update not yet recorded runs again in the next round, a recorded one is switched to and started, and one whose failure was recorded is concluded. A start cut off after its upgrade changed the database checks it at the next start. |
 
@@ -278,9 +278,10 @@ once.
 took effect. Write files as above, never with a plain `>`.
 
 - Start, restart, stop the agent. A restart also checks for an update at once
-  and applies changes to `scripts/serve.sh`; during an update it stops the
-  service and waits for the update's running step (a build, for instance)
-  before it goes on.
+  and applies changes to `scripts/serve.sh`. During an update a stop or restart
+  stops the service and waits for the update's running step; a step longer
+  than the agent's `ExitTimeOut` (120 seconds, a build for instance) is killed
+  then, and the next round runs that update again.
 
   ```sh
   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.guildbotics.branvil.plist
@@ -290,32 +291,40 @@ took effect. Write files as above, never with a plain `>`.
 
 - Try a failed commit again, once its cause is fixed: remove
   `builds/attempted`, then restart the agent.
-- Go back to the previous build (kept in `builds/`), with no update in
-  flight: write `origin/main`'s commit into `builds/attempted` (otherwise the
-  next round updates again), then write the previous commit into
-  `builds/current`; the agent stops the running build and starts that one.
-  When an upgrade changed the database, stop Branvil first (remove
-  `builds/current`, wait for the log line that the serve exited), put the
-  copy the log names in place of `branvil.redb`, then write `builds/current`.
-- Start a build that was stopped after its upgrade, once the cause is fixed
-  (when `admin check` reported index problems, `builds/<commit>/branvil admin
-  reindex --data-dir <data directory>`): write the commit into
-  `builds/current`. The database is still marked, so the start runs
-  `admin check` again before it serves.
-- Restore from a backup:
-  1. remove `builds/current` and wait for the log line that the serve exited;
-  2. restore with a build that reads the backup's schema version (the
-     manifest's `schema_version`; `branvil restore` takes that version or the
-     one before it, which it upgrades and marks, so the start checks it):
-     `builds/<commit>/branvil restore --from <backup> --data-dir <new
-     directory>`;
-  3. move the data directory aside (`mv <data> <data>.before-restore`) and
-     the restored one into its place; or keep both and point the agent at the
-     new one (`launchctl bootout …`, print the plist again with
-     `--data-dir <new directory>`, `launchctl bootstrap …`);
-  4. when that build is older than `origin/main`, write `origin/main`'s
-     commit into `builds/attempted`; then write the build's commit into
-     `builds/current`.
+- To go back to the previous build, restore from a backup, or start a build
+  that was stopped after its upgrade, first boot the agent out
+  (`launchctl bootout …`) and wait until
+  `launchctl print gui/$(id -u)/com.guildbotics.branvil` finds no such
+  service: that stops the service and any update round, which could otherwise
+  switch builds or start one on the data directory while you change it. Then
+  `builds/update` must be absent; when it is there, an update was in flight:
+  bootstrap the agent, let it finish (until `builds/update` is gone), and boot
+  it out again. Then:
+  - Go back (to a build kept in `builds/`): write `origin/main`'s commit into
+    `builds/attempted` (otherwise the next round updates again); when an
+    upgrade changed the database, put the copy named by the log's last
+    `the database as it was: <data>/branvil-schema-….redb` line (one in the
+    data directory, not in `builds/rehearsal`) in place of `branvil.redb`;
+    write the previous commit into `builds/current`.
+  - Restore: restore with a build that reads the backup's schema version (the
+    manifest's `schema_version`; `branvil restore` takes that version or the
+    one before it, which it upgrades and marks, so the start checks it):
+    `builds/<commit>/branvil restore --from <backup> --data-dir <new dir>`;
+    move the data directory aside (`mv <data> <data>.before-restore`) and the
+    restored one into its place, or keep both and print the plist again with
+    `--data-dir <new dir>`, from a shell whose `PATH` has `cargo`, `npm`, and
+    `node` (use an absolute `<new dir>` in both commands: `branvil restore`
+    resolves a relative one from the current directory, `scripts/serve.sh`
+    from the checkout); when that build is older than `origin/main`, write
+    `origin/main`'s commit into `builds/attempted`; write the build's commit
+    into `builds/current`.
+  - Start a build stopped after its upgrade, once the cause is fixed (when
+    `admin check` reported index problems, run
+    `builds/<commit>/branvil admin reindex --data-dir <data dir>`): write the
+    commit into `builds/current`. The database is still marked, so the start
+    runs `admin check` again before it serves.
+
+  Then bootstrap the agent again; it starts the build `builds/current` names.
 
 ## Tested
 

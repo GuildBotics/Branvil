@@ -66,7 +66,7 @@ trap 'exit 143' TERM
 cd "$repo_root"
 . "$repo_root/scripts/lib.sh"
 for command in cargo npm git; do
-  if ! command -v "$command" >/dev/null 2>&1; then
+  if ! type -P "$command" >/dev/null; then
     echo "Required command not found: $command (see README requirements)." >&2
     exit 1
   fi
