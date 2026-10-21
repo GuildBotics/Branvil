@@ -307,13 +307,21 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         "{}",
         text(&out)
     );
-    let out = std::process::Command::new(BIN)
-        .args(["admin", "check", "--data-dir"])
-        .arg(target.path().join("data"))
-        .output()
-        .unwrap();
+    // The restore upgraded it: it needs its check before it serves.
+    let admin = |what: &str| {
+        std::process::Command::new(BIN)
+            .args(["admin", what, "--data-dir"])
+            .arg(target.path().join("data"))
+            .output()
+            .unwrap()
+    };
+    let out = admin("upgrade");
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let out = admin("check");
     assert!(out.status.success(), "{}", text(&out));
     assert!(text(&out).contains("indexes: ok"), "{}", text(&out));
+    let out = admin("upgrade");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
 
     // Replace the original by the restored copy on the same base URL (URLs
     // recorded anywhere stay valid), and compare.

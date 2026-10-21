@@ -383,8 +383,10 @@ branvil admin upgrade --data-dir ./data   # after updating Branvil, when the ser
 ```
 
 A build whose stored format changed refuses the data directory of the version
-before it until `branvil admin upgrade` upgrades it; take a backup first. See
-"Upgrading" in [`docs/backup-restore.md`](docs/backup-restore.md).
+before it until `branvil admin upgrade` upgrades it; take a backup first. An
+upgraded database is then refused by `branvil serve` until
+`branvil admin check` passes. See "Upgrading" in
+[`docs/backup-restore.md`](docs/backup-restore.md).
 
 Logging goes to stderr; `BRANVIL_LOG` takes a `tracing` filter
 (default `branvil=info`).

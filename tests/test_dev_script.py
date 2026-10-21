@@ -121,9 +121,17 @@ if tool == "branvil":
     schema = setting("DEV_TEST_SCHEMA") or "11"
     data = Path(args[args.index("--data-dir") + 1]) if "--data-dir" in args else Path("/nonexistent")
 
-    def database():
+    # The fake database: its schema version on the first line, and
+    # "unchecked" on the second while an upgrade has not passed a check.
+    def lines():
         db = data / "branvil.redb"
-        return (db.read_text(encoding="utf-8").strip() if db.exists() else "") or "11"
+        return (db.read_text(encoding="utf-8").split() if db.exists() else []) + ["", ""]
+
+    def database():
+        return lines()[0] or "11"
+
+    def unchecked():
+        return lines()[1] == "unchecked"
     if command == "init":
         data = Path(args[args.index("--data-dir") + 1])
         data.mkdir(parents=True, exist_ok=True)
@@ -133,6 +141,9 @@ if tool == "branvil":
             sys.exit(int(setting("DEV_TEST_SERVE_EXIT")))
         if database() != schema:
             print(f"branvil: the database has schema version {database()}", file=sys.stderr)
+            sys.exit(1)
+        if unchecked():
+            print("branvil: it was upgraded and has not passed `branvil admin check` since", file=sys.stderr)
             sys.exit(1)
 
         def stop(*_):
@@ -167,7 +178,7 @@ if tool == "branvil":
             sys.exit(int(setting("DEV_TEST_BACKUP_EXIT")))
         to = Path(args[args.index("--to") + 1])
         to.mkdir(parents=True)
-        (to / "branvil.redb").write_text(database(), encoding="utf-8")
+        (to / "branvil.redb").write_text("\n".join(lines()[:2]), encoding="utf-8")
         (to / "manifest.json").write_text("{}", encoding="utf-8")
         print(f"backup written to {to}")
     elif command == "restore":
@@ -181,8 +192,12 @@ if tool == "branvil":
         step = ("REHEARSAL_" if data.name == "rehearsal" else "") + args[1].upper()
         hold(step)
         if args[1] == "upgrade":
-            # As branvil admin upgrade: 0 left as it is, 3 upgraded, 1 failed.
-            if database() == schema:
+            # As branvil admin upgrade: 3 upgraded (now or before) and not
+            # checked since, 0 checked at this version, 1 failed.
+            if database() == schema and unchecked():
+                print(f"{db} was upgraded and has not passed `branvil admin check` since")
+                sys.exit(3)
+            elif database() == schema:
                 print(f"{db} already has schema version {schema}")
             elif int(database()) != int(schema) - 1 or setting(f"DEV_TEST_{step}_EXIT"):
                 print(f"branvil: cannot upgrade {db} (schema version {database()})", file=sys.stderr)
@@ -190,11 +205,13 @@ if tool == "branvil":
             else:
                 print(f"upgraded {db} to schema version {schema}: test")
                 print(f"the database as it was: {db.parent}/branvil-schema-{database()}-test.redb")
-                db.write_text(schema, encoding="utf-8")
+                db.write_text(f"{schema}\nunchecked", encoding="utf-8")
                 hold(step + "D")
                 sys.exit(3)
-        elif args[1] == "check" and setting(f"DEV_TEST_{step}_EXIT"):
-            sys.exit(int(setting(f"DEV_TEST_{step}_EXIT")))
+        elif args[1] == "check":
+            if setting(f"DEV_TEST_{step}_EXIT"):
+                sys.exit(int(setting(f"DEV_TEST_{step}_EXIT")))
+            db.write_text(database(), encoding="utf-8")  # checked
     elif command == "open":
         if "--print" in args:
             print("http://example.invalid/-/enter#test-only-link")
@@ -876,7 +893,10 @@ class ServeScriptTests(ScriptTestCase):
         return self.watch(*args, running=False)
 
     def database(self):
-        return (self.data / "branvil.redb").read_text(encoding="utf-8").strip() or "11"
+        return ((self.data / "branvil.redb").read_text(encoding="utf-8").split() + [""])[0] or "11"
+
+    def unchecked(self):
+        return "unchecked" in (self.data / "branvil.redb").read_text(encoding="utf-8").split()
 
     def kill_watcher(self, proc):
         """SIGKILL to scripts/serve.sh and everything it started."""
@@ -1108,7 +1128,30 @@ class ServeScriptTests(ScriptTestCase):
         (self.builds / "current").write_text(f"{self.base}\n", encoding="utf-8")
         self.assert_runs(self.base)
         self.assertEqual(self.admins("check"), [self.binary(self.base)] * 2)
-        self.assertFalse((self.builds / "unchecked").exists())
+        self.assertFalse(self.unchecked())
+
+    def test_an_upgrade_whose_process_died_after_it_wrote_is_checked_at_the_next_start(self):
+        # Only the admin upgrade dies, after it changed the database: the
+        # start fails, and a later start of the build checks before it serves.
+        (self.data / "branvil.redb").write_text("10", encoding="utf-8")
+        hold = self.root / "hold"
+        hold.touch()
+        self.control(DEV_TEST_HOLD_UPGRADED=str(hold))
+        proc, _ = self.watch("--interval", "3600", running=False)
+        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
+        [upgrade] = [e for e in self.events("branvil") if e["args"][:2] == ["admin", "upgrade"]]
+        os.kill(upgrade["pid"], signal.SIGKILL)
+        hold.unlink()
+        self.wait_until(lambda: self.current() is None, proc)
+        self.assertEqual(self.database(), "11")
+        self.assertTrue(self.unchecked())
+        self.assertEqual(self.serves(), [], "Never served unchecked")
+        self.assertIn(f"{self.base} stopped while upgrading the data directory", self.notifications()[0])
+        (self.builds / "current").write_text(f"{self.base}\n", encoding="utf-8")
+        self.assert_runs(self.base)
+        self.assertEqual(self.admins("check"), [self.binary(self.base)])
+        self.assertEqual(self.steps()[-3:], ["admin upgrade", "admin check", "serve"])
+        self.assertFalse(self.unchecked())
 
     def test_failed_checks_are_not_installed_nor_read_again(self):
         new = self.merge({

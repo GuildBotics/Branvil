@@ -591,6 +591,17 @@ impl Store {
         &self.stats
     }
 
+    /// Whether an upgrade changed the database and no `branvil admin check`
+    /// has passed since.
+    pub fn needs_check(&self) -> AppResult<bool> {
+        self.read_sync(is_unchecked)
+    }
+
+    /// Records that the database has passed `branvil admin check`.
+    pub fn checked(&self) -> AppResult<()> {
+        self.write_sync(|w| w.del(META, &unchecked_key()).map(|_| ()))
+    }
+
     pub async fn read<T, F>(&self, f: F) -> AppResult<T>
     where
         T: Send + 'static,
@@ -817,6 +828,9 @@ impl Upgrading {
         })?;
         wtx.put(META, &version_key(), &SCHEMA_VERSION)
             .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+        // Until `branvil admin check` passes, `branvil serve` refuses it.
+        wtx.put(META, &unchecked_key(), &true)
+            .map_err(|e| anyhow::anyhow!("{}", e.message))?;
         wtx.0.commit()?;
         Ok(Upgraded {
             from: crate::upgrade::FROM,
@@ -852,6 +866,23 @@ fn version_key() -> Vec<u8> {
 
 fn version_of(r: &impl Rd) -> AppResult<Option<u64>> {
     r.get(META, &version_key())
+}
+
+/// Set by an upgrade, in the transaction that applies it, and removed by a
+/// passing `branvil admin check`; absent in a database no upgrade changed.
+fn unchecked_key() -> Vec<u8> {
+    Key::new().s("unchecked").bytes()
+}
+
+fn is_unchecked(r: &impl Rd) -> AppResult<bool> {
+    Ok(r.get::<bool>(META, &unchecked_key())?.unwrap_or(false))
+}
+
+/// Whether the database at `path` was upgraded and has not passed
+/// `branvil admin check` since.
+pub fn needs_check(path: &Path) -> anyhow::Result<bool> {
+    let db = open_db(path, 1 << 20)?;
+    is_unchecked(&db.begin_read()?).map_err(|e| anyhow::anyhow!("{}", e.message))
 }
 
 /// Copies every table, as `txn` sees it, into a new database file at `path`
@@ -983,6 +1014,43 @@ mod tests {
                 && copies[0].ends_with(".redb"),
             "{copies:?}"
         );
+    }
+
+    #[test]
+    fn an_upgrade_marks_the_database_unchecked_in_its_own_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("branvil.redb");
+        let previous = || {
+            let store = Store::open(&path, 1 << 20, 1).unwrap();
+            store
+                .write_sync(|w| w.put(META, &version_key(), &crate::upgrade::FROM))
+                .unwrap();
+        };
+        // A database no upgrade changed is not marked.
+        drop(Store::open(&path, 1 << 20, 1).unwrap());
+        assert!(!needs_check(&path).unwrap());
+        // A failed upgrade marks nothing.
+        previous();
+        Upgrading::open(&path)
+            .unwrap()
+            .unwrap()
+            .finish(|_| anyhow::bail!("an unexpected record"))
+            .err()
+            .unwrap();
+        assert!(!needs_check(&path).unwrap());
+        // One that applies marks it, until a check records it as checked.
+        Upgrading::open(&path)
+            .unwrap()
+            .unwrap()
+            .finish(|_| Ok("nothing".into()))
+            .unwrap();
+        assert!(needs_check(&path).unwrap());
+        let store = Store::open(&path, 1 << 20, 1).unwrap();
+        assert!(store.needs_check().unwrap());
+        store.checked().unwrap();
+        assert!(!store.needs_check().unwrap());
+        drop(store);
+        assert!(!needs_check(&path).unwrap());
     }
 
     #[test]

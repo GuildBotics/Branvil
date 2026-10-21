@@ -181,28 +181,21 @@ EOF
       quick=0
     fi
   }
-  # Starts build $1: its admin upgrade, its admin check when the upgrade
-  # changed the database, then branvil serve. builds/unchecked is written
-  # before the upgrade can change the database and removed once nothing is
-  # left to check, so the next start checks what a cut off start upgraded.
+  # Starts build $1: its admin upgrade, which answers 3 while the database
+  # was upgraded and has not passed a check since (the database keeps that,
+  # whatever cut off a start before), then its admin check, then branvil serve.
   start() {
-    local status=0 unchecked=false
+    local status=0
     log "starting $1"
-    if [[ -e "$builds/unchecked" ]]; then unchecked=true; fi
-    put "$builds/unchecked" "$1"
     client "$1" admin upgrade || status=$?
-    if (( status == 3 )); then unchecked=true; fi
     if (( status != 0 && status != 3 )); then
-      # A failed upgrade leaves the database as it was.
-      "$unchecked" || rm -f "$builds/unchecked"
       failed "$1" "upgrading the data directory"
       return
     fi
-    if "$unchecked" && ! client "$1" admin check; then
+    if (( status == 3 )) && ! client "$1" admin check; then
       failed "$1" "checking the data directory"
       return
     fi
-    rm -f "$builds/unchecked"
     if [[ "$1" != "$serve_build" ]]; then quick=0; fi
     # Its standard output carries the line that says it is ready.
     "$builds/$1/branvil" serve --data-dir "$data_dir" >"$builds/serve.out" &

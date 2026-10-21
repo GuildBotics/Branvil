@@ -1310,6 +1310,58 @@ async fn the_upgrade_from_version_10_puts_tickets_off_the_board_at_the_end_of_th
         expected.remove(t);
     }
     assert_eq!(after, expected);
+    // Until a check passes, upgrade answers 3 with nothing left to upgrade,
+    // and serve refuses the database.
+    let unchecked = "has not passed `branvil admin check` since";
+    let (code, text) = admin("upgrade");
+    assert!(code == 3 && text.contains(unchecked), "{text}");
+    let mut serve = std::process::Command::new(BIN)
+        .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+        .arg(&data)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let refused = loop {
+        if let Some(status) = serve.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            serve.kill().unwrap();
+            panic!("serve did not refuse an unchecked database");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut serve.stderr.take().unwrap(), &mut err).unwrap();
+    assert!(!refused.success() && err.contains(unchecked), "{err}");
+    // A check that fails leaves the mark.
+    {
+        let database = redb::Database::open(&db).unwrap();
+        let txn = database.begin_write().unwrap();
+        {
+            let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("ix_cards");
+            let mut cards = txn.open_table(def).unwrap();
+            let key = redb::ReadableTable::iter(&cards)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .0
+                .value()
+                .to_vec();
+            cards.remove(key.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let (code, text) = admin("check");
+    assert!(code == 1 && text.contains("index problem"), "{text}");
+    let (code, text) = admin("upgrade");
+    assert!(code == 3 && text.contains(unchecked), "{text}");
+    let (code, text) = admin("reindex");
+    assert!(code == 0, "{text}");
+    // A passing check clears it.
     let (code, text) = admin("check");
     assert!(code == 0 && text.contains("indexes: ok"), "{text}");
     // 0: the database already has this version, and nothing changed.
