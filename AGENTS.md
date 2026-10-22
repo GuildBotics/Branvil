@@ -47,8 +47,8 @@ hold across modules:
   GuildBotics → Branvil. The only behavior of Branvil that assumes GuildBotics
   is where `branvil runner` looks for msb by default (`~/.guildbotics/data/msb`
   in `src/runner/executor.rs`). GuildBotics is named only in documents and in
-  the harness that runs GuildBotics' contract tests against a real service
-  (`integration/guildbotics/`, `scripts/guildbotics-contracts.sh`,
+  the checks that run GuildBotics' provider against a real service
+  (`integration/guildbotics/`, `scripts/guildbotics-smoke.sh`,
   `scripts/e2e-flow.sh`).
 - **The upstream sits behind a provider-neutral boundary.** `src/upstream/`
   knows no code host; everything host-specific goes in the provider's
@@ -105,3 +105,8 @@ workflow.
   `cargo test --test main tickets::`).
 - The tests that use real microVMs (`tests/real_executor.rs`) run only with
   `BRANVIL_REAL_EXECUTOR=1`. They are not part of the usual checks.
+- When you change the HTTP API, also run `scripts/guildbotics-smoke.sh
+  /path/to/GuildBotics` with a GuildBotics checkout that has the matching
+  provider (README.md, "Checking with GuildBotics"). The pipeline's
+  `branvil-integration` runs it with GuildBotics' `main`; an API change that
+  needs a provider change fails it until both are merged.

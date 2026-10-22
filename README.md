@@ -11,8 +11,8 @@ Status: the service core (Git hosting, workspaces, tickets and boards, pull requ
 reviews, merge, recovery), CI (pipelines, queue, runner, microVM executor),
 following an upstream on GitHub and publishing pull requests to it,
 `branvil tunnel`, and backup/restore are implemented and tested. The GuildBotics `branvil` provider lives in GuildBotics
-(`guildbotics/integrations/branvil/`); its port contracts also run against a
-real service from this repository (see "Development"). See
+(`guildbotics/integrations/branvil/`); this repository checks it against a
+real service (see "Checking with GuildBotics"). See
 [`docs/architecture.md`](docs/architecture.md) for what exists.
 
 ## Important Notice (Disclaimer)
@@ -279,10 +279,12 @@ artifacts, retry and cancel, states, limits, and the trust model:
 ### This repository's pipeline
 
 [`.branvil/ci.toml`](.branvil/ci.toml) runs the checks of "Development" as
-five jobs: `fmt` (`cargo fmt --check`), `clippy` (`cargo clippy --all-targets
+six jobs: `fmt` (`cargo fmt --check`), `clippy` (`cargo clippy --all-targets
 -- -D warnings`), `test` (`cargo test`), `web` (`npm ci`, then `npm run lint`,
-`npm run typecheck`, and `npm run test` in `web`), and `dev-script` (the
-Python launcher tests). Their image is GuildBotics' development image
+`npm run typecheck`, and `npm run test` in `web`), `dev-script` (the Python
+launcher tests), and `branvil-integration` (`scripts/guildbotics-smoke.sh`
+with GuildBotics' `main`; see "Checking with GuildBotics"). Their image is
+GuildBotics' development image
 (`guildbotics/agent-environment:dev`, built by GuildBotics'
 `scripts/build-agent-environment-image.sh`): the owner loads its `docker save`
 archive under Settings → CI, and the pipeline names it by its tag. When the
@@ -552,26 +554,46 @@ executor tests still require the runtime and image described in
 For a pull request published to GitHub by the owner, Branvil imports the job's
 result as `github/checks-macos` (see "Upstream (GitHub)").
 
-### GuildBotics port contracts against a live service
+### Checking with GuildBotics
 
-GuildBotics' port contracts (`tests/guildbotics/integrations/contracts/` in
-GuildBotics) run their `branvil` cases against a Python double of this API.
-`scripts/guildbotics-contracts.sh` runs the same, unchanged contracts against a
-real `branvil serve` instead:
+GuildBotics' `branvil` provider is this API's main client. Its port contracts
+(`tests/guildbotics/integrations/contracts/` in GuildBotics) run against a
+Python double of the API; `scripts/guildbotics-smoke.sh` checks that the
+production provider and a real `branvil serve` still work together:
 
 ```sh
-# a GuildBotics checkout with the branvil provider, environment synced
-scripts/guildbotics-contracts.sh /path/to/GuildBotics
+# a GuildBotics checkout, environment synced (uv sync --extra test --extra dev)
+scripts/guildbotics-smoke.sh /path/to/GuildBotics
 ```
 
-It builds the debug binary and runs GuildBotics' pytest with the plugin
-[`integration/guildbotics/branvil_live.py`](integration/guildbotics/branvil_live.py),
-which replaces the double's harness: every test gets its own service (temp data
-directory, free port), members, workspaces, and repositories, real Git
-pushes for branches, and a fake CI runner that concludes queued attempts
-`success` (and uploads artifacts) through the runner API before the provider
-reads checks. A skipped contract fails the run. The module docstring lists
-exactly what the harness sets up and how it counts writes.
+It prints the commits of both checkouts, builds the debug binary, and walks
+three paths, each against its own service (temporary data directory, free
+loopback port, members and credentials of its own) through the provider that
+GuildBotics' factory makes:
+
+- tickets: created, changed, and read back with their assignee and lane;
+  a parent and a ticket it is blocked by read back from both sides and are
+  taken back; a ready ticket blocked by an open one is no patrol candidate and
+  cannot be moved in progress until its blocker is closed;
+- Git, pull request, and merge: a push with the provider's clone URL and
+  credential, a pull request that closes a ticket, and, after the owner's
+  merge, the pull request merged and the ticket closed in the done lane;
+- checks: a pull request is not ready while its head's job is pending, is
+  ready once that commit's job succeeds, and is not ready again when its head
+  moves on.
+
+Only the owner's setup and merge and the runner's claim and finish call the
+API directly; every result is read through the provider. It needs no microVM,
+browser, or running service, and touches nothing of this machine's GuildBotics
+or Branvil ([`integration/guildbotics/test_smoke.py`](integration/guildbotics/test_smoke.py)).
+
+Run it when you change the HTTP API, and GuildBotics runs it when its provider
+changes. Both repositories' pipelines run it as the job `branvil-integration`
+on every commit, each with the other's `main` cloned from GitHub (CI jobs reach
+only public networks); the job is not a required check. When it fails, the
+log names both commits: a change on this side is fixed in its own pull
+request, a `main` of the other that no longer works with this one is fixed
+there.
 
 ### End-to-end flow
 
