@@ -95,11 +95,28 @@ are atomic together.
      published.
 3. **Merges** (`domain::pulls::merge`), under the repository lock:
    re-read the PR and tips; check expected head/base, fast-forward, required
-   checks; write a `ref_journal` entry `{ref, old, new, op}`; run
+   checks; point the hidden ref of the merged head at it (`keep_merged`,
+   below); write a `ref_journal` entry `{ref, old, new, op}`; run
    `git update-ref refs/heads/<base> <head> <old>` (Git refuses if the base
    moved); then one transaction applies the merge (`apply_journal`: PR merged,
    `closes` tickets closed and moved to `done`) and deletes the journal entry;
-   finally `record_refs_locked` records the snapshot and notifies CI.
+   then the head branch is retired (`retire_merged_head`, below);
+   finally `record_refs_locked` records the snapshot and notifies CI. The
+   recording takes a branch's move before a deletion, so a commit merged into
+   the default branch keeps its CI run; merged into another branch, which CI
+   does not run, its unfinished jobs are superseded with the head.
+   - **The head of a merged pull request** (here or on the upstream host) is
+     what it merged (`merge_sha`, or `upstream.pushed` when merged on the
+     host), not its branch's tip. Before the merge is recorded, the hidden
+     `refs/branvil/merged/<number>` is pointed at that commit, so every merged
+     pull request has it: a squash or a rebase on the host leaves it on no
+     branch, and the pull request's view, backups (`git bundle --all`), and
+     Git's pruning all go by reachability. After the merge is recorded, the
+     branch is deleted only while it is still at what was merged
+     (`git update-ref` with that old value). It stays when it is protected or
+     when an open pull request has it as its head or base. Only Branvil's
+     branch is deleted, never the host's. If the process stops before this
+     step, the branch stays.
 4. **Startup** (`refs::recover`, before the listener accepts requests): every
    pending journal entry is compared with the actual ref. At `new`, the
    operation's database side is applied (idempotently); at `old`, it is
@@ -191,7 +208,8 @@ What the owner sees (GitHub as the example):
    Branvil is carried to the GitHub pull request.
 5. A person approves and merges on GitHub. Branvil fetches GitHub's default
    branch, fast-forwards its own, marks its pull request merged (with GitHub's
-   merge commit), and closes the tickets it closes. A pull request closed on
+   merge commit), closes the tickets it closes, and deletes its head branch in
+   Branvil (as a merge in Branvil does; GitHub's stays). A pull request closed on
    GitHub without a merge is closed in Branvil too. Closed on both sides, it
    is no longer polled; reopening it in Branvil reopens it on GitHub.
 

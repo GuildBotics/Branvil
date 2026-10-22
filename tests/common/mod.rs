@@ -460,6 +460,30 @@ impl World {
         );
     }
 
+    /// Backs the service up, restores the backup under `into`, and starts
+    /// the restored service there (members' tokens stay valid).
+    pub async fn restored(&self, into: &Path) -> Server {
+        let backup = into.join("backup");
+        let (st, v) = self
+            .server
+            .post("/admin/backup", &self.owner, json!({"to": backup}))
+            .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let out = Command::new(BIN)
+            .args(["restore", "--from"])
+            .arg(&backup)
+            .arg("--data-dir")
+            .arg(into.join("data"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Server::start(into)
+    }
+
     pub async fn ticket(&self, title: &str) -> Value {
         let (st, v) = self
             .server

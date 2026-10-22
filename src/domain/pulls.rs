@@ -13,7 +13,7 @@ use crate::domain::{
     self, CommentView, Page, PageReq, ReactionView, comment_view, reaction_views, repo_by_id,
 };
 use crate::error::{AppError, AppResult};
-use crate::git::FileChange;
+use crate::git::{FileChange, ZERO_SHA};
 use crate::model::{
     self, InlineComment, JournalEntry, JournalOp, Published, Pull, Repo, Review, Target, Thread,
     TicketLink,
@@ -101,21 +101,28 @@ pub async fn tips(app: &App, repo: &Repo) -> AppResult<Tips> {
     app.git.branch_tips(&app.git.repo_dir(&repo.path)).await
 }
 
-/// The diff range a pull request shows: from the merge base to the head, or
-/// what the merge brought in once merged. Merged on the upstream host, it is
-/// what Branvil pushed there, whichever way the host merged it (a squash or a
-/// rebase makes commits of its own).
-fn diff_range(p: &Pull, tips: &Tips) -> Option<String> {
-    if p.merged {
-        let end = match &p.upstream {
-            Some(x) => x.pushed.as_ref()?,
-            None => p.merge_sha.as_ref()?,
-        };
-        return Some(format!("{}..{end}", p.merged_base.as_ref()?));
+/// The commit a pull request's head is at: its branch's tip until it is
+/// merged, then what was merged (its branch may be gone). Merged on the
+/// upstream host, that is what Branvil pushed there, whichever way the host
+/// merged it (a squash or a rebase makes commits of its own).
+fn head_of(p: &Pull, tips: &Tips) -> Option<String> {
+    if !p.merged {
+        return tips.get(&p.head).cloned();
     }
-    let base = tips.get(&p.base)?;
-    let head = tips.get(&p.head)?;
-    Some(format!("{base}...{head}"))
+    match p.upstream.as_ref().filter(|x| x.state == "merged") {
+        Some(x) => x.pushed.clone(),
+        None => p.merge_sha.clone(),
+    }
+}
+
+/// The diff range a pull request shows: from the merge base to the head, or
+/// what the merge brought in once merged.
+fn diff_range(p: &Pull, tips: &Tips) -> Option<String> {
+    let head = head_of(p, tips)?;
+    if p.merged {
+        return Some(format!("{}..{head}", p.merged_base.as_ref()?));
+    }
+    Some(format!("{}...{head}", tips.get(&p.base)?))
 }
 
 async fn changed_files(app: &App, repo: &Repo, p: &Pull, tips: &Tips) -> AppResult<u64> {
@@ -154,7 +161,7 @@ pub async fn pull_view(app: &App, repo: &Repo, p: &Pull, tips: &Tips) -> AppResu
         author: p.author.clone(),
         head: p.head.clone(),
         head_repository: repo.path.clone(),
-        head_sha: tips.get(&p.head).cloned().unwrap_or_default(),
+        head_sha: head_of(p, tips).unwrap_or_default(),
         base: p.base.clone(),
         base_sha: tips.get(&p.base).cloned().unwrap_or_default(),
         reviewers: p.reviewers.clone(),
@@ -560,11 +567,7 @@ pub async fn activity(
     number: u64,
 ) -> AppResult<Activity> {
     let (repo, p) = visible(app, caller, repo_path, number).await?;
-    let head_sha = tips(app, &repo)
-        .await?
-        .get(&p.head)
-        .cloned()
-        .unwrap_or_default();
+    let head_sha = head_of(&p, &tips(app, &repo).await?).unwrap_or_default();
     let url = app.pull_url(&repo.path, number);
     app.store
         .read(move |r| activity_of(r, &p, &head_sha, &url))
@@ -1205,11 +1208,7 @@ pub async fn list_threads(
     page: PageReq,
 ) -> AppResult<Page<ThreadView>> {
     let (repo, p) = visible(app, caller, repo_path, number).await?;
-    let head_sha = tips(app, &repo)
-        .await?
-        .get(&p.head)
-        .cloned()
-        .unwrap_or_default();
+    let head_sha = head_of(&p, &tips(app, &repo).await?).unwrap_or_default();
     let url = app.pull_url(&repo.path, number);
     app.store
         .read(move |r| {
@@ -1338,12 +1337,8 @@ pub async fn resolve(
     id: &str,
     input: Resolution,
 ) -> AppResult<ThreadView> {
-    let (repo, _) = visible(app, caller, repo_path, number).await?;
-    let head_sha = tips(app, &repo)
-        .await?
-        .get(&load_head(app, &repo, number).await?)
-        .cloned()
-        .unwrap_or_default();
+    let (repo, p) = visible(app, caller, repo_path, number).await?;
+    let head_sha = head_of(&p, &tips(app, &repo).await?).unwrap_or_default();
     let url = app.pull_url(&repo.path, number);
     let id = id.to_string();
     let r2 = repo.clone();
@@ -1368,15 +1363,6 @@ pub async fn resolve(
         .await?;
     app.events.publish("pull", &repo.path, number.to_string());
     view.ok_or_else(|| AppError::internal("resolved thread vanished"))
-}
-
-async fn load_head(app: &App, repo: &Repo, number: u64) -> AppResult<String> {
-    let r2 = repo.clone();
-    Ok(app
-        .store
-        .read(move |r| load_pull(r, &r2, number))
-        .await?
-        .head)
 }
 
 /// Gives (`on`) or takes back the caller's reaction to a conversation
@@ -1485,7 +1471,7 @@ pub async fn checks(
 ) -> AppResult<ChecksView> {
     let (repo, p) = visible(app, caller, repo_path, number).await?;
     let tips = tips(app, &repo).await?;
-    let head_sha = tips.get(&p.head).cloned().unwrap_or_default();
+    let head_sha = head_of(&p, &tips).unwrap_or_default();
     let base_sha = tips.get(&p.base).cloned().unwrap_or_default();
     let behind_by = if head_sha.is_empty() || base_sha.is_empty() {
         None
@@ -1646,6 +1632,7 @@ pub async fn merge(
     let p = app.store.read(move |r| load_pull(r, &r2, number)).await?;
     let (head, base) = check_landable(app, &repo, &p, &input).await?;
     let dir = app.git.repo_dir(&repo.path);
+    keep_merged(app, &repo, number, &head).await?;
     let entry = JournalEntry {
         id: util::new_id("jnl"),
         repo: repo.id.clone(),
@@ -1690,11 +1677,77 @@ pub async fn merge(
             Ok(p)
         })
         .await?;
+    retire_merged_head(app, &repo, &merged).await?;
     refs::record_refs_locked(app, &repo).await?;
     app.events.publish("pull", &repo.path, number.to_string());
     tickets::publish_closed_by(app, &merged).await;
     let tips = self::tips(app, &repo).await?;
     pull_view(app, &repo, &merged, &tips).await
+}
+
+/// Points the hidden ref `refs/branvil/merged/<number>` at the head a pull
+/// request merges, for a caller that holds the repository lock, before the
+/// merge is recorded: every merged pull request has it. Its view reads that
+/// commit after its branch is gone or moved, and a squash or a rebase on the
+/// upstream host leaves it on no branch (unreachable, it would be missing from
+/// backups and pruned by Git).
+pub async fn keep_merged(app: &App, repo: &Repo, number: u64, sha: &str) -> AppResult<()> {
+    app.git
+        .run_ok(
+            Some(&app.git.repo_dir(&repo.path)),
+            &[
+                "update-ref",
+                "-m",
+                &format!("branvil: merging !{number}"),
+                &format!("refs/branvil/merged/{number}"),
+                sha,
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Deletes the head branch of a merged pull request (`keep_merged` kept what
+/// it merged), for a caller that holds the repository lock and records the
+/// ref changes after it (the recording takes a branch's move before a
+/// deletion, so a commit merged into the default branch keeps its CI run).
+/// The branch stays when it is protected, when an open pull request has it as
+/// its head or base, or when it is no longer at what was merged.
+pub async fn retire_merged_head(app: &App, repo: &Repo, p: &Pull) -> AppResult<()> {
+    let Some(merged) = head_of(p, &Tips::new()) else {
+        return Ok(());
+    };
+    let (id, branch) = (repo.id.clone(), p.head.clone());
+    let kept = app
+        .store
+        .read(move |r| {
+            if repo_by_id(r, &id)?.is_protected(&branch) {
+                return Ok(true);
+            }
+            let open = r.prefix_raw(
+                store::IX_OPEN_PULLS,
+                &Key::new().s(&id).bytes(),
+                None,
+                usize::MAX,
+            )?;
+            Ok(open.iter().any(|(k, _)| {
+                store::decode_key(k, "sss")
+                    .is_some_and(|p| p[1].s() == branch || p[2].s() == branch)
+            }))
+        })
+        .await?;
+    if !kept {
+        app.git
+            .update_ref(
+                &app.git.repo_dir(&repo.path),
+                &format!("refs/heads/{}", p.head),
+                ZERO_SHA,
+                &merged,
+                &format!("branvil: delete the head of merged !{}", p.number),
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 /// Applies the database side of a journaled ref change whose Git side is

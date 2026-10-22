@@ -494,7 +494,9 @@ comment with `meta.routing == "suppress"` as a status notice.
 
 `state` is `open` or `closed` (a merged pull request is `closed` with
 `merged: true`). `head_sha`/`base_sha` are the branches' current tips read from
-Git at request time (`""` when the branch is gone). `reviewers` are the pending review
+Git at request time (`""` when the branch is gone); a merged pull request's
+`head_sha` is the head it merged (`merge_sha`, or `upstream.pushed` when merged
+on the upstream host). `reviewers` are the pending review
 requests: a member leaves it by submitting a review and is back on a new request. `ready_at` is the last time
 the pull request was marked ready for review. `upstream` is set once the pull
 request was published (see "Upstream").
@@ -574,6 +576,10 @@ request was published (see "Upstream").
   `409 not_mergeable`, publish instead.
   On success the base branch is moved, the pull request is closed as merged,
   and the tickets it `closes` are closed (`completed`) and moved to `done`.
+  Its head branch is deleted, whatever the base, unless it is protected or an
+  open pull request has it as its head or base. A pull request merged on the
+  upstream host has its head branch deleted in Branvil the same way, and only
+  while that branch is still at `upstream.pushed`; the host's branch stays.
 - `POST .../pulls/{number}/close` and `.../reopen` → pull request. Reopening is
   `409 conflict` when another open pull request has the same head and base; a merged
   pull request cannot be closed or reopened.
@@ -597,6 +603,7 @@ request was published (see "Upstream").
 ```
 
 - `head_sha` / `base_sha` are `""` and `behind_by` is `null` when that branch is gone.
+  A merged pull request's `head_sha` is the head it merged, as in its view.
 - `checks` are the latest attempt of every job of the head's run, as the run's
   pipeline defines the job (`docs/ci.md`),
   plus entries without an `attempt_id` that say why something is missing, each
