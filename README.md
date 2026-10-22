@@ -589,11 +589,11 @@ or Branvil ([`integration/guildbotics/test_smoke.py`](integration/guildbotics/te
 
 Run it when you change the HTTP API, and GuildBotics runs it when its provider
 changes. Both repositories' pipelines run it as the job `branvil-integration`
-on every commit, each with the other's `main` cloned from GitHub (CI jobs reach
-only public networks); the job is not a required check. When it fails, the
-log names both commits: a change on this side is fixed in its own pull
-request, a `main` of the other that no longer works with this one is fixed
-there.
+on `main` and every pull request head, each with the other's `main` cloned
+from GitHub (CI jobs reach only public networks); the job is not a required
+check. When it fails, the log names both commits: a change on this side is
+fixed in its own pull request, a `main` of the other that no longer works with
+this one is fixed there.
 
 ### End-to-end flow
 

@@ -19,8 +19,12 @@ guildbotics=$(cd "$guildbotics" && pwd)
 echo "Branvil $(git -C "$here" rev-parse HEAD)"
 echo "GuildBotics $(git -C "$guildbotics" rev-parse HEAD)"
 cargo build --quiet --manifest-path "$here/Cargo.toml"
+target=$(cargo metadata --quiet --format-version 1 --no-deps --manifest-path "$here/Cargo.toml" |
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 
+# A short traceback: the long one prints the arguments of the failing calls,
+# the services' tokens among them.
 cd "$here"
-BRANVIL_BIN="${CARGO_TARGET_DIR:-$here/target}/debug/branvil" \
-  exec "$guildbotics/.venv/bin/python" -I -m pytest -p no:cacheprovider -v \
-    integration/guildbotics/test_smoke.py "$@"
+BRANVIL_BIN="$target/debug/branvil" \
+  exec "$guildbotics/.venv/bin/python" -I -m pytest -p no:cacheprovider -v --tb=short \
+    -o timeout=300 integration/guildbotics/test_smoke.py "$@"

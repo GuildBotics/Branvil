@@ -219,7 +219,15 @@ def provider(flow: Flow, token: str) -> tuple[Any, Any]:
         account_info={"branvil_username": "aiko"},
     )
     os.environ[person.to_person_env_key("BRANVIL_TOKEN")] = token
-    config = {"name": "branvil", "workspace": SCOPE, "base_url": flow.url}
+    # GuildBotics reads where Branvil is from the identities' connection, and
+    # no proxy stands between the provider and the service.
+    os.environ["NO_PROXY"] = "*"
+    identity = flow.root / "identity"
+    os.environ["GUILDBOTICS_IDENTITY_ROOT"] = str(identity)
+    connection = identity / ".guildbotics/config/connections/branvil.yml"
+    connection.parent.mkdir(parents=True)
+    connection.write_text(f"base_url: {flow.url}\n", encoding="utf-8")
+    config = {"name": "branvil", "workspace": SCOPE}
     team = Team(
         project=Project(
             name="demo",

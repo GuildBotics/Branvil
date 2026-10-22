@@ -83,34 +83,46 @@ class Service:
             "TMPDIR": str(root),
         }
         data = root / "data"
-        subprocess.run(
+        done = subprocess.run(
             [binary, "init", "--owner", OWNER, "--listen", "127.0.0.1:0"]
             + ["--data-dir", str(data)],
             env=env,
             capture_output=True,
-            check=True,
-        )
-        self.owner = (data / "secrets" / "owner.token").read_text("utf-8").strip()
-        self.log = root / "serve.log"
-        self._process = subprocess.Popen(
-            [binary, "serve", "--data-dir", str(data)],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=self.log.open("ab"),
-            stdin=subprocess.DEVNULL,
             text=True,
         )
-        assert self._process.stdout is not None
-        first = self._process.stdout.readline()
-        found = re.match(r"branvil listening on (\S+)", first)
-        assert found, f"unexpected first line {first!r}"
+        assert done.returncode == 0, f"branvil init: {done.stderr}"
+        self.owner = (data / "secrets" / "owner.token").read_text("utf-8").strip()
+        self.log = root / "serve.log"
+        with self.log.open("ab") as log:
+            self._process = subprocess.Popen(
+                [binary, "serve", "--data-dir", str(data)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=log,
+                stdin=subprocess.DEVNULL,
+                text=True,
+            )
+        try:
+            assert self._process.stdout is not None
+            first = self._process.stdout.readline()
+            found = re.match(r"branvil listening on (\S+)", first)
+            assert found, f"unexpected first line {first!r}; log: {self.log_tail()}"
+        except BaseException:
+            self._end()
+            raise
         self.url = found.group(1)
         self.http = httpx.Client(
             base_url=f"{self.url}/api/v1", timeout=30, trust_env=False
         )
 
+    def log_tail(self) -> str:
+        return self.log.read_text("utf-8", errors="replace")[-20000:]
+
     def stop(self) -> None:
         self.http.close()
+        self._end()
+
+    def _end(self) -> None:
         if self._process.poll() is None:
             self._process.terminate()
             try:
@@ -275,8 +287,10 @@ def world(monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
         service = Service(root / "branvil")
         try:
             # GuildBotics reads where Branvil is from the identities'
-            # connection; nothing else of this machine's GuildBotics is used.
+            # connection; nothing else of this machine's GuildBotics is used,
+            # and no proxy stands between the provider and the service.
             monkeypatch.setenv("HOME", str(root / "home"))
+            monkeypatch.setenv("NO_PROXY", "*")
             monkeypatch.setenv("GUILDBOTICS_IDENTITY_ROOT", str(root / "identity"))
             for name in ("GUILDBOTICS_CONFIG_DIR", "GUILDBOTICS_WORKSPACE_ROOT"):
                 monkeypatch.delenv(name, raising=False)
@@ -309,7 +323,7 @@ def world(monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
         finally:
             service.stop()
             # Shown with the test's report when it fails.
-            print(service.log.read_text("utf-8", errors="replace")[-20000:])
+            print(service.log_tail())
 
 
 async def _read(tickets: TicketService, url: str) -> dict[str, Any]:
@@ -376,7 +390,10 @@ def test_tickets_and_their_relations(world: World) -> None:
         assert (await _read(tickets, url))["lane"] == "ready"
 
         await _change(tickets, blocker, state="closed", state_reason="completed")
-        assert [t.url for t in await tickets.candidates()] == [url]
+        [task] = await tickets.candidates()
+        assert task.url == url
+        assert await tickets.move(task, "in_progress") is True
+        assert (await _read(tickets, url))["lane"] == "in_progress"
 
         await _change(tickets, url, parent="", remove_blocked_by=[blocker])
         ticket = await _read(tickets, url)
@@ -430,7 +447,11 @@ def test_checks_decide_readiness_of_the_current_head(world: World) -> None:
         url = created.target.url
 
         pending = await code.readiness(url)
-        assert (pending.head_sha, pending.readiness) == (head, "blocked")
+        assert (pending.head_sha, pending.rollup, pending.readiness) == (
+            head,
+            "pending",
+            "blocked",
+        )
 
         world.finish_job(head)
         ready = await code.readiness(url)
@@ -438,6 +459,10 @@ def test_checks_decide_readiness_of_the_current_head(world: World) -> None:
 
         moved = await _push(world, code, head, "feature")
         again = await code.readiness(url)
-        assert (again.head_sha, again.readiness) == (moved, "blocked")
+        assert (again.head_sha, again.rollup, again.readiness) == (
+            moved,
+            "pending",
+            "blocked",
+        )
 
     world.run(scenario)
