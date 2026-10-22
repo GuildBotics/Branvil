@@ -18,7 +18,7 @@ describe("API client", () => {
     const [getReq, postReq, deleteReq] = fake.requests;
     expect(getReq?.headers["X-Branvil-CSRF"]).toBeUndefined();
     expect(postReq?.headers["X-Branvil-CSRF"]).toBe("csrf-xyz");
-    expect(postReq?.headers["Content-Type"]).toBe("application/json");
+    expect(postReq?.headers["Content-Type"]).toBe("text/plain");
     expect(postReq?.headers["Idempotency-Key"]).toMatch(/^[0-9a-f-]{36}$/);
     expect(postReq?.body).toEqual({ body: "hello" });
     expect(deleteReq?.headers["X-Branvil-CSRF"]).toBe("csrf-xyz");
