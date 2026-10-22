@@ -462,6 +462,12 @@ child, or next ticket, is scrolled to once shown; `web/src/views/relations/`), a
 upstream issue, relations to other tickets, and assignee), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
 settings (the shown workspace with its repositories, and Branvil's members).
+The pull request's check list marks required checks. Its merge or publish card
+names required checks that have not succeeded on the displayed head and disables
+the action until they do; while checks are loading or cannot be read, required
+checks remain unsatisfied. With no required checks, the card explains that check
+results do not block either action. The server rechecks these conditions when
+the action is submitted.
 While a card is dragged, the box under the pointer scrolls when the pointer is
 near its edge, faster the nearer (`web/src/dragScroll.ts`).
 The service's state is not a page: the GUI warns at the top of every page only
