@@ -487,7 +487,8 @@ configuration and credential helpers. They are one test crate,
 ### Running the service from this checkout
 
 `scripts/serve.sh` keeps a Branvil built from this checkout running and updates
-it after every merge to `main` whose checks have passed, with nobody watching.
+it after every merge to `main` whose required checks have passed, with nobody
+watching.
 Run it as a launchd user agent (instead of `scripts/dev.sh` in a terminal):
 
 ```sh
@@ -523,7 +524,11 @@ On its first start it installs the checkout's `HEAD` as a release build under
 finished, which takes minutes; building the checkout, `npm run build`, or
 `cargo clean` never change what runs. It starts the service again when it
 exits, and at its start and every 5 minutes (`--interval`) it updates to
-`origin/main` when that commit's checks in this Branvil have all succeeded:
+`origin/main` when that commit's run in this Branvil has finished and every
+check the repository requires for a merge succeeded (a check that is not
+required, such as `branvil-integration`, is waited for but decides nothing;
+require every job that must keep a commit out of the service, here `fmt`,
+`clippy`, `test`, `web`, and `dev-script`):
 it backs the service up, builds the new commit and rehearses its upgrade on a
 copy of the backup while the old build serves, and stops the service only to
 switch builds. A failed commit is not tried again until `main` moves on.

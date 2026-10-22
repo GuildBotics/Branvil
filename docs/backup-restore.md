@@ -210,10 +210,12 @@ passed since), then `branvil serve`, which is ready when it prints
 `branvil listening on …`; it starts the service again when it exits. At its
 start and every interval, while the service is ready, it runs
 `scripts/update.sh`, which decides whether to update: when `origin/main` is
-neither the running build nor `builds/attempted`, and that commit's checks in
-this Branvil have all completed with `success` (or it has no checks and
-expects none). While they run, it looks again in the next round; when one did
-not succeed, the commit goes to `builds/attempted`. An update:
+neither the running build nor `builds/attempted`, and that commit's run in
+this Branvil has finished with every check the repository requires for a merge
+(`required_checks`) succeeded (or it has no checks and expects none): what may
+be merged may be installed, and a check that is not required decides nothing.
+While the run is unfinished, it looks again in the next round; when a required
+check did not succeed, the commit goes to `builds/attempted`. An update:
 
 1. backs the running service up with the running build into
    `~/branvil-backups/branvil-update-<UTC time>` (keeping the newest three of
@@ -254,7 +256,7 @@ the disk, and renamed. Write them by hand the same way, for instance
 | `builds/notified` | The last failure notified (so it is notified once). |
 | `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line). |
 | `builds/rehearsal`, `builds/*.new`, `builds/*.tmp`, `<data>/branvil-schema-*.redb.partial` | Left only by something cut off; removed at the next start. |
-| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's checks; recorded in `builds/attempted` but not notified), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. |
+| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's required checks; recorded in `builds/attempted` but not notified), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. |
 
 **The state.**
 

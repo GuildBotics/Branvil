@@ -625,9 +625,11 @@ class DevScriptTests(ScriptTestCase):
 
 class GitServer:
     """A Branvil stand-in: git http-backend behind HTTP Basic, as Branvil's Smart
-    HTTP asks for it, and the checks of commits for a Bearer token."""
+    HTTP asks for it, and the repository's required checks and the checks of
+    commits for a Bearer token."""
 
-    CHECKS = "/api/v1/repos/acme%2Fdemo/commits/"
+    REPO = "/api/v1/repos/acme%2Fdemo"
+    CHECKS = REPO + "/commits/"
 
     def __init__(self, root, env, user, token):
         basic = "Basic " + base64.b64encode(f"{user}:{token}".encode()).decode()
@@ -636,6 +638,7 @@ class GitServer:
         self.fetches = 0
         self.checks = {}
         self.check_requests = []
+        self.required = ["test"]  # an int: that error status
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -643,7 +646,9 @@ class GitServer:
                 pass
 
             def do_GET(self):
-                if self.path.startswith(server.CHECKS):
+                if self.path == server.REPO:
+                    self.repo()
+                elif self.path.startswith(server.CHECKS):
                     self.checks()
                 else:
                     self.backend()
@@ -657,6 +662,13 @@ class GitServer:
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
+
+            def repo(self):
+                if self.headers.get("Authorization") != bearer:
+                    return self.answer(401)
+                if isinstance(server.required, int):
+                    return self.answer(server.required, b'{"error": {"code": "test"}}')
+                self.answer(200, json.dumps({"required_checks": server.required}).encode())
 
             def checks(self):
                 sha = self.path[len(server.CHECKS):].removesuffix("/checks")
@@ -1173,11 +1185,11 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(self.steps()[-3:], ["admin upgrade", "admin check", "serve"])
         self.assertFalse(self.unchecked())
 
-    def test_failed_checks_are_not_installed_nor_read_again(self):
+    def test_failed_required_checks_are_not_installed_nor_read_again(self):
         new = self.merge({
             "checks": [
-                {"name": "test", "status": "completed", "conclusion": "success"},
-                {"name": "lint", "status": "completed", "conclusion": "failure"},
+                {"name": "test", "status": "completed", "conclusion": "failure"},
+                {"name": "lint", "status": "completed", "conclusion": "success"},
             ],
             "checks_expected": True,
         })
@@ -1188,6 +1200,36 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(self.steps(), self.BOOT)
         self.assertEqual(self.current(), self.base)
         self.assertEqual(self.notifications(), [])
+
+    def test_only_the_checks_the_repository_requires_decide(self):
+        # A check that is not required for a merge, such as one against
+        # another repository, does not keep a commit out.
+        new = self.merge({
+            "checks": [
+                {"name": "test", "status": "completed", "conclusion": "success"},
+                {"name": "integration", "status": "completed", "conclusion": "failure"},
+            ],
+            "checks_expected": True,
+        })
+        proc, output = self.watch()
+        self.finished(proc, output)
+        self.assert_runs(new)
+        # Nor is anything kept out when the repository requires nothing, but
+        # the run is still waited for.
+        self.server.required = []
+        newer = self.merge({
+            "checks": [{"name": "test", "status": "in_progress", "conclusion": None}],
+            "checks_expected": True,
+        })
+        self.rounds_pass()
+        self.assert_runs(new)
+        self.server.checks[newer] = {
+            "checks": [{"name": "test", "status": "completed", "conclusion": "failure"}],
+            "checks_expected": True,
+        }
+        self.finished(proc, output, 2)
+        self.assert_runs(newer)
+        self.assertIsNone(self.attempted())
 
     def test_a_commit_without_expected_checks_is_installed(self):
         new = self.merge({"checks": [], "checks_expected": False})
@@ -1201,9 +1243,14 @@ class ServeScriptTests(ScriptTestCase):
         for answer in [500, 401, 404, {"checks_expected": True}]:
             self.server.checks[new] = answer
             self.rounds_pass()
+        self.server.checks[new] = SUCCESS
+        self.server.required = 503
+        self.rounds_pass()
         log = output.read_text(encoding="utf-8")
-        for text in ["HTTP 500", "HTTP 401", "HTTP 404", "TypeError"]:
+        for text in ["checks: HTTP 500", "checks: HTTP 401", "checks: HTTP 404", "TypeError",
+                     "the repository: HTTP 503"]:
             self.assertIn(text, log)
+        self.server.required = ["test"]
         [message] = self.notifications()
         self.assertIn(f"stopped while reading the checks of {new}", message)
         self.assertEqual(self.steps(), self.BOOT)
