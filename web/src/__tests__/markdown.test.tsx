@@ -29,6 +29,21 @@ describe("Markdown rendering", () => {
     expect(html).not.toMatch(/<iframe|<form|<input|style=/i);
   });
 
+  it("keeps a GFM table and its column alignment", () => {
+    const html = renderMarkdown(
+      ["| Left | Center | Right |", "| :--- | :---: | ---: |", "| a | b | c |"].join("\n"),
+    );
+    expect(html).toContain("<table>");
+    expect(html).toContain("<thead>");
+    expect(html).toContain("<tbody>");
+    expect(html).toMatch(/<th align="left">Left<\/th>/);
+    expect(html).toMatch(/<th align="center">Center<\/th>/);
+    expect(html).toMatch(/<th align="right">Right<\/th>/);
+    expect(html).toMatch(/<td align="left">a<\/td>/);
+    expect(html).toMatch(/<td align="center">b<\/td>/);
+    expect(html).toMatch(/<td align="right">c<\/td>/);
+  });
+
   it("opens links in a new context without referrer or opener", () => {
     const { container } = render(<Markdown source="[docs](https://example.com/x)" />);
     const a = container.querySelector("a");

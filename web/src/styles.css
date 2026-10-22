@@ -414,6 +414,46 @@ a:hover {
   color: var(--mantine-color-anchor);
 }
 
+/* The table scrolls inside its own box so a wide grid does not widen the page.
+   display:block is what lets overflow apply to a table. */
+.markdown table {
+  border-collapse: collapse;
+  display: block;
+  margin: 0 0 8px;
+  max-width: 100%;
+  overflow: auto;
+  width: max-content;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--color-border);
+  /* anywhere on .markdown would shrink a wide table instead of scrolling it. */
+  overflow-wrap: normal;
+  padding: 6px 12px;
+}
+
+.markdown th {
+  background: var(--color-bg-panel-subtle);
+  font-weight: 700;
+  text-align: left;
+}
+
+.markdown th[align="left"],
+.markdown td[align="left"] {
+  text-align: left;
+}
+
+.markdown th[align="center"],
+.markdown td[align="center"] {
+  text-align: center;
+}
+
+.markdown th[align="right"],
+.markdown td[align="right"] {
+  text-align: right;
+}
+
 code,
 pre,
 .mono {
