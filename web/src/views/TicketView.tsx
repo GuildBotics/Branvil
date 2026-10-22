@@ -1,7 +1,7 @@
 import { ActionIcon, Anchor, Button, Card, Chip, Group, Menu, Select, Stack, Text, TextInput } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Pencil } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { isApiError } from "../api/client";
 import * as api from "../api/endpoints";
 import { LANES, type Lane, type Reaction, type Ticket } from "../api/types";
@@ -9,9 +9,9 @@ import { CommentView, ComposeForm, ErrorMessage, Loading, Post, PostHead, Refusa
 import { BodyEditor, EditableTitle, EditPencil } from "../components/Editable";
 import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
-import { AssigneePicker, type Person } from "../components/PeoplePicker";
+import { AssigneePicker } from "../components/PeoplePicker";
 import { useT } from "../i18n";
-import { useMemberKinds, useMembers, useRepo, useTicket, useTicketComments, useTicketPulls } from "../query/hooks";
+import { useMemberKinds, useRepo, useTicket, useTicketComments, useTicketPulls, usePeople } from "../query/hooks";
 import { keys } from "../query/keys";
 import { Link, ServiceLink } from "../router/Router";
 import { href } from "../router/routes";
@@ -25,15 +25,11 @@ export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: strin
   const repoQuery = useRepo(repo);
   const comments = useTicketComments(repo, ticketKey);
   const pulls = useTicketPulls(repo, ticketKey);
-  const members = useMembers();
   const kindOf = useMemberKinds();
   const [editingBody, setEditingBody] = useState(false);
   const refresh = () => void client.invalidateQueries({ queryKey: keys.ticket(repo, ticketKey) });
   const refreshBoards = () => void client.invalidateQueries({ queryKey: ["board"] });
-  const people = useMemo<Person[]>(
-    () => (members.data?.items ?? []).filter((m) => m.kind !== "runner").map((m) => ({ name: m.name, kind: m.kind })),
-    [members.data],
-  );
+  const people = usePeople();
 
   const addComment = useMutation({
     mutationFn: (body: string) => api.tickets.addComment(repo, ticketKey, body),

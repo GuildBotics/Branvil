@@ -22,9 +22,9 @@ const repo = (path: string, labels: string[]) => ({
 
 const MEMBERS = {
   items: [
-    { name: "owner", display_name: "Owner", kind: "owner", accounts: [] },
-    { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [] },
-    { name: "ci", display_name: "", kind: "runner", accounts: [] },
+    { name: "owner", display_name: "Owner", kind: "owner", accounts: [], reviewers: [] },
+    { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], reviewers: [] },
+    { name: "ci", display_name: "", kind: "runner", accounts: [], reviewers: [] },
   ],
   next_cursor: null,
 };

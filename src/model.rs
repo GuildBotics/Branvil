@@ -35,6 +35,9 @@ pub struct Member {
     /// Accounts on upstream code hosts, one per provider. Their credentials
     /// are files under `<data>/secrets/accounts/`, never in this record.
     pub accounts: Vec<Account>,
+    /// The members asked to review every pull request this member opens,
+    /// by their names: owners and agents other than this member.
+    pub reviewers: Vec<String>,
     pub created_at: String,
     /// The version of the member's picture, whose bytes are in `AVATARS`
     /// under the member's key; `None` for none.

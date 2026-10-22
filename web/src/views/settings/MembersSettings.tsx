@@ -6,8 +6,9 @@ import * as api from "../../api/endpoints";
 import { PROVIDERS, type AccountCredential, type IssuedToken, type Member, type MemberKind } from "../../api/types";
 import { CopyButton, ErrorMessage, Loading, MemberAvatar, StateBadge, Time } from "../../components/common";
 import { PanelHeader } from "../../components/PanelHeader";
+import { PeopleToggle, type Person } from "../../components/PeoplePicker";
 import { useT } from "../../i18n";
-import { useMemberTokens, useMembers } from "../../query/hooks";
+import { useMemberTokens, useMembers, usePeople } from "../../query/hooks";
 import { keys } from "../../query/keys";
 
 type NewKind = Exclude<MemberKind, "owner">;
@@ -18,6 +19,7 @@ export function MembersSettings() {
   const members = useMembers();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
+  const people = usePeople();
   return (
     <Card p="lg">
       <PanelHeader
@@ -58,7 +60,9 @@ export function MembersSettings() {
                   {t("common.edit")}
                 </Button>
               </div>
-              {editing === m.name && <MemberEditor member={m} />}
+              {editing === m.name && (
+                <MemberEditor member={m} people={people} />
+              )}
             </div>
           ))}
         </Stack>
@@ -119,7 +123,7 @@ function NewMemberModal({ opened, onClose }: { opened: boolean; onClose: () => v
   );
 }
 
-function MemberEditor({ member }: { member: Member }) {
+function MemberEditor({ member, people }: { member: Member; people: Person[] }) {
   const t = useT();
   const client = useQueryClient();
   const [displayName, setDisplayName] = useState(member.display_name);
@@ -132,6 +136,7 @@ function MemberEditor({ member }: { member: Member }) {
       <Tabs defaultValue="basic">
         <Tabs.List>
           <Tabs.Tab value="basic">{t("settings.tabBasic")}</Tabs.Tab>
+          {member.kind !== "runner" && <Tabs.Tab value="reviewers">{t("member.reviewers")}</Tabs.Tab>}
           {member.kind !== "runner" && <Tabs.Tab value="accounts">{t("account.title")}</Tabs.Tab>}
           <Tabs.Tab value="tokens">{t("token.title")}</Tabs.Tab>
         </Tabs.List>
@@ -152,6 +157,11 @@ function MemberEditor({ member }: { member: Member }) {
             {update.isError && <ErrorMessage error={update.error} />}
           </form>
         </Tabs.Panel>
+        {member.kind !== "runner" && (
+          <Tabs.Panel value="reviewers" pt="md">
+            <Reviewers member={member} people={people} />
+          </Tabs.Panel>
+        )}
         {member.kind !== "runner" && (
           <Tabs.Panel value="accounts" pt="md">
             <Stack gap="md">
@@ -198,6 +208,41 @@ function Picture({ member }: { member: Member }) {
         )}
       </Group>
       {failed && <ErrorMessage error={failed} />}
+    </Stack>
+  );
+}
+
+/** Who is asked to review every pull request the member opens: one at a time, as on a pull request. */
+function Reviewers({ member, people }: { member: Member; people: Person[] }) {
+  const t = useT();
+  const client = useQueryClient();
+  const toggle = useMutation({
+    mutationFn: ({ name, on }: { name: string; on: boolean }) => api.members.setReviewer(member.name, name, on),
+    onSettled: () => void client.invalidateQueries({ queryKey: keys.members(), exact: true }),
+  });
+  const names = member.reviewers.join(", ");
+  return (
+    <Stack gap="sm">
+      <Text size="sm" c="var(--color-text-subtle)">
+        {t("member.reviewersExplain", { name: member.name })}
+      </Text>
+      <Group gap="sm">
+        <PeopleToggle
+          people={people}
+          except={member.name}
+          shown={member.reviewers}
+          on={(name) => member.reviewers.includes(name)}
+          label={t("member.reviewersTrigger", { name: member.name, names: names || t("member.reviewersNobody") })}
+          help={t("member.reviewersHelp", { name: member.name })}
+          onToggle={(name, on) => toggle.mutate({ name, on })}
+          disabled={toggle.isPending}
+          position="bottom-start"
+        />
+        <Text size="sm" c={names ? undefined : "dimmed"}>
+          {names || t("member.reviewersNone")}
+        </Text>
+      </Group>
+      {toggle.isError && <ErrorMessage error={toggle.error} />}
     </Stack>
   );
 }

@@ -187,11 +187,9 @@ new data directory; when the upgrade fails, the restored directory is left
 at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
 it once the cause is fixed).
 
-Version 10 → 11 (`src/upgrade.rs`): every ticket is a card of its
-workspace's board. A ticket that was off the board goes to the end of `new`
-when open and to the end of `done` when closed, after the cards already in
-that lane, in the order of the ticket table (by repository id, then number).
-Nothing else changes.
+Version 11 → 12 (`src/upgrade.rs`): a member names the members asked to
+review every pull request it opens. Every member gets none. Nothing else
+changes.
 
 ### The service run by scripts/serve.sh
 
@@ -333,15 +331,14 @@ request that closes it, a review, a conversation comment, an inline thread with
 a reply, and an upstream (a GitHub stand-in) read with a member's account and
 its token; it backs the service up while it runs, checks that the token is in
 no file of the backup, that a damaged copy and one two schema versions old are
-refused, turns the backup into one of the previous schema version (with a
-second ticket off the board), restores
+refused, turns the backup into one of the previous schema version, restores
 that into another directory (upgrading and marking it: `branvil admin
 upgrade` exits 3 until `branvil admin check` passes, then 0), runs
 `branvil admin check`, starts the restored service on the
 original address, and checks the refs (`git ls-remote`), the ticket and its
 lane, the pull request and its ticket link, the review, the comments and
-thread, the ticket's linked pull requests, the board cards (the second ticket
-at the end of `new`), the member's
+thread, the ticket's linked pull requests, the board cards, the members (each
+with no reviewers, as the upgrade left them) and a member's
 account (its login, while polling reports the credential missing), and that a new push is
 recorded. `tests/ci.rs`
 (`ci_records_logs_and_artifacts_survive_a_backup_and_restore`) backs up a

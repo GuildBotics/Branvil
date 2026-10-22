@@ -141,12 +141,14 @@ Messages never contain tokens.
 
 ```json
 {"name": "aiko", "display_name": "Aiko", "kind": "agent",
- "accounts": [{"provider": "github", "login": "aiko-bot", "kind": "token", "set_at": "..."}]}
+ "accounts": [{"provider": "github", "login": "aiko-bot", "kind": "token", "set_at": "..."}],
+ "reviewers": ["ken"]}
 ```
 
 `kind` is `owner`, `agent`, or `runner` (the CI runner's member). `accounts`
 are its accounts on upstream hosts (see "Upstream"); an account's `kind` is
-`token` or `app`. `401 unauthorized` for a
+`token` or `app`. `reviewers` are the members asked to review every pull
+request it opens (see "Pull requests"). `401 unauthorized` for a
 bad token.
 
 ### Entry links and sessions (GUI)
@@ -215,7 +217,7 @@ Branvil's admin API: any client holding an owner token may use them (the
 `branvil` CLI, the GUI, a local app with its `app:` token). They are as stable
 as the rest of this file.
 
-- `GET /api/v1/members` (owner) → items of `{"name","display_name","kind","accounts","avatar_url"}`;
+- `GET /api/v1/members` (owner) → items of `{"name","display_name","kind","accounts","reviewers","avatar_url"}`;
   `avatar_url` is where the member's picture is (`null` for none), and it
   changes with the picture.
 - `GET /api/v1/members/{name}` (owner, or the member itself) → member; `403
@@ -231,6 +233,13 @@ as the rest of this file.
   type; `404 not_found` for none. It may be cached for good, as its
   `avatar_url` changes with it.
 - `PATCH /api/v1/members/{name}` (owner) `{"display_name"}`
+- `PUT /api/v1/members/{name}/reviewers/{reviewer}` (owner) and `DELETE` → member:
+  ask or stop asking `reviewer` to review every pull request the member opens.
+  A reviewer is an owner or an agent other than the member, kept once and
+  spelled as the member is named: asking a runner or the member itself is
+  `400 invalid`, and a runner member has no reviewers (`400 invalid` for both
+  methods). An unknown name is `404 not_found`. Asking again or withdrawing
+  one that is not asked changes nothing.
 - Token endpoints are the owner's for other members; a member may issue, list, and revoke its own tokens.
 - `POST /api/v1/members/{name}/tokens` `{"label", "replace"?: true}` →
   `{"id","label","token","created_at"}` (the only time `token` is shown). With
@@ -494,7 +503,9 @@ request was published (see "Upstream").
   `{"head", "base"?: "", "title", "body", "draft": false, "tickets": [{"url","closes"}]}`
   → `201 {"created": true, "pull": {...}}`, or `200 {"created": false, "pull": {...}}`
   when an open pull request of the same head and base exists (it is unchanged).
-  An empty `base` is the default branch. The head branch must exist (`404 not_found`). A ticket of
+  An empty `base` is the default branch. The new pull request asks the author's
+  `reviewers` (see "Members and tokens") to review it; changing them later leaves
+  pull requests already open as they are. The head branch must exist (`404 not_found`). A ticket of
   this Branvil must exist (`404 not_found`); `closes: true` is accepted only for a
   ticket of this repository (`422 unsupported` otherwise): a ticket of another
   repository, like a URL of another service, is kept as a reference and cannot

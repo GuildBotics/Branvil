@@ -68,7 +68,7 @@ export function fakeApi(routes: Record<string, Reply | Reply[]>) {
   };
 }
 
-export const ME = { name: "owner", display_name: "Owner", kind: "owner", accounts: [] };
+export const ME = { name: "owner", display_name: "Owner", kind: "owner", accounts: [], reviewers: [] };
 export const SESSION = { me: ME, csrf: "csrf-123" };
 
 export function renderApp(path: string) {

@@ -146,11 +146,11 @@ describe("pull request review", () => {
       pullRoutes({
         "GET /api/v1/members": json(200, {
           items: [
-            { name: "owner", display_name: "Owner", kind: "owner", accounts: [] },
-            { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [] },
-            { name: "ken", display_name: "Ken", kind: "agent", accounts: [] },
-            { name: "mia", display_name: "Mia", kind: "agent", accounts: [] },
-            { name: "ci", display_name: "CI", kind: "runner", accounts: [] },
+            { name: "owner", display_name: "Owner", kind: "owner", accounts: [], reviewers: [] },
+            { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], reviewers: [] },
+            { name: "ken", display_name: "Ken", kind: "agent", accounts: [], reviewers: [] },
+            { name: "mia", display_name: "Mia", kind: "agent", accounts: [], reviewers: [] },
+            { name: "ci", display_name: "CI", kind: "runner", accounts: [], reviewers: [] },
           ],
           next_cursor: null,
         }),

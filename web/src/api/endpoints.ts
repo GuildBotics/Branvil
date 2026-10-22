@@ -58,6 +58,8 @@ export const members = {
     request<Member>("PATCH", `/members/${enc(name)}`, { body }),
   setAvatar: (name: string, image: Blob) => request<Member>("PUT", `/members/${enc(name)}/avatar`, { body: image }),
   removeAvatar: (name: string) => request<Member>("DELETE", `/members/${enc(name)}/avatar`),
+  setReviewer: (name: string, reviewer: string, on: boolean) =>
+    request<Member>(on ? "PUT" : "DELETE", `/members/${enc(name)}/reviewers/${enc(reviewer)}`),
   tokens: (name: string) => getAll<TokenInfo>(`/members/${enc(name)}/tokens`),
   issueToken: (name: string, label: string) => create<IssuedToken>(`/members/${enc(name)}/tokens`, { label }),
   revokeToken: (name: string, id: string) => request<void>("DELETE", `/members/${enc(name)}/tokens/${enc(id)}`),

@@ -707,3 +707,249 @@ async fn the_owner_merges_the_current_head_and_closes_tickets() {
     // A merged pull request keeps its diff.
     assert_eq!(s.ok(&base, &w.aiko).await["changed_files"], 1);
 }
+
+#[tokio::test]
+async fn a_pull_request_asks_the_reviewers_its_author_names() {
+    let w = World::new().await;
+    let s = &w.server;
+    s.member(&w.owner, "box", "runner").await;
+    let aiko = "/members/aiko";
+    let reviewer = |member: &str, name: &str| format!("/members/{member}/reviewers/{name}");
+    // The owner names them, one by one: owners and agents other than the
+    // member, each once, spelled as they are named.
+    for name in ["KEN", "alice", "ken"] {
+        let (st, v) = s.put(&reviewer("aiko", name), &w.owner, json!({})).await;
+        assert_eq!(st, 200, "{name}: {v}");
+    }
+    let (st, v) = s.put(&reviewer("aiko", "box"), &w.owner, json!({})).await;
+    assert_eq!(st, 400, "a runner reviews nothing: {v}");
+    for (member, name, status) in [
+        ("aiko", "aiko", 400),
+        ("aiko", "nobody", 404),
+        ("box", "ken", 400),
+    ] {
+        let (st, v) = s.put(&reviewer(member, name), &w.owner, json!({})).await;
+        assert_eq!(st, status, "{member} {name}: {v}");
+    }
+    let (st, _) = s.put(&reviewer("aiko", "ken"), &w.aiko, json!({})).await;
+    assert_eq!(st, 403);
+    let (st, _) = s.delete(&reviewer("aiko", "alice"), &w.aiko).await;
+    assert_eq!(st, 403);
+    // A display name change keeps them.
+    let (st, v) = s
+        .patch(aiko, &w.owner, json!({"display_name": "Aiko"}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["reviewers"], json!(["ken", "alice"]));
+    assert_eq!(
+        s.ok(aiko, &w.aiko).await["reviewers"],
+        json!(["ken", "alice"])
+    );
+
+    // A pull request aiko opens asks them, and ken's patrol sees it.
+    w.push_change("feature", "f.txt", "one\n");
+    let path = pulls(&w);
+    let open = |head: &str| s.post(&path, &w.aiko, json!({"head": head, "title": head}));
+    let (st, v) = open("feature").await;
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["pull"]["reviewers"], json!(["ken", "alice"]));
+    let patrol = s.ok("/pulls?involves=me", &w.ken).await;
+    assert_eq!(patrol["items"].as_array().unwrap().len(), 1, "{patrol}");
+    // Changing them leaves the pull requests already open as they are; the
+    // next one asks the new ones.
+    for name in ["Ken", "alice"] {
+        let (st, v) = s.delete(&reviewer("aiko", name), &w.owner).await;
+        assert_eq!(st, 200, "{v}");
+        let (st, v) = s.delete(&reviewer("aiko", name), &w.owner).await;
+        assert_eq!(st, 200, "withdrawing again changes nothing: {v}");
+    }
+    let (st, v) = open("feature").await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["pull"]["reviewers"], json!(["ken", "alice"]));
+    w.push_change("second", "g.txt", "two\n");
+    let (st, v) = open("second").await;
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["pull"]["reviewers"], json!([]));
+}
+
+#[tokio::test]
+async fn the_upgrade_from_version_11_gives_every_member_no_reviewers() {
+    let mut w = World::new().await;
+    // A card, whose index entry the failing check below takes away.
+    w.ticket("One").await;
+    // A picture, which a member keeps through the upgrade.
+    let s = &w.server;
+    let resp = s
+        .http
+        .put(format!("{}/api/v1/members/aiko/avatar", s.url))
+        .bearer_auth(&w.owner)
+        .body(b"\x89PNG\r\n\x1a\nrest of a png".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    w.server.stop();
+    let data = w.server.data.clone();
+    let db = data.join("branvil.redb");
+    as_schema_11(&db);
+    let before = tables(&db);
+    let old = records(&db, "members");
+    assert!(old.iter().any(|m| m["avatar"].is_string()), "{old:?}");
+    let members = old.len();
+    let admin = |what: &str| {
+        let out = std::process::Command::new(BIN)
+            .args(["admin", what, "--data-dir"])
+            .arg(&data)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.code().unwrap(), text)
+    };
+    let (code, text) = admin("check");
+    assert!(
+        code != 0 && text.contains("branvil admin upgrade"),
+        "{text}"
+    );
+    // A member it does not expect stops it before anything is written, the
+    // copy of the database included.
+    let ken = |kind: Value| {
+        edit_records(&db, "members", |m| {
+            if m["name"] == "ken" {
+                m["kind"] = kind.clone();
+            }
+        })
+    };
+    ken(json!("robot"));
+    // The exit status says what happened (scripts/serve.sh reads it): 1, the
+    // database is left as it was.
+    let (code, text) = admin("upgrade");
+    assert!(
+        code == 1 && text.contains("a member does not decode"),
+        "{text}"
+    );
+    let copies = std::fs::read_dir(&data)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("branvil-schema-")
+        })
+        .count();
+    assert_eq!(copies, 0);
+    let (code, text) = admin("check");
+    assert!(
+        code != 0 && text.contains("branvil admin upgrade"),
+        "{text}"
+    );
+    ken(json!("agent"));
+    let (code, text) = admin("upgrade");
+    // scripts/serve.sh tells the owner that its log names the copy.
+    let copy = format!(
+        "\nthe database as it was: {}",
+        data.join("branvil-schema-11-").display()
+    );
+    assert!(text.contains(&copy), "{text}");
+    let next = format!(
+        "\n`branvil admin check --data-dir {0}` has to pass before `branvil serve --data-dir {0}` starts it",
+        data.display()
+    );
+    assert!(text.contains(&next), "{text}");
+    let summary = format!("{members} member(s) got no reviewers; nothing else changed");
+    assert!(code == 3 && text.contains(&summary), "{text}");
+    // Every member is what version 11 wrote with no reviewers, and only the
+    // members and the version changed.
+    let upgraded: Vec<Value> = old
+        .into_iter()
+        .map(|mut m| {
+            m["reviewers"] = json!([]);
+            m
+        })
+        .collect();
+    assert_eq!(records(&db, "members"), upgraded);
+    let (mut after, mut expected) = (tables(&db), before);
+    for t in ["members", "meta"] {
+        after.remove(t);
+        expected.remove(t);
+    }
+    assert_eq!(after, expected);
+    // Until a check passes, upgrade answers 3 with nothing left to upgrade,
+    // and serve refuses the database.
+    let unchecked = "has not passed `branvil admin check` since";
+    let (code, text) = admin("upgrade");
+    assert!(code == 3 && text.contains(unchecked), "{text}");
+    let mut serve = std::process::Command::new(BIN)
+        .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+        .arg(&data)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let refused = loop {
+        if let Some(status) = serve.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            serve.kill().unwrap();
+            panic!("serve did not refuse an unchecked database");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut serve.stderr.take().unwrap(), &mut err).unwrap();
+    assert!(!refused.success() && err.contains(unchecked), "{err}");
+    // A check that fails leaves the mark.
+    {
+        let database = redb::Database::open(&db).unwrap();
+        let txn = database.begin_write().unwrap();
+        {
+            let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("ix_cards");
+            let mut cards = txn.open_table(def).unwrap();
+            let key = redb::ReadableTable::iter(&cards)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .0
+                .value()
+                .to_vec();
+            cards.remove(key.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let (code, text) = admin("check");
+    assert!(code == 1 && text.contains("index problem"), "{text}");
+    let (code, text) = admin("upgrade");
+    assert!(code == 3 && text.contains(unchecked), "{text}");
+    let (code, text) = admin("reindex");
+    assert!(code == 0, "{text}");
+    // A passing check clears it.
+    let (code, text) = admin("check");
+    assert!(code == 0 && text.contains("indexes: ok"), "{text}");
+    // 0: the database already has this version, and nothing changed.
+    let upgraded = tables(&db);
+    let (code, text) = admin("upgrade");
+    assert!(
+        code == 0 && text.contains("already has schema version"),
+        "{text}"
+    );
+    assert_eq!(tables(&db), upgraded);
+    w.restart(&[]);
+    // Every member reads with no reviewers, and can be given some.
+    let s = &w.server;
+    let all = s.ok("/members?limit=100", &w.owner).await;
+    let all = all["items"].as_array().unwrap();
+    assert_eq!(all.len(), members);
+    assert!(all.iter().all(|m| m["reviewers"] == json!([])), "{all:?}");
+    let (st, v) = s
+        .put("/members/aiko/reviewers/ken", &w.owner, json!({}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["reviewers"], json!(["ken"]));
+}

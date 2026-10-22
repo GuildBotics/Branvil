@@ -6,9 +6,8 @@ import * as api from "../api/endpoints";
 import { ticketRef, type Card, type Lane, type Ticket } from "../api/types";
 import { ErrorMessage, Loading, Refusal } from "../components/common";
 import { PageHeader } from "../components/PageHeader";
-import type { Person } from "../components/PeoplePicker";
 import { type Translate, useT } from "../i18n";
-import { useBoard, useCards, useMembers } from "../query/hooks";
+import { useBoard, useCards, usePeople } from "../query/hooks";
 import { useStored } from "../storage";
 import { CardFilters } from "./board/CardFilters";
 import { ciUrlsOf, moveRefusal, type Notice } from "./board/CardView";
@@ -60,7 +59,6 @@ export function RelationsView({ workspace }: { workspace: string }) {
   const t = useT();
   const client = useQueryClient();
   const boardQuery = useBoard(workspace);
-  const members = useMembers();
   const [closedShown, showClosed] = useStored("branvil.relations.includeClosed");
   const includeClosed = closedShown === "true";
   const [opened, keepOpened] = useStored(`branvil.relations.open.${workspace}`);
@@ -87,10 +85,7 @@ export function RelationsView({ workspace }: { workspace: string }) {
   const cards = useMemo(() => shown?.items ?? [], [shown]);
   const graph = useMemo(() => buildGraph(cards, { includeClosed, open }), [cards, includeClosed, open]);
   const lanes = useMemo(() => boardQuery.data?.lanes ?? [], [boardQuery.data]);
-  const people = useMemo<Person[]>(
-    () => (members.data?.items ?? []).filter((m) => m.kind !== "runner").map((m) => ({ name: m.name, kind: m.kind })),
-    [members.data],
-  );
+  const people = usePeople();
   // Checks are loaded for the pull requests of the cards the figure shows.
   const ciUrls = useMemo(() => ciUrlsOf(cardsOf(graph)), [graph]);
   const refresh = () => client.invalidateQueries({ queryKey: ["board"] });

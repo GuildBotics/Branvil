@@ -1,15 +1,15 @@
 import { Anchor, Button, Group, Stack, Text, Title } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FileDiff } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import * as api from "../api/endpoints";
 import { ticketRef, type Check, type PullRequest, type Review } from "../api/types";
 import { ErrorMessage, Loading, Post, PostHead, StateBadge } from "../components/common";
 import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
-import { ReviewersPicker, type Person, type ReviewState } from "../components/PeoplePicker";
+import { ReviewersPicker, type ReviewState } from "../components/PeoplePicker";
 import { useT } from "../i18n";
-import { useMemberKinds, useMembers, usePull, usePullActivity, usePullFiles, usePullThreads, useRepo } from "../query/hooks";
+import { useMemberKinds, usePull, usePullActivity, usePullFiles, usePullThreads, useRepo, usePeople } from "../query/hooks";
 import { keys } from "../query/keys";
 import { Link, navigate, ServiceLink } from "../router/Router";
 import { href, routeOfUrl } from "../router/routes";
@@ -46,15 +46,11 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
   const activity = usePullActivity(repo, number);
   const threads = usePullThreads(repo, number);
   const files = usePullFiles(repo, number, pull.data?.head_sha);
-  const members = useMembers();
   const kindOf = useMemberKinds();
   const [filesOpen, setFilesOpen] = useState<{ focus: string | null } | null>(null);
   const [check, setCheck] = useState<{ attemptId: string; hosted: Check | null } | null>(openJob ? { attemptId: openJob, hosted: null } : null);
   const refresh = () => void client.invalidateQueries({ queryKey: keys.pull(repo, number) });
-  const people = useMemo<Person[]>(
-    () => (members.data?.items ?? []).filter((m) => m.kind !== "runner").map((m) => ({ name: m.name, kind: m.kind })),
-    [members.data],
-  );
+  const people = usePeople();
 
   const setDraft = useMutation({
     mutationFn: (draft: boolean) => api.pulls.update(repo, number, { draft }),
