@@ -92,9 +92,13 @@ cargo test
 python3 -m unittest discover -s tests -p test_dev_script.py -v
 ```
 
-GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs
-only the last one, on macOS. A check that Branvil's CI can run goes in
-`.branvil/ci.toml`, not in the workflow.
+Branvil's CI runs them all on Linux. GitHub Actions
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on macOS only
+what Linux cannot show, and only for the changes it concerns: Clippy when
+`*.rs`, `Cargo.toml`, or `Cargo.lock` changes, and the last one, under
+`/bin/bash`, when `scripts/` or `tests/test_dev_script.py` changes. A
+check that Branvil's CI can run goes in `.branvil/ci.toml`, not in the
+workflow.
 
 - The integration tests are one test crate (`tests/main.rs`). To run one file:
   `cargo test --test main <file>::` (for example

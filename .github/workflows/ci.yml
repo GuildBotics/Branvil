@@ -1,8 +1,13 @@
 name: CI
 
 # Branvil's own CI (.branvil/ci.toml) runs every check on Linux. This workflow
-# runs only what it cannot: the scripts' tests on macOS, the system the service
-# and its scripts run on (BSD tools, macOS process handling).
+# runs only what it cannot, on macOS, and only for the changes it concerns:
+# Clippy compiles and lints the code built for macOS alone
+# (`#[cfg(target_os = "macos")]`), and the scripts' tests run under macOS'
+# tools and /bin/bash, the bash launchd runs scripts/serve.sh (and so
+# scripts/update.sh) with and the oldest one the scripts meet. The job runs
+# for every change, so its check always reports; the steps a change does not
+# concern are skipped.
 
 on:
   push:
@@ -22,6 +27,45 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
 
+      # A pull request is compared with the first parent of its merge commit,
+      # the base, and a push with main before it: the diff is what the change
+      # brings to main. A rename lists both of its paths; a failing diff fails
+      # the job rather than skipping its checks.
+      - name: Detect changes
+        id: changes
+        env:
+          BASE: ${{ github.event_name == 'push' && github.event.before || 'HEAD^1' }}
+        run: |
+          changed="$(git -c core.quotePath=false diff --name-only --no-renames "$BASE" HEAD)"
+          rust=false
+          scripts=false
+          while IFS= read -r path; do
+            case "$path" in
+              .github/workflows/ci.yml) rust=true; scripts=true ;;
+              *.rs | Cargo.toml | Cargo.lock) rust=true ;;
+              scripts/* | tests/test_dev_script.py) scripts=true ;;
+            esac
+          done <<<"$changed"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "scripts=$scripts" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.changes.outputs.rust == 'true'
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --component clippy
+          rustup default 1.96.0
+
+      - name: Clippy
+        if: steps.changes.outputs.rust == 'true'
+        run: cargo clippy --all-targets -- -D warnings
+
+      # `bash` on the PATH is /bin/bash, whatever else the runner image
+      # installs.
       - name: Development launcher tests
-        run: python3 -m unittest discover -s tests -p test_dev_script.py -v
+        if: steps.changes.outputs.scripts == 'true'
+        run: |
+          mkdir "$RUNNER_TEMP/system-bash"
+          ln -s /bin/bash "$RUNNER_TEMP/system-bash/bash"
+          PATH="$RUNNER_TEMP/system-bash:$PATH" python3 -m unittest discover -s tests -p test_dev_script.py -v

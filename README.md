@@ -537,9 +537,15 @@ are in "Upgrading" in [`docs/backup-restore.md`](docs/backup-restore.md).
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on pushes to `main`
 and pull requests targeting `main`. It runs only what this repository's
-pipeline cannot: its `checks-macos` job runs the Python development launcher
-tests above on `macos-latest`, the system the service and its scripts run on.
-Every other check runs in this repository's pipeline. The opt-in real microVM
+pipeline cannot, on `macos-latest`, and only for the changes it concerns: its
+`checks-macos` job runs `cargo clippy --all-targets -- -D warnings` (Rust
+1.96.0), which compiles and lints the code built for macOS alone, when `*.rs`,
+`Cargo.toml`, or `Cargo.lock` changes, and the Python development launcher
+tests above under `/bin/bash` (the bash launchd runs `scripts/serve.sh` with,
+and the oldest one the scripts meet) when `scripts/` or
+`tests/test_dev_script.py` changes. A change to the workflow
+runs both. The job reports for every change, with the steps it does not
+concern skipped. Every other check runs in this repository's pipeline. The opt-in real microVM
 executor tests still require the runtime and image described in
 [`docs/ci.md`](docs/ci.md).
 
