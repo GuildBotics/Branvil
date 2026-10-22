@@ -806,7 +806,10 @@ async fn sync_pull(
                         // What the pull request brought: from where its pushed
                         // head left the base, whichever way the host merged it.
                         let merged_base = match &x.pushed {
-                            Some(pushed) => app.git.merge_base(&dir, pushed, &merge_sha).await?,
+                            Some(pushed) => {
+                                pulls::keep_merged(app, repo, number, pushed).await?;
+                                app.git.merge_base(&dir, pushed, &merge_sha).await?
+                            }
                             None => None,
                         };
                         let (r2, x2) = (repo.clone(), x.clone());

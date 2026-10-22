@@ -95,7 +95,8 @@ are atomic together.
      published.
 3. **Merges** (`domain::pulls::merge`), under the repository lock:
    re-read the PR and tips; check expected head/base, fast-forward, required
-   checks; write a `ref_journal` entry `{ref, old, new, op}`; run
+   checks; point the hidden ref of the merged head at it (`keep_merged`,
+   below); write a `ref_journal` entry `{ref, old, new, op}`; run
    `git update-ref refs/heads/<base> <head> <old>` (Git refuses if the base
    moved); then one transaction applies the merge (`apply_journal`: PR merged,
    `closes` tickets closed and moved to `done`) and deletes the journal entry;
@@ -106,15 +107,16 @@ are atomic together.
    does not run, its unfinished jobs are superseded with the head.
    - **The head of a merged pull request** (here or on the upstream host) is
      what it merged (`merge_sha`, or `upstream.pushed` when merged on the
-     host), not its branch's tip. Before its branch is touched, the hidden
-     `refs/branvil/merged/<number>` is created at that commit: a squash or a
-     rebase on the host leaves it on no branch, and the pull request's view,
-     backups (`git bundle --all`), and Git's pruning all go by reachability.
-     The branch is then deleted only while it is still at what was merged
+     host), not its branch's tip. Before the merge is recorded, the hidden
+     `refs/branvil/merged/<number>` is pointed at that commit, so every merged
+     pull request has it: a squash or a rebase on the host leaves it on no
+     branch, and the pull request's view, backups (`git bundle --all`), and
+     Git's pruning all go by reachability. After the merge is recorded, the
+     branch is deleted only while it is still at what was merged
      (`git update-ref` with that old value). It stays when it is protected or
      when an open pull request has it as its head or base. Only Branvil's
-     branch is deleted, never the host's. If the process stops between the
-     merge and this step, the branch stays and no hidden ref is made.
+     branch is deleted, never the host's. If the process stops before this
+     step, the branch stays.
 4. **Startup** (`refs::recover`, before the listener accepts requests): every
    pending journal entry is compared with the actual ref. At `new`, the
    operation's database side is applied (idempotently); at `old`, it is

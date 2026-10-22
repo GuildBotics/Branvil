@@ -28,15 +28,14 @@ async fn ready_pull(w: &World) -> (String, String, String) {
 }
 
 fn bare_main(w: &World) -> String {
+    bare_ref(w, "refs/heads/main")
+}
+
+fn bare_ref(w: &World, refname: &str) -> String {
     let bare = w.server.data.join("repos/acme/demo.git");
     git_ok(
         &bare,
-        &[
-            "--git-dir",
-            bare.to_str().unwrap(),
-            "rev-parse",
-            "refs/heads/main",
-        ],
+        &["--git-dir", bare.to_str().unwrap(), "rev-parse", refname],
     )
 }
 
@@ -96,8 +95,9 @@ async fn a_merge_interrupted_after_the_ref_update_completes_at_startup() {
         !w.server.wait_exit().success(),
         "the failpoint aborts the service"
     );
-    // Git moved; the database did not record it yet.
+    // Git moved and keeps the merged head; the database did not record it yet.
     assert_eq!(bare_main(&w), head);
+    assert_eq!(bare_ref(&w, "refs/branvil/merged/1"), head);
 
     w.restart(&[]);
     let s = &w.server;

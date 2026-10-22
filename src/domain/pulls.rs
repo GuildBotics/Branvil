@@ -1632,6 +1632,7 @@ pub async fn merge(
     let p = app.store.read(move |r| load_pull(r, &r2, number)).await?;
     let (head, base) = check_landable(app, &repo, &p, &input).await?;
     let dir = app.git.repo_dir(&repo.path);
+    keep_merged(app, &repo, number, &head).await?;
     let entry = JournalEntry {
         id: util::new_id("jnl"),
         repo: repo.id.clone(),
@@ -1684,39 +1685,38 @@ pub async fn merge(
     pull_view(app, &repo, &merged, &tips).await
 }
 
-/// The hidden ref that holds what a merged pull request merged: its view
-/// reads that commit after its branch is gone or moved, and a squash or a
-/// rebase on the upstream host leaves it on no branch (unreachable, it would
-/// be missing from backups and pruned by Git).
-fn merged_ref(number: u64) -> String {
-    format!("refs/branvil/merged/{number}")
+/// Points the hidden ref `refs/branvil/merged/<number>` at the head a pull
+/// request merges, for a caller that holds the repository lock, before the
+/// merge is recorded: every merged pull request has it. Its view reads that
+/// commit after its branch is gone or moved, and a squash or a rebase on the
+/// upstream host leaves it on no branch (unreachable, it would be missing from
+/// backups and pruned by Git).
+pub async fn keep_merged(app: &App, repo: &Repo, number: u64, sha: &str) -> AppResult<()> {
+    app.git
+        .run_ok(
+            Some(&app.git.repo_dir(&repo.path)),
+            &[
+                "update-ref",
+                "-m",
+                &format!("branvil: merging !{number}"),
+                &format!("refs/branvil/merged/{number}"),
+                sha,
+            ],
+        )
+        .await?;
+    Ok(())
 }
 
-/// Keeps what a merged pull request merged under `merged_ref`, then deletes
-/// its head branch, for a caller that holds the repository lock and records
-/// the ref changes after it (the recording takes a branch's move before a
+/// Deletes the head branch of a merged pull request (`keep_merged` kept what
+/// it merged), for a caller that holds the repository lock and records the
+/// ref changes after it (the recording takes a branch's move before a
 /// deletion, so a commit merged into the default branch keeps its CI run).
-/// The branch stays when that ref cannot be made, when it is protected, when
-/// an open pull request has it as its head or base, or when it is no longer at
-/// what was merged.
+/// The branch stays when it is protected, when an open pull request has it as
+/// its head or base, or when it is no longer at what was merged.
 pub async fn retire_merged_head(app: &App, repo: &Repo, p: &Pull) -> AppResult<()> {
     let Some(merged) = head_of(p, &Tips::new()) else {
         return Ok(());
     };
-    let dir = app.git.repo_dir(&repo.path);
-    let reason = format!("branvil: retire the head of merged !{}", p.number);
-    if !app
-        .git
-        .update_ref(&dir, &merged_ref(p.number), &merged, ZERO_SHA, &reason)
-        .await?
-    {
-        tracing::error!(
-            "{}: could not keep {merged}, the head merged by !{}; its branch stays",
-            repo.path,
-            p.number
-        );
-        return Ok(());
-    }
     let (id, branch) = (repo.id.clone(), p.head.clone());
     let kept = app
         .store
@@ -1737,9 +1737,14 @@ pub async fn retire_merged_head(app: &App, repo: &Repo, p: &Pull) -> AppResult<(
         })
         .await?;
     if !kept {
-        let refname = format!("refs/heads/{}", p.head);
         app.git
-            .update_ref(&dir, &refname, ZERO_SHA, &merged, &reason)
+            .update_ref(
+                &app.git.repo_dir(&repo.path),
+                &format!("refs/heads/{}", p.head),
+                ZERO_SHA,
+                &merged,
+                &format!("branvil: delete the head of merged !{}", p.number),
+            )
             .await?;
     }
     Ok(())
