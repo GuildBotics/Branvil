@@ -1,8 +1,8 @@
 # Branvil's own CI: the checks of "Development" in README.md, one job each.
 #
-# The image is GuildBotics' development image (Rust, Python 3, Git), named by
-# its tag: the version the runner's cache holds under it runs, and the jobs
-# get the runner's CPUs and memory (Settings → CI).
+# The image is GuildBotics' development image (Rust, Python 3, Node.js, Git),
+# named by its tag: the version the runner's cache holds under it runs, and
+# the jobs get the runner's CPUs and memory (Settings → CI).
 #
 # Cargo's home is under the work directory, where the cache can keep its
 # registry. The cache restores `target` built from other commits, which can
@@ -12,7 +12,11 @@
 # As this crate is rebuilt anyway, incremental data would only fill the
 # cache (CARGO_INCREMENTAL=0).
 #
-# Fetching crates needs the repository's network access (`ci_network`).
+# npm's cache is under the work directory too; `node_modules` is installed
+# again by `npm ci` every time.
+#
+# Fetching crates and npm packages needs the repository's network access
+# (`ci_network`).
 
 [[jobs]]
 name = "fmt"
@@ -39,6 +43,18 @@ commands = [
 ]
 timeout_secs = 1800
 cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.lock"] }
+
+[[jobs]]
+name = "web"
+image = "guildbotics/agent-environment:dev"
+commands = [
+  "cd web && npm_config_cache=/work/.ci/npm npm ci",
+  "cd web && npm run lint",
+  "cd web && npm run typecheck",
+  "cd web && npm run test",
+]
+timeout_secs = 1200
+cache = { paths = [".ci/npm"], key_files = ["web/package-lock.json"] }
 
 [[jobs]]
 name = "dev-script"
