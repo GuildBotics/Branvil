@@ -279,16 +279,19 @@ artifacts, retry and cancel, states, limits, and the trust model:
 ### This repository's pipeline
 
 [`.branvil/ci.toml`](.branvil/ci.toml) runs the checks of "Development" as
-four jobs: `fmt` (`cargo fmt --check`), `clippy` (`cargo clippy --all-targets
--- -D warnings`), `test` (`cargo test`), and `dev-script` (the Python launcher
-tests). Their image is GuildBotics' development image
+five jobs: `fmt` (`cargo fmt --check`), `clippy` (`cargo clippy --all-targets
+-- -D warnings`), `test` (`cargo test`), `web` (`npm ci`, then `npm run lint`,
+`npm run typecheck`, and `npm run test` in `web`), and `dev-script` (the
+Python launcher tests). Their image is GuildBotics' development image
 (`guildbotics/agent-environment:dev`, built by GuildBotics'
 `scripts/build-agent-environment-image.sh`): the owner loads its `docker save`
 archive under Settings → CI, and the pipeline names it by its tag. When the
 image is rebuilt, loading the new archive is all it takes (GuildBotics' script
 does so itself); the pipeline stays as it is. `clippy` and `test` fetch crates
-from crates.io, so the repository's CI tab must allow its jobs the network;
-they cache Cargo's registry and `target`, keyed by `Cargo.lock`.
+from crates.io and `web` fetches packages from `registry.npmjs.org`, so the
+repository's CI tab must allow its jobs the network. `clippy` and `test` cache
+Cargo's registry and `target`, keyed by `Cargo.lock`; `web` caches npm's
+downloads, keyed by `web/package-lock.json`.
 
 ## Upstream (GitHub)
 
@@ -463,6 +466,16 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+To run the GUI checks (lint, types, and the Vitest tests):
+
+```sh
+cd web
+npm ci
+npm run lint
+npm run typecheck
+npm run test
+```
+
 The integration tests start real `branvil serve` processes on free loopback
 ports and drive them with real Git clients isolated from the user's Git
 configuration and credential helpers. They are one test crate,
@@ -523,11 +536,12 @@ are in "Upgrading" in [`docs/backup-restore.md`](docs/backup-restore.md).
 ### GitHub Actions
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on pushes to `main`
-and pull requests targeting `main`. Its `checks-macos` job uses `macos-latest`
-and Rust 1.96.0 with rustfmt and clippy to run `cargo fmt --check`,
-`cargo clippy --all-targets -- -D warnings`, `cargo test`, and the Python
-development launcher tests above. The opt-in real microVM executor tests
-still require the runtime and image described in [`docs/ci.md`](docs/ci.md).
+and pull requests targeting `main`. It runs only what this repository's
+pipeline cannot: its `checks-macos` job runs the Python development launcher
+tests above on `macos-latest`, the system the service and its scripts run on.
+Every other check runs in this repository's pipeline. The opt-in real microVM
+executor tests still require the runtime and image described in
+[`docs/ci.md`](docs/ci.md).
 
 For a pull request published to GitHub by the owner, Branvil imports the job's
 result as `github/checks-macos` (see "Upstream (GitHub)").
