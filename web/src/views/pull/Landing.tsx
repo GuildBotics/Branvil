@@ -10,7 +10,7 @@ import * as api from "../../api/endpoints";
 import type { PullRequest, Upstream } from "../../api/types";
 import { ErrorMessage, Notice, Refusal, Sha, StateBadge } from "../../components/common";
 import { useT, type Translate } from "../../i18n";
-import { usePublishPreview } from "../../query/hooks";
+import { useChecks, usePublishPreview } from "../../query/hooks";
 import { keys } from "../../query/keys";
 
 function refusalOf(t: Translate, err: unknown, notReady: "merge.notMergeable" | "publish.notReady"): string {
@@ -20,15 +20,31 @@ function refusalOf(t: Translate, err: unknown, notReady: "merge.notMergeable" | 
   return err instanceof Error ? err.message : String(err);
 }
 
-function RequiredChecks({ checks }: { checks: string[] }) {
+/** Match check_landable: only completed/success on the displayed head satisfies a required name. */
+function useMissingChecks(pull: PullRequest, requiredChecks: string[]): string[] {
+  const checks = useChecks(pull.repository, pull.number, requiredChecks.length > 0);
+  const current = !checks.isError && checks.data?.head_sha === pull.head_sha ? checks.data : undefined;
+  return requiredChecks.filter((name) => !current?.checks.some((c) => c.name === name && c.status === "completed" && c.conclusion === "success"));
+}
+
+function RequiredChecks({ checks, missing }: { checks: string[]; missing: string[] }) {
   const t = useT();
-  if (checks.length === 0) return null;
-  return <Text size="sm">{t("merge.requiredChecks", { checks: checks.join(", ") })}</Text>;
+  return (
+    <Stack gap={4}>
+      <Text size="sm">{checks.length ? t("merge.requiredChecks", { checks: checks.join(", ") }) : t("merge.noRequiredChecks")}</Text>
+      {missing.length > 0 && (
+        <Text size="sm" c="var(--color-warning-text)">
+          {t("merge.checksNotSucceeded", { checks: missing.join(", ") })}
+        </Text>
+      )}
+    </Stack>
+  );
 }
 
 /** A repository without an upstream merges here (fast-forward). */
 export function MergeCard({ pull, requiredChecks }: { pull: PullRequest; requiredChecks: string[] }) {
   const t = useT();
+  const missing = useMissingChecks(pull, requiredChecks);
   const client = useQueryClient();
   const merge = useMutation({
     mutationFn: () => api.pulls.merge(pull.repository, pull.number, pull.head_sha, pull.base_sha),
@@ -45,7 +61,6 @@ export function MergeCard({ pull, requiredChecks }: { pull: PullRequest; require
           <GitMerge size={18} />
           <Text fw={700}>{t("merge.title")}</Text>
         </Group>
-        <RequiredChecks checks={requiredChecks} />
         <Text size="xs" c="dimmed">
           {t("merge.expected")} <Sha value={pull.head_sha} /> / <Sha value={pull.base_sha} />
         </Text>
@@ -56,8 +71,9 @@ export function MergeCard({ pull, requiredChecks }: { pull: PullRequest; require
             {t("merge.draft")}
           </Text>
         )}
+        <RequiredChecks checks={requiredChecks} missing={missing} />
         <Group justify="flex-end">
-          <Button leftSection={<GitMerge size={16} />} disabled={merge.isPending || pull.draft || !pull.head_sha || !pull.base_sha} onClick={() => merge.mutate()}>
+          <Button leftSection={<GitMerge size={16} />} disabled={merge.isPending || pull.draft || !pull.head_sha || !pull.base_sha || missing.length > 0} onClick={() => merge.mutate()}>
             {merge.isPending ? t("merge.merging") : t("merge.submit")}
           </Button>
         </Group>
@@ -105,6 +121,7 @@ function PublishedState({ pull }: { pull: PullRequest }) {
  */
 export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequest; upstream: Upstream; requiredChecks: string[] }) {
   const t = useT();
+  const missing = useMissingChecks(pull, requiredChecks);
   const client = useQueryClient();
   const host = upstream.host;
   const [editing, setEditing] = useState(false);
@@ -130,7 +147,6 @@ export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequ
           {t(published ? "publish.mergeThere" : "publish.explain", { host, repository: upstream.repository })}
         </Text>
         {x && <PublishedState pull={pull} />}
-        {!published && <RequiredChecks checks={requiredChecks} />}
         {!published &&
           (preview.isError ? (
             <ErrorMessage error={preview.error} optional />
@@ -162,6 +178,7 @@ export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequ
             {t("publish.draft")}
           </Text>
         )}
+        {!published && <RequiredChecks checks={requiredChecks} missing={missing} />}
         {!editing && (
           <Group justify="space-between">
             <Button size="xs" variant="default" leftSection={<Pencil size={14} />} onClick={() => setEditing(true)}>
@@ -170,7 +187,7 @@ export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequ
             {!published && (
               <Button
                 leftSection={<CloudUpload size={16} />}
-                disabled={publish.isPending || pull.draft || !pull.head_sha || !pull.base_sha || (p !== undefined && p.login === null)}
+                disabled={publish.isPending || pull.draft || !pull.head_sha || !pull.base_sha || missing.length > 0 || (p !== undefined && p.login === null)}
                 onClick={() => (!again || window.confirm(t("publish.confirmAgain", { host }))) && publish.mutate()}
               >
                 {publish.isPending ? t("publish.publishing") : t(again ? "publish.again" : "publish.submit", { host })}

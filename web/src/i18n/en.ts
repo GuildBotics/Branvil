@@ -152,6 +152,8 @@ export const en = {
 
   "merge.title": "Merge",
   "merge.requiredChecks": "Required checks: {checks}",
+  "merge.noRequiredChecks": "No required checks (check results do not block merging or publishing).",
+  "merge.checksNotSucceeded": "Required checks not yet successful on this head: {checks}",
   "merge.expected": "Merges exactly head / base:",
   "merge.submit": "Merge (fast-forward)",
   "merge.merging": "Merging…",
@@ -389,6 +391,7 @@ export const en = {
   "review.by": "Review by {author}",
   "thread.openFile": "Open in the changed files",
   "ci.open": "Open check {name}",
+  "ci.required": "Required",
   "ci.openOnHost": "Open on the host",
   "ci.tail": "Last {size} KiB",
   "ci.noArtifacts": "None",
