@@ -47,9 +47,8 @@ hold across modules:
   GuildBotics → Branvil. The only behavior of Branvil that assumes GuildBotics
   is where `branvil runner` looks for msb by default (`~/.guildbotics/data/msb`
   in `src/runner/executor.rs`). GuildBotics is named only in documents and in
-  the checks that run GuildBotics' provider against a real service
-  (`integration/guildbotics/`, `scripts/guildbotics-smoke.sh`,
-  `scripts/e2e-flow.sh`).
+  the check that runs GuildBotics' provider against a real service
+  (`integration/guildbotics/`, `scripts/guildbotics-smoke.sh`).
 - **The upstream sits behind a provider-neutral boundary.** `src/upstream/`
   knows no code host; everything host-specific goes in the provider's
   implementation of `Host` (`src/upstream/host.rs`), today only

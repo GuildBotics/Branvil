@@ -595,26 +595,6 @@ check. When it fails, the log names both commits: a change on this side is
 fixed in its own pull request, a `main` of the other that no longer works with
 this one is fixed there.
 
-### End-to-end flow
-
-```sh
-scripts/e2e-flow.sh /path/to/GuildBotics
-```
-
-Runs the whole path once on a fresh service with the real runner
-(`[ci] runner = "auto"`, microVM executor): the owner files a ticket and
-assigns the agent `aiko`; GuildBotics' provider takes it (`candidates()`,
-`move()`); `aiko` pushes `ticket/1` with Git and the provider opens a pull
-request that closes the ticket; the required check runs in a microVM and the
-provider's readiness goes from pending to ready; the owner enters the GUI with
-`branvil open --print`, looks at the check, its log, and the diff, and merges ([`web/e2e/flow.spec.ts`](web/e2e/flow.spec.ts), Playwright
-with the installed Google Chrome; `BRANVIL_E2E_CHANNEL=` for Playwright's
-Chromium); the ticket ends closed in the done lane, `closed_since()` lists the
-ticket and the pull request, and `main` is the merged head (the repository has
-no upstream; publishing is covered by `tests/upstream.rs`). It needs msb 0.6.17 with the alpine image its pipeline names
-(`docker.io/library/alpine:3.22`) in Branvil's image cache (see "CI") and `web/node_modules`. It prints the time of
-every step ([`docs/performance.md`](docs/performance.md) has measured runs).
-
 ## Documents
 
 - [`docs/api.md`](docs/api.md): the HTTP API contract
