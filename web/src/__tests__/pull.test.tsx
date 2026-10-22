@@ -1,10 +1,15 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import type { Check, Checks } from "../api/types";
+import { dictionaries } from "../i18n";
+import { applyChange } from "../query/events";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { BASE, HEAD, NEW_HEAD, pull } from "./fixtures";
 
 const P = "/api/v1/repos/acme/demo/pulls/3";
+const SUCCESS: Check = { name: "test", status: "completed", conclusion: "success" };
+const CHECKS: Checks = { head_sha: HEAD, base_sha: BASE, behind_by: 0, checks: [SUCCESS], checks_expected: true, base_checks: 1 };
 
 function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]> = {}) {
   return {
@@ -189,7 +194,10 @@ describe("pull request review", () => {
 
   it("merges with the expected head and base and shows the refusal", async () => {
     const fake = fakeApi(
-      pullRoutes({ [`POST ${P}/merge`]: apiError(409, "not_mergeable", "Required check test did not succeed.") }),
+      pullRoutes({
+        [`GET ${P}/checks`]: json(200, CHECKS),
+        [`POST ${P}/merge`]: apiError(409, "not_mergeable", "Required check test did not succeed."),
+      }),
     );
     const user = userEvent.setup();
     renderApp("/acme/demo/-/pulls/3");
@@ -200,7 +208,7 @@ describe("pull request review", () => {
     expect(fake.calls("POST", `${P}/merge`)[0]?.body).toEqual({ expected_head: HEAD, expected_base: BASE });
   });
 
-  const UPSTREAM_REPO = json(200, {
+  const UPSTREAM_REPOSITORY = {
     path: "acme/demo",
     default_branch: "main",
     clone_url: "",
@@ -217,7 +225,8 @@ describe("pull request review", () => {
       following: { tip: BASE, checked_at: null, followed_at: null, error: null, stopped: null },
     },
     revision: 1,
-  });
+  };
+  const UPSTREAM_REPO = json(200, UPSTREAM_REPOSITORY);
   const PREVIEW = {
     host: "GitHub",
     repository: "octo/demo",
@@ -228,6 +237,107 @@ describe("pull request review", () => {
     account: "aiko",
     login: "aiko-bot",
   };
+
+  it.each(["en", "ja"] as const)("marks only required check names in the check list (%s)", async (language) => {
+    fakeApi(pullRoutes({
+      [`GET ${P}/checks`]: json(200, { ...CHECKS, checks: [SUCCESS, { ...SUCCESS, name: "test-optional" }] }),
+    }));
+    renderApp("/acme/demo/-/pulls/3", language);
+    const checks = await screen.findByRole("region", { name: dictionaries[language]["pull.checks"] });
+    const required = (await within(checks).findByText("test")).closest("li")!;
+    const optional = within(checks).getByText("test-optional").closest("li")!;
+    expect(within(required).getByText(dictionaries[language]["ci.required"])).toBeInTheDocument();
+    expect(within(optional).queryByText(dictionaries[language]["ci.required"])).not.toBeInTheDocument();
+  });
+
+  for (const upstream of [false, true]) {
+    const action = upstream ? "Publish to GitHub" : "Merge (fast-forward)";
+    const repository = {
+      ...UPSTREAM_REPOSITORY,
+      upstream: upstream ? UPSTREAM_REPOSITORY.upstream : null,
+    };
+    const routes = {
+      "GET /api/v1/repos/acme/demo": json(200, repository),
+      [`GET ${P}/publish`]: json(200, PREVIEW),
+    };
+
+    it.each(["en", "ja"] as const)(`${action}: explains that no checks block the action when none are required (%s)`, async (language) => {
+      fakeApi(pullRoutes({
+        ...routes,
+        "GET /api/v1/repos/acme/demo": json(200, { ...repository, required_checks: [] }),
+      }));
+      renderApp("/acme/demo/-/pulls/3", language);
+      expect(await screen.findByText(dictionaries[language]["merge.noRequiredChecks"])).toBeInTheDocument();
+      // The default check fixture fails, but is optional in this repository.
+      expect(await screen.findByText(`${dictionaries[language]["ci.reason"]}: exit code 101`)).toBeInTheDocument();
+      const label = dictionaries[language][upstream ? "publish.submit" : "merge.submit"].replace("{host}", "GitHub");
+      expect(screen.getByRole("button", { name: label })).toBeEnabled();
+      expect(screen.queryByText(dictionaries[language]["ci.required"], { exact: true })).not.toBeInTheDocument();
+    });
+
+    const unsuccessful: { label: string; checks: Check[]; head_sha?: string }[] = [
+      { label: "not registered", checks: [] },
+      { label: "queued", checks: [{ ...SUCCESS, status: "queued", conclusion: null }] },
+      { label: "running", checks: [{ ...SUCCESS, status: "in_progress", conclusion: null }] },
+      ...(["failure", "cancelled", "timed_out", "skipped", "startup_failure", null] as const).map((conclusion) => ({
+        label: `completed/${conclusion}`, checks: [{ ...SUCCESS, conclusion }],
+      })),
+      { label: "success for another head", checks: [SUCCESS], head_sha: NEW_HEAD },
+    ];
+    it.each(unsuccessful)(`${action}: blocks $label and names only the checks still needed`, async ({ checks, head_sha }) => {
+      const fake = fakeApi(pullRoutes({
+        ...routes,
+        "GET /api/v1/repos/acme/demo": json(200, { ...repository, required_checks: ["test", "lint"] }),
+        [`GET ${P}/checks`]: json(200, { ...CHECKS, head_sha: head_sha ?? HEAD, checks: [...checks, { ...SUCCESS, name: "lint" }] }),
+      }));
+      const user = userEvent.setup();
+      renderApp("/acme/demo/-/pulls/3");
+      const missing = head_sha ? "test, lint" : "test";
+      expect(await screen.findByText(`Required checks not yet successful on this head: ${missing}`)).toBeInTheDocument();
+      // Wait for the check read as well, so an initial loading state cannot satisfy this test.
+      await within(await screen.findByRole("region", { name: "Checks" })).findByTitle(head_sha ?? HEAD);
+      const button = screen.getByRole("button", { name: action });
+      expect(button).toBeDisabled();
+      await user.click(button);
+      expect(fake.calls("POST", `${P}/${upstream ? "publish" : "merge"}`)).toHaveLength(0);
+    });
+
+    it(`${action}: stays disabled until checks load`, async () => {
+      let answer!: (value: ReturnType<typeof json>) => void;
+      fakeApi(pullRoutes({ ...routes, [`GET ${P}/checks`]: () => new Promise((resolve) => { answer = resolve; }) }));
+      renderApp("/acme/demo/-/pulls/3");
+      expect(await screen.findByRole("button", { name: action })).toBeDisabled();
+      expect(screen.getByText("Required checks not yet successful on this head: test")).toBeInTheDocument();
+      await waitFor(() => expect(answer).toBeTypeOf("function"));
+      answer(json(200, CHECKS));
+      await waitFor(() => expect(screen.getByRole("button", { name: action })).toBeEnabled());
+    });
+
+    it(`${action}: stays disabled when checks cannot be read`, async () => {
+      fakeApi(pullRoutes({ ...routes, [`GET ${P}/checks`]: apiError(403, "forbidden", "Cannot read checks.") }));
+      renderApp("/acme/demo/-/pulls/3");
+      expect(await screen.findByText(/Cannot read checks\./)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: action })).toBeDisabled();
+      expect(screen.getByText("Required checks not yet successful on this head: test")).toBeInTheDocument();
+    });
+
+    it(`${action}: enables on success after a check event and ignores optional failures`, async () => {
+      fakeApi(pullRoutes({
+        ...routes,
+        "GET /api/v1/repos/acme/demo": json(200, { ...repository, required_checks: ["test", "lint"] }),
+        [`GET ${P}/checks`]: [
+          json(200, { ...CHECKS, checks: [] }),
+          json(200, { ...CHECKS, checks: [SUCCESS, { ...SUCCESS, name: "lint" }, { ...SUCCESS, name: "optional", conclusion: "failure" }] }),
+        ],
+      }));
+      const { client } = renderApp("/acme/demo/-/pulls/3");
+      expect(await screen.findByRole("button", { name: action })).toBeDisabled();
+      await screen.findByText("Checks are expected for this commit but none are registered yet.");
+      applyChange({ kind: "check", path: "acme/demo", id: HEAD }, client);
+      await waitFor(() => expect(screen.getByRole("button", { name: action })).toBeEnabled());
+      expect(screen.queryByText(/Required checks not yet successful/)).not.toBeInTheDocument();
+    });
+  }
 
   it("publishes to the upstream host as the author after showing exactly what is posted", async () => {
     const published = pull({
@@ -249,6 +359,7 @@ describe("pull request review", () => {
         "GET /api/v1/repos/acme/demo": UPSTREAM_REPO,
         [`GET ${P}`]: [json(200, pull()), json(200, published)],
         [`GET ${P}/publish`]: json(200, PREVIEW),
+        [`GET ${P}/checks`]: json(200, CHECKS),
         [`POST ${P}/publish`]: json(200, published),
       }),
     );
@@ -270,6 +381,7 @@ describe("pull request review", () => {
       pullRoutes({
         "GET /api/v1/repos/acme/demo": UPSTREAM_REPO,
         [`GET ${P}/publish`]: json(200, { ...PREVIEW, login: null }),
+        [`GET ${P}/checks`]: json(200, CHECKS),
       }),
     );
     renderApp("/acme/demo/-/pulls/3");
@@ -301,6 +413,7 @@ describe("pull request review", () => {
           }),
         ),
         [`GET ${P}/publish`]: json(200, PREVIEW),
+        [`GET ${P}/checks`]: json(200, CHECKS),
       }),
     );
     renderApp("/acme/demo/-/pulls/3");

@@ -45,12 +45,12 @@ function StatusIcon({ check }: { check: Check }) {
 const isHosted = (c: Check) => !!c.attempt_id && c.attempt === undefined;
 
 /** The checks of the pull request's head; a row opens its drawer. */
-export function ChecksCard({ repo, number, onOpen }: { repo: string; number: number; onOpen: (check: Check) => void }) {
+export function ChecksCard({ repo, number, requiredChecks, onOpen }: { repo: string; number: number; requiredChecks: string[]; onOpen: (check: Check) => void }) {
   const t = useT();
   const checks = useChecks(repo, number);
   const behind = checks.data?.behind_by ?? 0;
   return (
-    <CheckList repo={repo} title={t("pull.checks")} query={checks} sha={checks.data?.head_sha} onOpen={onOpen}>
+    <CheckList repo={repo} title={t("pull.checks")} query={checks} sha={checks.data?.head_sha} requiredChecks={requiredChecks} onOpen={onOpen}>
       {behind > 0 && (
         <Text size="sm" c="var(--color-warning-text)" mb="xs">
           {t("pull.behindBy", { count: behind })}
@@ -72,6 +72,7 @@ function CheckList({
   query,
   sha,
   linked,
+  requiredChecks = [],
   onOpen,
   children,
 }: {
@@ -80,6 +81,7 @@ function CheckList({
   query: UseQueryResult<CheckSet>;
   sha: string | undefined;
   linked?: boolean;
+  requiredChecks?: string[];
   onOpen: (check: Check) => void;
   children?: React.ReactNode;
 }) {
@@ -117,7 +119,7 @@ function CheckList({
             <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
               {query.data.checks.map((c) => (
                 <li key={`${c.name}#${c.attempt_id ?? "pending"}`}>
-                  <CheckRow check={c} repo={repo} onOpen={onOpen} />
+                  <CheckRow check={c} repo={repo} required={requiredChecks.includes(c.name)} onOpen={onOpen} />
                 </li>
               ))}
             </ul>
@@ -128,7 +130,7 @@ function CheckList({
   );
 }
 
-function CheckRow({ check, repo, onOpen }: { check: Check; repo: string; onOpen: (check: Check) => void }) {
+function CheckRow({ check, repo, required, onOpen }: { check: Check; repo: string; required: boolean; onOpen: (check: Check) => void }) {
   const t = useT();
   const failed = check.status === "completed" && !!check.conclusion && FAILED.has(check.conclusion);
   // A failed attempt's reason (`details`) is shown in the row.
@@ -138,6 +140,7 @@ function CheckRow({ check, repo, onOpen }: { check: Check; repo: string; onOpen:
     <>
       <StatusIcon check={check} />
       <strong>{check.name}</strong>
+      {required && <StateBadge tone="neutral">{t("ci.required")}</StateBadge>}
       {check.attempt !== undefined && (
         <Text span size="sm" c="dimmed">
           #{check.attempt}
