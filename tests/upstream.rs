@@ -469,6 +469,16 @@ async fn a_pull_request_is_published_as_its_author_and_follows_the_host_to_the_m
     assert_eq!(got["merged"], true, "{got}");
     assert_eq!(got["merge_sha"], merged.as_str());
     assert_eq!(got["upstream"]["state"], "merged");
+    // Its branch is deleted here, not on GitHub; it keeps the head it pushed.
+    let (st, _) = s
+        .get(
+            &format!("{}/branches/{}", w.repo_path(), encode("ticket/1")),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert!(gh.tip(GH, "ticket/1").is_some());
+    assert_eq!(got["head_sha"], got["upstream"]["pushed"]);
     // Its diff is its own change, not the other one merged meanwhile.
     let files = s.ok(&format!("{pull}/files"), &w.aiko).await;
     let paths: Vec<&str> = files["items"]
@@ -821,6 +831,60 @@ async fn a_merge_is_taken_only_once_it_is_on_branvils_default_branch() {
     assert_eq!(got["upstream"]["state"], "merged");
     let ticket = s.ok(&format!("{}/tickets/1", w.repo_path()), &w.aiko).await;
     assert_eq!(ticket["state"], "open");
+    assert_eq!(got["head_sha"], branvil_tip(&w, "feature").as_str());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_head_that_moved_past_what_the_host_merged_stays() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    gh.squash_merge(GH, v["upstream"]["number"].as_u64().unwrap());
+    let later = w.push_change("feature", "g.txt", "two\n");
+    refresh(&w).await;
+    let got = w
+        .server
+        .ok(&format!("{}/pulls/{n}", w.repo_path()), &w.owner)
+        .await;
+    assert_eq!(got["merged"], true, "{got}");
+    assert_eq!(branvil_tip(&w, "feature"), later);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_published_pull_request_merged_here_once_the_upstream_is_removed_merged_its_head() {
+    let (w, _gh) = followed().await;
+    with_aiko_account(&w).await;
+    let s = &w.server;
+    w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = s
+        .delete(&format!("{}/upstream", w.repo_path()), &w.owner)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // A commit Branvil never pushed to the host is what merges here.
+    let later = w.push_change("feature", "g.txt", "two\n");
+    let pull = format!("{}/pulls/{n}", w.repo_path());
+    let p = s.ok(&pull, &w.owner).await;
+    let (st, v) = s
+        .post(
+            &format!("{pull}/merge"),
+            &w.owner,
+            json!({"expected_head": later, "expected_base": p["base_sha"]}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["head_sha"], later.as_str());
+    let (st, _) = s
+        .get(&format!("{}/branches/feature", w.repo_path()), &w.aiko)
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -673,6 +673,14 @@ async fn the_owner_merges_the_current_head_and_closes_tickets() {
         .get(&format!("{}/branches/main", w.repo_path()), &w.aiko)
         .await;
     assert_eq!(main_now["sha"], head2.as_str());
+    // Its branch is deleted; it keeps the head it merged.
+    let (st, _) = s
+        .get(&format!("{}/branches/feature", w.repo_path()), &w.aiko)
+        .await;
+    assert_eq!(st, 404);
+    assert_eq!(s.ok(&base, &w.aiko).await["head_sha"], head2.as_str());
+    let checks = s.ok(&format!("{base}/checks"), &w.aiko).await;
+    assert_eq!(checks["head_sha"], head2.as_str());
     let ticket = s.ok(&one, &w.aiko).await;
     assert_eq!(ticket["state"], "closed");
     assert_eq!(ticket["state_reason"], "completed");
@@ -706,6 +714,62 @@ async fn the_owner_merges_the_current_head_and_closes_tickets() {
     assert_eq!(pr["merged"], true);
     // A merged pull request keeps its diff.
     assert_eq!(s.ok(&base, &w.aiko).await["changed_files"], 1);
+}
+
+#[tokio::test]
+async fn a_merge_deletes_its_head_unless_protected_or_used_by_an_open_pull_request() {
+    let world = World::new().await;
+    let w = &world;
+    let s = &w.server;
+    let merge = |p: Value| async move {
+        let url = format!("{}/pulls/{}", w.repo_path(), p["number"]);
+        let p = s.ok(&url, &w.owner).await;
+        let (st, v) = s
+            .post(
+                &format!("{url}/merge"),
+                &w.owner,
+                json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
+            )
+            .await;
+        assert_eq!(st, 200, "{v}");
+    };
+    let tip = |branch: &'static str| async move {
+        let (st, v) = s
+            .get(&format!("{}/branches/{branch}", w.repo_path()), &w.aiko)
+            .await;
+        (st == 200).then(|| v["sha"].as_str().unwrap().to_string())
+    };
+
+    // A protected head stays.
+    let release = w.push_change("release", "r.txt", "r\n");
+    let repo = s.ok(&w.repo_path(), &w.owner).await;
+    s.patch(
+        &w.repo_path(),
+        &w.owner,
+        json!({"revision": repo["revision"], "protected_branches": ["release"]}),
+    )
+    .await;
+    merge(w.open_pull("release", json!([])).await).await;
+    assert_eq!(tip("release").await, Some(release));
+
+    // A head that an open pull request has as its base stays; merging that
+    // one into it deletes its own head, whatever the base.
+    let feature = w.push_change("feature", "f.txt", "f\n");
+    let stacked = w.push_change("stacked", "s.txt", "s\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let (st, on_feature) = s
+        .post(
+            &pulls(w),
+            &w.aiko,
+            json!({"head": "stacked", "base": "feature", "title": "On feature"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{on_feature}");
+    merge(p).await;
+    assert_eq!(tip("feature").await, Some(feature));
+    merge(on_feature["pull"].clone()).await;
+    assert_eq!(tip("stacked").await, None);
+    assert_eq!(tip("feature").await, Some(stacked));
 }
 
 #[tokio::test]

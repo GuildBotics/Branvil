@@ -437,8 +437,12 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
         )
         .await;
     assert_eq!(st, 200, "{v}");
-    // The fast-forwarded main keeps the head's run: nothing runs again.
+    // The fast-forwarded main keeps the head's run: nothing runs again, and
+    // the merged pull request still shows its check once its branch is gone.
     assert!(runner.claim().await.is_none());
+    let v = checks(&w, n).await;
+    assert_eq!(v["head_sha"], head.as_str());
+    assert_eq!(check(&v, "test")["conclusion"], "success", "{v}");
     let diag = w.server.ok("/admin/diagnostics", &w.owner).await;
     assert_eq!(diag["runner"]["state"], "ready", "{diag}");
     assert_eq!(diag["runner"]["runners"][0]["name"], "runner1");
@@ -897,6 +901,28 @@ async fn an_expired_lease_requeues_once_and_a_restart_handles_orphans() {
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_merged_head_keeps_the_jobs_of_the_commit_it_merged() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    // The head's job is still queued when it merges; the deletion of the head
+    // (recorded with main's move) cancels nothing.
+    land(
+        &w,
+        "add-ci",
+        &[(".branvil/ci.toml", &pipeline(&["test"]))],
+        None,
+    )
+    .await;
+    assert_eq!(runner.drain("success").await, 1);
+    let test = check(&checks(&w, 1).await, "test").clone();
+    assert_eq!(
+        (test["attempt"].clone(), test["conclusion"].clone()),
+        (json!(1), json!("success")),
+        "{test}"
     );
 }
 

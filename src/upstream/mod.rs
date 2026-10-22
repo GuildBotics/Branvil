@@ -820,6 +820,10 @@ async fn sync_pull(
                             repo.path,
                             host.display_name()
                         );
+                        let lock = app.repo_lock(&repo.id);
+                        let _guard = lock.lock().await;
+                        pulls::delete_merged_head(app, repo, &merged).await?;
+                        crate::refs::record_refs_locked(app, repo).await?;
                         return Ok(());
                     }
                 }
