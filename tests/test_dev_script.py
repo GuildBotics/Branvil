@@ -884,9 +884,11 @@ class ServeScriptTests(ScriptTestCase):
         fetches = self.server.fetches + 2
         self.wait_until(lambda: self.server.fetches >= fetches)
 
-    def finished(self, proc, output, count=1):
+    def finished(self, proc, output, sha, timeout=30):
+        """Waits for this build's update, even when older updates finished."""
         self.wait_until(
-            lambda: output.read_text(encoding="utf-8").count("Update finished") >= count, proc
+            lambda: f"Update finished: {sha} is ready." in output.read_text(encoding="utf-8"),
+            proc, timeout=timeout,
         )
 
     def assert_runs(self, sha, pid=None, timeout=30):
@@ -1054,7 +1056,7 @@ class ServeScriptTests(ScriptTestCase):
         self.watch("--interval", "3600")
         new = self.merge(SUCCESS)
         proc, output = self.restart("--interval", "3600")
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
 
     def test_unfinished_checks_are_waited_for_then_the_update_runs(self):
@@ -1069,7 +1071,7 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(self.steps(), self.BOOT, "No update while checks run")
         self.assertIsNone(self.attempted())
         self.server.checks[new] = SUCCESS
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assertEqual(self.steps(), self.BOOT + self.UPDATE,
                          "Built and rehearsed before the service stops")
         self.assert_runs(new)
@@ -1100,7 +1102,7 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(len(self.server.check_requests), requests, "Not read again")
         # The next update keeps the build it replaces, and only that one.
         newer = self.merge(SUCCESS)
-        self.finished(proc, output, 2)
+        self.finished(proc, output, newer)
         self.assert_runs(newer)
         self.assertEqual(self.installed(), sorted([new, newer]))
 
@@ -1109,7 +1111,7 @@ class ServeScriptTests(ScriptTestCase):
         new = self.merge(RUNNING)
         self.control(**{f"DEV_TEST_SCHEMA_{new}": "12"})
         self.server.checks[new] = SUCCESS
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
         self.assertEqual(self.database(), "12")
         self.assertEqual(self.steps()[-3:], ["admin upgrade", "admin check", "serve"])
@@ -1129,7 +1131,7 @@ class ServeScriptTests(ScriptTestCase):
         hold.unlink()
         self.assertEqual(self.database(), "12", "Upgraded before the kill")
         proc, output = self.watch(running=False)
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
         self.assertEqual(self.admins("check"), [self.binary(new)])
         self.assertEqual(self.steps()[-3:], ["admin upgrade", "admin check", "serve"])
@@ -1212,7 +1214,7 @@ class ServeScriptTests(ScriptTestCase):
             "checks_expected": True,
         })
         proc, output = self.watch()
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
         # Nor is anything kept out when the repository requires nothing, but
         # the run is still waited for.
@@ -1227,41 +1229,61 @@ class ServeScriptTests(ScriptTestCase):
             "checks": [{"name": "test", "status": "completed", "conclusion": "failure"}],
             "checks_expected": True,
         }
-        self.finished(proc, output, 2)
+        self.finished(proc, output, newer)
         self.assert_runs(newer)
         self.assertIsNone(self.attempted())
 
     def test_a_commit_without_expected_checks_is_installed(self):
         new = self.merge({"checks": [], "checks_expected": False})
         proc, output = self.watch()
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
 
     def test_failures_before_the_decision_are_notified_once_each(self):
-        new = self.merge(500)
+        # Reproduce an update that finished before authentication failed.
+        previous = self.merge(SUCCESS)
         proc, output = self.watch()
+        self.finished(proc, output, previous)
+        self.assert_runs(previous)
+        new = self.merge(500)
         for answer in [500, 401, 404, {"checks_expected": True}]:
             self.server.checks[new] = answer
             self.rounds_pass()
-        self.server.checks[new] = SUCCESS
         self.server.required = 503
+        self.server.checks[new] = SUCCESS
         self.rounds_pass()
         log = output.read_text(encoding="utf-8")
         for text in ["checks: HTTP 500", "checks: HTTP 401", "checks: HTTP 404", "TypeError",
                      "the repository: HTTP 503"]:
             self.assertIn(text, log)
-        self.server.required = ["test"]
         [message] = self.notifications()
         self.assertIn(f"stopped while reading the checks of {new}", message)
-        self.assertEqual(self.steps(), self.BOOT)
+        self.assertEqual(self.steps(), self.BOOT + self.UPDATE)
         self.assertIsNone(self.attempted(), "Read again in the next round")
+        # Keep the next update pending until authentication has recovered.
+        self.server.checks[new] = RUNNING
+        self.server.required = ["test"]
         token = self.data / "secrets/owner.token"
         token.unlink()
         self.wait_until(lambda: len(self.notifications()) == 2, proc)
         self.assertIn("stopped while fetching origin", self.notifications()[1])
+        self.assertIn(f"Branvil still runs {previous}", self.notifications()[1])
+        # Observe repeated failed rounds, rather than merely the first notice.
+        self.wait_until(
+            lambda: output.read_text(encoding="utf-8").count("stopped while fetching origin") >= 3,
+            proc,
+        )
+        self.assertEqual(len(self.notifications()), 2)
+        self.assertTrue((self.builds / "notified").exists())
         token.write_text("test-owner-token\n", encoding="utf-8")
+        self.rounds_pass()
+        self.assert_runs(previous)
+        self.assertFalse((self.builds / "notified").exists())
+        # The old completion must not satisfy the wait for the pending build.
+        with self.assertRaisesRegex(AssertionError, "did not reach the expected event"):
+            self.finished(proc, output, new, timeout=0.1)
         self.server.checks[new] = SUCCESS
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
         self.assertEqual(len(self.notifications()), 2)
         self.assertFalse((self.builds / "notified").exists())
@@ -1315,7 +1337,7 @@ class ServeScriptTests(ScriptTestCase):
         self.assertIn(f"Branvil still runs {self.base}", message)
         self.control()
         new = self.merge(SUCCESS)
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
         self.assertEqual(self.installed(), sorted([self.base, new]))
 
@@ -1334,7 +1356,7 @@ class ServeScriptTests(ScriptTestCase):
         self.control()
         hold.unlink()
         self.wait_until(lambda: gone(builder))
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
         self.assertEqual(self.steps().count("backup"), 2, "The killed run, then the retry")
         self.assertEqual(self.notifications(), [])
@@ -1397,7 +1419,7 @@ class ServeScriptTests(ScriptTestCase):
                           encoding="utf-8")
         self.git("add", "scripts/serve.sh", cwd=self.upstream)
         new = self.merge(SUCCESS)
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
         self.assertIn("this is the new scripts/serve.sh", output.read_text(encoding="utf-8"))
 
@@ -1423,7 +1445,7 @@ class ServeScriptTests(ScriptTestCase):
         self.assertIn(f"The update to {new} stopped while backing up", message)
         self.assertIsNone(self.attempted())
         self.control()
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
 
     def test_a_new_build_slower_to_start_than_a_minute_is_waited_for(self):
@@ -1438,7 +1460,7 @@ class ServeScriptTests(ScriptTestCase):
         self.assertNotIn("Update finished", output.read_text(encoding="utf-8"))
         self.assertIsNone(self.attempted())
         hold.unlink()
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
         self.assertEqual(self.notifications(), [])
 
@@ -1508,7 +1530,7 @@ class ServeScriptTests(ScriptTestCase):
         notes.write_text("not a backup", encoding="utf-8")
         new = self.merge(SUCCESS)
         proc, output = self.watch()
-        self.finished(proc, output)
+        self.finished(proc, output, new)
         self.assert_runs(new)
         made_now = [
             p for p in self.backups.iterdir()
@@ -1582,7 +1604,7 @@ class ServeScriptTests(ScriptTestCase):
                 hold.unlink()
             # Nothing was concluded: the start again finishes the update.
             proc, output = self.watch(running=False)
-            self.finished(proc, output)
+            self.finished(proc, output, new)
             self.assert_runs(new)
             self.assertIsNone(self.attempted())
             self.assertEqual(self.notifications(), [])
