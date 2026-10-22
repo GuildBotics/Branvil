@@ -769,7 +769,22 @@ async fn a_merge_deletes_its_head_unless_protected_or_used_by_an_open_pull_reque
     assert_eq!(tip("feature").await, Some(feature));
     merge(on_feature["pull"].clone()).await;
     assert_eq!(tip("stacked").await, None);
-    assert_eq!(tip("feature").await, Some(stacked));
+    assert_eq!(tip("feature").await, Some(stacked.clone()));
+
+    // What it merged outlives the branch it merged into, in a backup too.
+    git_as_ok(
+        &w.work,
+        "aiko",
+        &w.aiko,
+        &["push", "-q", "origin", ":refs/heads/feature"],
+    );
+    assert_eq!(tip("feature").await, None);
+    let into = tempfile::tempdir().unwrap();
+    let r = w.restored(into.path()).await;
+    let url = format!("{}/pulls/{}", w.repo_path(), on_feature["pull"]["number"]);
+    assert_eq!(r.ok(&url, &w.aiko).await["head_sha"], stacked.as_str());
+    let files = r.ok(&format!("{url}/files"), &w.aiko).await;
+    assert_eq!(files["items"][0]["path"], "s.txt", "{files}");
 }
 
 #[tokio::test]

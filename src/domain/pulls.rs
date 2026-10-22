@@ -13,7 +13,7 @@ use crate::domain::{
     self, CommentView, Page, PageReq, ReactionView, comment_view, reaction_views, repo_by_id,
 };
 use crate::error::{AppError, AppResult};
-use crate::git::FileChange;
+use crate::git::{FileChange, ZERO_SHA};
 use crate::model::{
     self, InlineComment, JournalEntry, JournalOp, Published, Pull, Repo, Review, Target, Thread,
     TicketLink,
@@ -1676,7 +1676,7 @@ pub async fn merge(
             Ok(p)
         })
         .await?;
-    delete_merged_head(app, &repo, &merged).await?;
+    retire_merged_head(app, &repo, &merged).await?;
     refs::record_refs_locked(app, &repo).await?;
     app.events.publish("pull", &repo.path, number.to_string());
     tickets::publish_closed_by(app, &merged).await;
@@ -1684,16 +1684,39 @@ pub async fn merge(
     pull_view(app, &repo, &merged, &tips).await
 }
 
-/// Deletes the head branch of a merged pull request, for a caller that holds
-/// the repository lock and records the ref changes after it (the recording
-/// takes a branch's move before a deletion, so a commit merged into the
-/// default branch keeps its CI run). It stays when it is protected, when an
-/// open pull request has it as its head or base, or when it is no longer at
+/// The hidden ref that holds what a merged pull request merged: its view
+/// reads that commit after its branch is gone or moved, and a squash or a
+/// rebase on the upstream host leaves it on no branch (unreachable, it would
+/// be missing from backups and pruned by Git).
+fn merged_ref(number: u64) -> String {
+    format!("refs/branvil/merged/{number}")
+}
+
+/// Keeps what a merged pull request merged under `merged_ref`, then deletes
+/// its head branch, for a caller that holds the repository lock and records
+/// the ref changes after it (the recording takes a branch's move before a
+/// deletion, so a commit merged into the default branch keeps its CI run).
+/// The branch stays when that ref cannot be made, when it is protected, when
+/// an open pull request has it as its head or base, or when it is no longer at
 /// what was merged.
-pub async fn delete_merged_head(app: &App, repo: &Repo, p: &Pull) -> AppResult<()> {
+pub async fn retire_merged_head(app: &App, repo: &Repo, p: &Pull) -> AppResult<()> {
     let Some(merged) = head_of(p, &Tips::new()) else {
         return Ok(());
     };
+    let dir = app.git.repo_dir(&repo.path);
+    let reason = format!("branvil: retire the head of merged !{}", p.number);
+    if !app
+        .git
+        .update_ref(&dir, &merged_ref(p.number), &merged, ZERO_SHA, &reason)
+        .await?
+    {
+        tracing::error!(
+            "{}: could not keep {merged}, the head merged by !{}; its branch stays",
+            repo.path,
+            p.number
+        );
+        return Ok(());
+    }
     let (id, branch) = (repo.id.clone(), p.head.clone());
     let kept = app
         .store
@@ -1713,18 +1736,12 @@ pub async fn delete_merged_head(app: &App, repo: &Repo, p: &Pull) -> AppResult<(
             }))
         })
         .await?;
-    if kept {
-        return Ok(());
+    if !kept {
+        let refname = format!("refs/heads/{}", p.head);
+        app.git
+            .update_ref(&dir, &refname, ZERO_SHA, &merged, &reason)
+            .await?;
     }
-    app.git
-        .update_ref(
-            &app.git.repo_dir(&repo.path),
-            &format!("refs/heads/{}", p.head),
-            crate::git::ZERO_SHA,
-            &merged,
-            &format!("branvil: delete the head of merged !{}", p.number),
-        )
-        .await?;
     Ok(())
 }
 

@@ -797,6 +797,10 @@ async fn sync_pull(
                         _ => false,
                     };
                     if landed {
+                        // Under the lock, so a backup has the merge together
+                        // with the ref that keeps its head.
+                        let lock = app.repo_lock(&repo.id);
+                        let _guard = lock.lock().await;
                         let merge_sha = hp.merge_sha.clone().unwrap_or_default();
                         let dir = app.git.repo_dir(&repo.path);
                         // What the pull request brought: from where its pushed
@@ -820,9 +824,7 @@ async fn sync_pull(
                             repo.path,
                             host.display_name()
                         );
-                        let lock = app.repo_lock(&repo.id);
-                        let _guard = lock.lock().await;
-                        pulls::delete_merged_head(app, repo, &merged).await?;
+                        pulls::retire_merged_head(app, repo, &merged).await?;
                         crate::refs::record_refs_locked(app, repo).await?;
                         return Ok(());
                     }

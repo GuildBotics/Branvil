@@ -99,18 +99,22 @@ are atomic together.
    `git update-ref refs/heads/<base> <head> <old>` (Git refuses if the base
    moved); then one transaction applies the merge (`apply_journal`: PR merged,
    `closes` tickets closed and moved to `done`) and deletes the journal entry;
-   then the head branch is deleted (`delete_merged_head`, below);
+   then the head branch is retired (`retire_merged_head`, below);
    finally `record_refs_locked` records the snapshot and notifies CI. The
    recording takes a branch's move before a deletion, so a commit merged into
    the default branch keeps its CI run; merged into another branch, which CI
    does not run, its unfinished jobs are superseded with the head.
    - **The head of a merged pull request** (here or on the upstream host) is
-     deleted only while it is still at what was merged (`git update-ref` with
-     that old value). It stays when it is protected or when an open
-     pull request has it as its head or base. Only Branvil's branch is
-     deleted, never the host's. A merged pull request's head is what it merged
-     (`merge_sha`, or `upstream.pushed` when merged on the host), not its
-     branch's tip.
+     what it merged (`merge_sha`, or `upstream.pushed` when merged on the
+     host), not its branch's tip. Before its branch is touched, the hidden
+     `refs/branvil/merged/<number>` is created at that commit: a squash or a
+     rebase on the host leaves it on no branch, and the pull request's view,
+     backups (`git bundle --all`), and Git's pruning all go by reachability.
+     The branch is then deleted only while it is still at what was merged
+     (`git update-ref` with that old value). It stays when it is protected or
+     when an open pull request has it as its head or base. Only Branvil's
+     branch is deleted, never the host's. If the process stops between the
+     merge and this step, the branch stays and no hidden ref is made.
 4. **Startup** (`refs::recover`, before the listener accepts requests): every
    pending journal entry is compared with the actual ref. At `new`, the
    operation's database side is applied (idempotently); at `old`, it is

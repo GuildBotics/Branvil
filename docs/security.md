@@ -178,8 +178,8 @@ itself speaks plain HTTP on loopback only).
   cannot be pushed, but they are not a confidentiality boundary: with Git
   protocol v2, a member who can read the repository and knows an object id can
   fetch an object reachable only from a hidden ref (checked with Git 2.54).
-  Nothing secret is kept in hidden refs (they hold CI sources and a copy of
-  the upstream's default branch).
+  Nothing secret is kept in hidden refs (they hold CI sources, a copy of the
+  upstream's default branch, and what merged pull requests merged).
 - Limits: `limits.git_http_concurrency` Smart HTTP transfers and
   `limits.git_concurrency` service-side Git commands (separate pools, so a push
   waiting on its hook never blocks the commands that record it), a wall-clock limit per Smart

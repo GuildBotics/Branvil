@@ -488,6 +488,11 @@ async fn a_pull_request_is_published_as_its_author_and_follows_the_host_to_the_m
         .map(|f| f["path"].as_str().unwrap())
         .collect();
     assert_eq!(paths, ["f.txt"]);
+    // The squash left that head on no branch; a backup still has it.
+    let into = tempfile::tempdir().unwrap();
+    let r = w.restored(into.path()).await;
+    assert_eq!(r.ok(&pull, &w.aiko).await["head_sha"], got["head_sha"]);
+    assert_eq!(r.ok(&format!("{pull}/files"), &w.aiko).await, files);
     let ticket = s.ok(&format!("{}/tickets/1", w.repo_path()), &w.aiko).await;
     assert_eq!(ticket["state"], "closed");
     let other = s.ok(&format!("{}/tickets/2", w.repo_path()), &w.aiko).await;
