@@ -61,3 +61,19 @@ name = "dev-script"
 image = "guildbotics/agent-environment:dev"
 commands = ["python3 -m unittest discover -s tests -p test_dev_script.py -v"]
 timeout_secs = 1200
+
+# GuildBotics' provider against this commit's service (README.md, "Checking
+# with GuildBotics"), with GuildBotics' main cloned from GitHub, as a job
+# reaches only public networks; uv keeps its downloads in the cache.
+[[jobs]]
+name = "branvil-integration"
+image = "guildbotics/agent-environment:dev"
+commands = ['''
+set -eu
+find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +
+git clone --quiet --depth 1 https://github.com/GuildBotics/GuildBotics.git /tmp/guildbotics
+(cd /tmp/guildbotics && UV_CACHE_DIR=/work/.ci/uv UV_LOCKED=1 uv sync --extra test --extra dev)
+CARGO_HOME=/work/.ci/cargo-home CARGO_INCREMENTAL=0 scripts/guildbotics-smoke.sh /tmp/guildbotics
+''']
+timeout_secs = 1800
+cache = { paths = [".ci/cargo-home/registry", "target", ".ci/uv"], key_files = ["Cargo.lock"] }

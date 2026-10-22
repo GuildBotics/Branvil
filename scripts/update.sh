@@ -8,8 +8,9 @@ Usage: scripts/update.sh --data-dir PATH   (run by scripts/serve.sh only)
 
 scripts/serve.sh runs this at its start and every interval. When origin/main
 (which must be this Branvil) is neither the running build nor the last commit
-an update gave up on (builds/attempted), and its checks in this Branvil have
-all succeeded, it backs the running service up into ~/branvil-backups,
+an update gave up on (builds/attempted), and its run in this Branvil has
+finished with every check the repository requires for a merge succeeded, it
+backs the running service up into ~/branvil-backups,
 fast-forwards the checkout's main, installs the commit as builds/<commit>, and
 rehearses the upgrade on a copy restored from that backup; then it records
 the update in builds/update, which scripts/serve.sh carries out. See "Upgrading" in docs/backup-restore.md.
@@ -47,6 +48,10 @@ EOF
 
 # Prints ready, running, or failed: the checks of commit $1 in the Branvil of
 # origin, read with the owner's token in file $2 (passed in the environment).
+# Once the commit's run has finished, it is ready when every check the
+# repository requires for a merge succeeded: what may be merged may be
+# installed, and a check that is not required (one that depends on another
+# repository, say) decides neither.
 checks_of() {
   local pattern='^(https?://[^/]+)/git/([^/]+/[^/]+)\.git$' url
   url="$(git remote get-url origin)"
@@ -54,19 +59,28 @@ checks_of() {
     echo "origin ($url) is not a repository URL of a Branvil." >&2
     return 1
   fi
-  BRANVIL_CHECKS_URL="${BASH_REMATCH[1]}/api/v1/repos/${BASH_REMATCH[2]//\//%2F}/commits/$1/checks" \
-    BRANVIL_CHECKS_TOKEN="$(<"$2")" node --input-type=module -e '
-      const answer = await fetch(process.env.BRANVIL_CHECKS_URL, {
-        headers: { authorization: `Bearer ${process.env.BRANVIL_CHECKS_TOKEN}` },
-      }).catch(() => null);
+  BRANVIL_REPO_URL="${BASH_REMATCH[1]}/api/v1/repos/${BASH_REMATCH[2]//\//%2F}" \
+    BRANVIL_CHECKS_SHA="$1" BRANVIL_CHECKS_TOKEN="$(<"$2")" node --input-type=module -e '
+      const read = async (what, url) => {
+        const answer = await fetch(url, {
+          headers: { authorization: `Bearer ${process.env.BRANVIL_CHECKS_TOKEN}` },
+        }).catch(() => null);
+        // A 404 too: the repository is origin, whose commit was just fetched.
+        if (answer && !answer.ok) throw new Error(`reading ${what}: HTTP ${answer.status}`);
+        return answer && answer.json();
+      };
+      const repo = process.env.BRANVIL_REPO_URL;
+      const settings = await read("the repository", repo);
+      const report = settings && (await read("the checks", `${repo}/commits/${process.env.BRANVIL_CHECKS_SHA}/checks`));
       let state = "running"; // not reachable now: asked again in the next round
-      if (answer) {
-        // A 404 too: the commit has just been fetched from there.
-        if (!answer.ok) throw new Error(`reading the checks: HTTP ${answer.status}`);
-        const { checks, checks_expected } = await answer.json();
+      if (report) {
+        const { checks, checks_expected } = report;
         if (checks.some((c) => c.status !== "completed")) state = "running";
-        else if (checks.length) state = checks.every((c) => c.conclusion === "success") ? "ready" : "failed";
-        else state = checks_expected ? "running" : "ready";
+        else if (!checks.length) state = checks_expected ? "running" : "ready";
+        else {
+          const passed = (name) => checks.some((c) => c.name === name && c.conclusion === "success");
+          state = settings.required_checks.every(passed) ? "ready" : "failed";
+        }
       }
       console.log(state);
     '
@@ -157,7 +171,7 @@ main() {
   fi
   if [[ "$checks" == failed ]]; then
     put "$builds/attempted" "$target"
-    echo "The checks of $target did not all succeed; it is not installed."
+    echo "The required checks of $target did not all succeed; it is not installed."
     exit 0
   fi
   echo "Updating Branvil from $previous to $target"
