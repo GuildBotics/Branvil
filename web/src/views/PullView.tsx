@@ -170,7 +170,7 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
         onOpenFile={(path) => setFilesOpen({ focus: path })}
       />
 
-      <ChecksCard repo={repo} number={number} onOpen={(c) => setCheck(drawerTarget(c))} />
+      <ChecksCard repo={repo} number={number} requiredChecks={repository.data?.required_checks ?? []} onOpen={(c) => setCheck(drawerTarget(c))} />
 
       {pr.state === "open" &&
         (repository.data?.upstream ? (

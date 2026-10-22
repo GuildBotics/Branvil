@@ -71,9 +71,9 @@ export function fakeApi(routes: Record<string, Reply | Reply[]>) {
 export const ME = { name: "owner", display_name: "Owner", kind: "owner", accounts: [], reviewers: [] };
 export const SESSION = { me: ME, csrf: "csrf-123" };
 
-export function renderApp(path: string) {
+export function renderApp(path: string, language: "en" | "ja" = "en") {
   window.history.replaceState(null, "", path);
   const client = createQueryClient();
-  const utils = render(<App client={client} language="en" test />);
+  const utils = render(<App client={client} language={language} test />);
   return { ...utils, client };
 }

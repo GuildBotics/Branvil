@@ -154,6 +154,8 @@ export const ja: Record<MessageKey, string> = {
 
   "merge.title": "マージ",
   "merge.requiredChecks": "必須チェック：{checks}",
+  "merge.noRequiredChecks": "必須チェックはありません（チェックの結果はマージと公開を止めません）",
+  "merge.checksNotSucceeded": "この head でまだ成功していない必須チェック：{checks}",
   "merge.expected": "マージ対象（head / base）：",
   "merge.submit": "マージ（fast-forward）",
   "merge.merging": "マージ中…",
@@ -391,6 +393,7 @@ export const ja: Record<MessageKey, string> = {
   "review.by": "{author} のレビュー",
   "thread.openFile": "変更ファイルで開く",
   "ci.open": "チェック {name} を開く",
+  "ci.required": "必須",
   "ci.openOnHost": "ホストで開く",
   "ci.tail": "末尾 {size} KiB",
   "ci.noArtifacts": "なし",
