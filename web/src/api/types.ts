@@ -61,6 +61,8 @@ export interface Repository {
   url: string;
   protected_branches: string[];
   required_checks: string[];
+  /** The approvals a merge or a publish needs; 0 needs none. */
+  required_approvals: number;
   /** Whether its CI jobs may reach public network destinations. */
   ci_network: boolean;
   /** The labels its tickets may carry. */
@@ -216,6 +218,10 @@ export interface PullRequest {
   base: string;
   base_sha: string;
   reviewers: string[];
+  /** Every member's part in the review, as the server decides it. */
+  review_states: ReviewState[];
+  /** The members whose state approves: not requested again, `approve` on the current head. */
+  approvals: number;
   tickets: TicketLink[];
   labels: string[];
   changed_files: number;
@@ -261,6 +267,15 @@ export interface PublishPreview {
 }
 
 export type Verdict = "approve" | "request_changes" | "comment";
+
+/** A member's part in a pull request's review: an open request, and the verdict of their last review. */
+export interface ReviewState {
+  member: string;
+  requested: boolean;
+  verdict: Verdict | null;
+  /** That review is on a commit other than the current head. */
+  outdated: boolean;
+}
 
 export interface Review {
   id: string;

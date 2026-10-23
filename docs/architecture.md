@@ -95,7 +95,9 @@ are atomic together.
      published.
 3. **Merges** (`domain::pulls::merge`), under the repository lock:
    re-read the PR and tips; check expected head/base, fast-forward, required
-   checks; point the hidden ref of the merged head at it (`keep_merged`,
+   checks, and required approvals (`check_landable`, which publishing shares;
+   it counts the review states of `review_states`, the one place they are
+   decided, which the pull request's view carries too); point the hidden ref of the merged head at it (`keep_merged`,
    below); write a `ref_journal` entry `{ref, old, new, op}`; run
    `git update-ref refs/heads/<base> <head> <old>` (Git refuses if the base
    moved); then one transaction applies the merge (`apply_journal`: PR merged,
@@ -194,7 +196,7 @@ What the owner sees (GitHub as the example):
    title and the current body, plus `Closes`/`Refs` lines for linked tickets
    that name a GitHub issue) and has the same preconditions as a merge (open,
    not a draft, the head contains the base, the required checks succeeded on
-   the head) plus two more: the base is the default branch, and the pull
+   the head, the required approvals of the head) plus two more: the base is the default branch, and the pull
    request's author has a GitHub account in Branvil.
 3. Branvil pushes the head branch to GitHub and opens a pull request there with
    that title and body, **as the author's account** (an agent's bot account, as
@@ -466,8 +468,11 @@ The pull request's check list marks required checks. Its merge or publish card
 names required checks that have not succeeded on the displayed head and disables
 the action until they do; while checks are loading or cannot be read, required
 checks remain unsatisfied. With no required checks, the card explains that check
-results do not block either action. The server rechecks these conditions when
-the action is submitted.
+results do not block either action. The card also shows the pull request's
+approvals against the repository's required approvals and disables the action
+while they are short; the reviewer badges and that count come from the review
+states the server puts in the pull request. The server rechecks these
+conditions when the action is submitted.
 While a card is dragged, the box under the pointer scrolls when the pointer is
 near its edge, faster the nearer (`web/src/dragScroll.ts`).
 The service's state is not a page: the GUI warns at the top of every page only

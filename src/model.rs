@@ -123,6 +123,8 @@ pub struct Repo {
     /// addition to these.
     pub protected_branches: Vec<String>,
     pub required_checks: Vec<String>,
+    /// The approvals a merge or a publish needs (`domain::pulls::check_landable`).
+    pub required_approvals: u64,
     pub ci_network: bool,
     /// The labels its tickets may carry.
     pub labels: Vec<String>,

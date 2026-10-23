@@ -364,6 +364,32 @@ async fn a_pull_request_is_published_as_its_author_and_follows_the_host_to_the_m
         )
         .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+    // An approval the repository asks for is missing, then given.
+    let repo = s.ok(&w.repo_path(), &w.owner).await;
+    let (st, v) = s
+        .patch(
+            &w.repo_path(),
+            &w.owner,
+            json!({"revision": repo["revision"], "required_approvals": 1}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "not_mergeable");
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("0 / 1"),
+        "{v}"
+    );
+    assert_eq!(gh.tip(GH, "ticket/1"), None);
+    let (st, v) = s
+        .post(
+            &format!("{pull}/reviews"),
+            &w.ken,
+            json!({"verdict": "approve", "commit": head}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
     let (st, v) = publish(&w, n).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let number = v["upstream"]["number"].as_u64().unwrap();

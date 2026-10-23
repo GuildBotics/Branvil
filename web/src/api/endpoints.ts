@@ -86,6 +86,7 @@ export interface RepoPatch {
   revision: number;
   default_branch?: string;
   required_checks?: string[];
+  required_approvals?: number;
   ci_network?: boolean;
   protected_branches?: string[];
   labels?: string[];

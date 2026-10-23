@@ -24,6 +24,7 @@ function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]>
       url: "",
       protected_branches: ["main"],
       required_checks: ["test"],
+      required_approvals: 0,
       revision: 1,
     }),
     [`GET ${P}`]: json(200, pull()),
@@ -146,7 +147,7 @@ describe("pull request review", () => {
     expect(await screen.findAllByTitle(NEW_HEAD)).not.toHaveLength(0);
   });
 
-  it("shows each reviewer's state on their avatar, and requests and withdraws reviews from the menu", async () => {
+  it("shows each reviewer's state from the server on their avatar, and requests and withdraws reviews from the menu", async () => {
     const fake = fakeApi(
       pullRoutes({
         "GET /api/v1/members": json(200, {
@@ -159,25 +160,25 @@ describe("pull request review", () => {
           ],
           next_cursor: null,
         }),
-        [`GET ${P}/activity`]: json(200, {
-          comments: [],
-          reviews: [
-            { id: "rv_1", author: "ken", verdict: "request_changes", body: "", commit: BASE, submitted_at: "2026-10-14T10:03:00.000Z", reactions: [] },
-            { id: "rv_2", author: "ken", verdict: "approve", body: "", commit: HEAD, submitted_at: "2026-10-14T10:04:00.000Z", reactions: [] },
-            { id: "rv_3", author: "mia", verdict: "comment", body: "Hm.", commit: BASE, submitted_at: "2026-10-14T10:05:00.000Z", reactions: [] },
-          ],
-          threads: [],
-        }),
+        [`GET ${P}`]: json(200, pull({ review_states: [
+          { member: "ken", requested: false, verdict: "approve", outdated: false },
+          { member: "mia", requested: false, verdict: "comment", outdated: true },
+          { member: "owner", requested: true, verdict: null, outdated: false },
+        ] })),
         [`PUT ${P}/reviewers/mia`]: json(200, {}),
         [`DELETE ${P}/reviewers/owner`]: json(200, {}),
       }),
     );
     const user = userEvent.setup();
     renderApp("/acme/demo/-/pulls/3");
-    // An open request, the last verdict on the head, and a verdict on an older revision.
+    // An open request, the last verdict on the head, and a verdict on an older revision, as the
+    // server decided them: the page reads no reviews for them.
     const trigger = await screen.findByRole("button", {
       name: "Reviewers: ken (Approved), mia (Commented (older revision)), owner (Requested) — click to request or withdraw",
     });
+    expect(trigger.querySelector(".review-mark.approve:not(.stale)")).not.toBeNull();
+    expect(trigger.querySelector(".review-mark.comment.stale")).not.toBeNull();
+    expect(trigger.querySelector(".review-mark.pending")).not.toBeNull();
     await user.click(trigger);
     // The author and runners are not offered.
     expect(await screen.findByRole("menuitem", { name: /^owner/ })).toHaveAttribute("aria-checked", "true");
@@ -215,6 +216,7 @@ describe("pull request review", () => {
     url: "",
     protected_branches: ["main"],
     required_checks: ["test"],
+    required_approvals: 0,
     labels: [],
     upstream: {
       provider: "github",
@@ -268,6 +270,7 @@ describe("pull request review", () => {
       }));
       renderApp("/acme/demo/-/pulls/3", language);
       expect(await screen.findByText(dictionaries[language]["merge.noRequiredChecks"])).toBeInTheDocument();
+      expect(screen.getByText(dictionaries[language]["merge.noRequiredApprovals"])).toBeInTheDocument();
       // The default check fixture fails, but is optional in this repository.
       expect(await screen.findByText(`${dictionaries[language]["ci.reason"]}: exit code 101`)).toBeInTheDocument();
       const label = dictionaries[language][upstream ? "publish.submit" : "merge.submit"].replace("{host}", "GitHub");
@@ -336,6 +339,40 @@ describe("pull request review", () => {
       applyChange({ kind: "check", path: "acme/demo", id: HEAD }, client);
       await waitFor(() => expect(screen.getByRole("button", { name: action })).toBeEnabled());
       expect(screen.queryByText(/Required checks not yet successful/)).not.toBeInTheDocument();
+    });
+
+    // Each filled green check is one approval; requested again or on an older head is not.
+    const states = [
+      { member: "ken", requested: false, verdict: "approve", outdated: false },
+      { member: "mia", requested: false, verdict: "approve", outdated: true },
+      { member: "li", requested: true, verdict: "approve", outdated: false },
+      { member: "owner", requested: false, verdict: "request_changes", outdated: false },
+    ] as const;
+    it.each([
+      { approvals: 1, required: 2, enabled: false },
+      { approvals: 2, required: 2, enabled: true },
+    ])(`${action}: shows approvals $approvals / $required and is enabled only when they suffice`, async ({ approvals, required, enabled }) => {
+      const reviewStates = approvals === 1 ? [...states] : [...states, { ...states[0], member: "zoe" }];
+      const fake = fakeApi(pullRoutes({
+        ...routes,
+        "GET /api/v1/repos/acme/demo": json(200, { ...repository, required_approvals: required }),
+        [`GET ${P}/checks`]: json(200, CHECKS),
+        [`GET ${P}`]: json(200, pull({ review_states: reviewStates, approvals })),
+      }));
+      const user = userEvent.setup();
+      renderApp("/acme/demo/-/pulls/3");
+      expect(await screen.findByText(`Approvals: ${approvals} / ${required}`)).toBeInTheDocument();
+      const trigger = screen.getByRole("button", { name: /^Reviewers:/ });
+      expect(trigger.querySelectorAll(".review-mark.approve:not(.stale)")).toHaveLength(approvals);
+      const button = screen.getByRole("button", { name: action });
+      await within(await screen.findByRole("region", { name: "Checks" })).findByTitle(HEAD);
+      if (enabled) {
+        expect(button).toBeEnabled();
+        return;
+      }
+      expect(button).toBeDisabled();
+      await user.click(button);
+      expect(fake.calls("POST", `${P}/${upstream ? "publish" : "merge"}`)).toHaveLength(0);
     });
   }
 

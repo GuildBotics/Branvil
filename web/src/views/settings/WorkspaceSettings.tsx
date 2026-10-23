@@ -1,4 +1,4 @@
-import { Badge, Button, Card, Group, Modal, Stack, Switch, Tabs, TagsInput, Text, TextInput } from "@mantine/core";
+import { Badge, Button, Card, Group, Modal, NumberInput, Stack, Switch, Tabs, TagsInput, Text, TextInput } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FolderGit2, Plus } from "lucide-react";
 import { useState } from "react";
@@ -133,6 +133,7 @@ type RepoForm = {
   default_branch: string;
   protected_branches: string[];
   required_checks: string[];
+  required_approvals: number;
   ci_network: boolean;
   labels: string[];
 };
@@ -142,6 +143,7 @@ const seed = (r: Repository): RepoForm => ({
   default_branch: r.default_branch,
   protected_branches: r.protected_branches,
   required_checks: r.required_checks,
+  required_approvals: r.required_approvals,
   ci_network: r.ci_network,
   labels: r.labels,
 });
@@ -237,6 +239,15 @@ function RepoEditor({ repo, tab }: { repo: Repository; tab: "basic" | "ci" }) {
               onChange={(v) => setForm({ ...form, required_checks: v })}
               placeholder={t("settings.addCheck")}
               clearable
+            />
+            <NumberInput
+              label={t("repo.requiredApprovals")}
+              description={t(repo.upstream ? "settings.approvalsHelpUpstream" : "settings.approvalsHelp")}
+              value={form.required_approvals}
+              onChange={(v) => setForm({ ...form, required_approvals: Number(v) })}
+              min={0}
+              allowNegative={false}
+              allowDecimal={false}
             />
           </Stack>
           {footer}

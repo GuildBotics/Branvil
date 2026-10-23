@@ -3,11 +3,11 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FileDiff } from "lucide-react";
 import { useState } from "react";
 import * as api from "../api/endpoints";
-import { ticketRef, type Check, type PullRequest, type Review } from "../api/types";
+import { ticketRef, type Check } from "../api/types";
 import { ErrorMessage, Loading, Post, PostHead, StateBadge } from "../components/common";
 import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
-import { ReviewersPicker, type ReviewState } from "../components/PeoplePicker";
+import { ReviewersPicker } from "../components/PeoplePicker";
 import { useT } from "../i18n";
 import { useMemberKinds, usePull, usePullActivity, usePullFiles, usePullThreads, useRepo, usePeople } from "../query/hooks";
 import { keys } from "../query/keys";
@@ -22,20 +22,6 @@ import { MergeCard, PublishCard } from "./pull/Landing";
 function ticketLabel(url: string): string {
   const route = routeOfUrl(url);
   return route?.name === "ticket" ? ticketRef({ repository: route.repo, key: route.key }) : url;
-}
-
-/** Each member's review state: an open request, and their last verdict (reply-only reviews are not verdicts). */
-function reviewStates(pull: PullRequest, reviews: Review[]): Map<string, ReviewState> {
-  const states = new Map<string, ReviewState>();
-  for (const r of [...reviews].sort((a, b) => (a.submitted_at < b.submitted_at ? -1 : 1))) {
-    if (r.reply_only) continue;
-    states.set(r.author, { requested: false, verdict: r.verdict, stale: r.commit !== pull.head_sha });
-  }
-  for (const name of pull.reviewers) {
-    const s = states.get(name);
-    states.set(name, { requested: true, verdict: s?.verdict ?? null, stale: s?.stale ?? false });
-  }
-  return states;
 }
 
 export function PullView({ repo, number, openJob }: { repo: string; number: number; openJob?: string }) {
@@ -74,7 +60,6 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
   const state = pr.merged ? "merged" : pr.state;
   const workspace = repo.split("/")[0] as string;
   const fileItems = files.data?.items;
-  const states = reviewStates(pr, activity.data?.reviews ?? []);
 
   return (
     <Stack gap="lg">
@@ -121,7 +106,7 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
         right={
           <ReviewersPicker
             people={people}
-            states={states}
+            states={pr.review_states}
             author={pr.author}
             disabled={pr.state !== "open" || reviewer.isPending}
             onToggle={(name, request) => reviewer.mutate({ name, request })}
@@ -174,9 +159,14 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
 
       {pr.state === "open" &&
         (repository.data?.upstream ? (
-          <PublishCard pull={pr} upstream={repository.data.upstream} requiredChecks={repository.data.required_checks} />
+          <PublishCard
+            pull={pr}
+            upstream={repository.data.upstream}
+            requiredChecks={repository.data.required_checks}
+            requiredApprovals={repository.data.required_approvals}
+          />
         ) : repository.data ? (
-          <MergeCard pull={pr} requiredChecks={repository.data.required_checks} />
+          <MergeCard pull={pr} requiredChecks={repository.data.required_checks} requiredApprovals={repository.data.required_approvals} />
         ) : null)}
 
       <Group justify="flex-end" gap="xs" component="section" aria-label={t("pull.otherActions")}>

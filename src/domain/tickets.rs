@@ -1479,6 +1479,7 @@ mod tests {
             default_branch: "main".into(),
             protected_branches: Vec::new(),
             required_checks: Vec::new(),
+            required_approvals: 1,
             ci_network: false,
             labels: Vec::new(),
             upstream: None,

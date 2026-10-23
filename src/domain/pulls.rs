@@ -49,6 +49,9 @@ pub struct PullView {
     pub base: String,
     pub base_sha: String,
     pub reviewers: Vec<String>,
+    pub review_states: Vec<ReviewState>,
+    /// The members whose review state approves (`ReviewState::approves`).
+    pub approvals: u64,
     pub tickets: Vec<LinkView>,
     pub labels: Vec<String>,
     pub changed_files: u64,
@@ -93,6 +96,72 @@ fn published_view(x: &Published) -> PublishedView {
         error: x.error.clone(),
         stopped: x.stopped.clone(),
     }
+}
+
+/// Where a member stands in a pull request's review: what its reviewer badge
+/// shows, and whether it counts as an approval.
+#[derive(Serialize, Debug, Clone)]
+pub struct ReviewState {
+    pub member: String,
+    /// Asked to review and not answered since.
+    pub requested: bool,
+    /// The verdict of the member's last review; `None` before any.
+    pub verdict: Option<String>,
+    /// That review is on a commit other than the current head.
+    pub outdated: bool,
+}
+
+impl ReviewState {
+    /// An approval of the current head, not asked again since.
+    fn approves(&self) -> bool {
+        !self.requested && !self.outdated && self.verdict.as_deref() == Some("approve")
+    }
+}
+
+/// Every member's review state, in the order they joined the review: the
+/// one place it is decided. `reviews` are in the order they were submitted
+/// (a thread reply is not a review). The author is not a reviewer: their own
+/// reviews (only comments can be submitted) count for nothing.
+fn review_states(p: &Pull, reviews: &[Review], head: &str) -> Vec<ReviewState> {
+    fn entry<'a>(states: &'a mut Vec<ReviewState>, name: &str) -> &'a mut ReviewState {
+        let i = states
+            .iter()
+            .position(|s| fold(&s.member) == fold(name))
+            .unwrap_or_else(|| {
+                states.push(ReviewState {
+                    member: name.to_string(),
+                    requested: false,
+                    verdict: None,
+                    outdated: false,
+                });
+                states.len() - 1
+            });
+        &mut states[i]
+    }
+    let mut states = Vec::new();
+    for x in reviews
+        .iter()
+        .filter(|x| fold(&x.author) != fold(&p.author))
+    {
+        let s = entry(&mut states, &x.author);
+        s.verdict = Some(x.verdict.clone());
+        s.outdated = x.commit != head;
+    }
+    for name in &p.reviewers {
+        entry(&mut states, name).requested = true;
+    }
+    states
+}
+
+/// The review states of `p` with `head` as its current head.
+async fn read_review_states(app: &App, p: &Pull, head: &str) -> AppResult<Vec<ReviewState>> {
+    let q = p.clone();
+    let reviews = app.store.read(move |r| reviews_of(r, &q)).await?;
+    Ok(review_states(p, &reviews, head))
+}
+
+fn approvals(states: &[ReviewState]) -> u64 {
+    states.iter().filter(|s| s.approves()).count() as u64
 }
 
 type Tips = BTreeMap<String, String>;
@@ -148,6 +217,8 @@ async fn changed_files(app: &App, repo: &Repo, p: &Pull, tips: &Tips) -> AppResu
 
 pub async fn pull_view(app: &App, repo: &Repo, p: &Pull, tips: &Tips) -> AppResult<PullView> {
     let changed = changed_files(app, repo, p, tips).await?;
+    let head_sha = head_of(p, tips).unwrap_or_default();
+    let review_states = read_review_states(app, p, &head_sha).await?;
     Ok(PullView {
         url: app.pull_url(&repo.path, p.number),
         repository: repo.path.clone(),
@@ -161,10 +232,12 @@ pub async fn pull_view(app: &App, repo: &Repo, p: &Pull, tips: &Tips) -> AppResu
         author: p.author.clone(),
         head: p.head.clone(),
         head_repository: repo.path.clone(),
-        head_sha: head_of(p, tips).unwrap_or_default(),
+        head_sha,
         base: p.base.clone(),
         base_sha: tips.get(&p.base).cloned().unwrap_or_default(),
         reviewers: p.reviewers.clone(),
+        approvals: approvals(&review_states),
+        review_states,
         tickets: p
             .tickets
             .iter()
@@ -1030,6 +1103,11 @@ pub async fn review(
     }
     domain::check_text("body", &input.body, domain::MAX_TEXT)?;
     let (repo, p) = visible(app, caller, repo_path, number).await?;
+    if input.verdict != "comment" && fold(caller.name()) == fold(&p.author) {
+        return Err(AppError::invalid(
+            "The author cannot approve or request changes on their own pull request; only comment.",
+        ));
+    }
     // The head is read from Git just before the write: a review is recorded
     // only on the head the caller read; a later push does not change it.
     require_head(app, &repo, &p, &input.commit).await?;
@@ -1541,9 +1619,10 @@ fn not_mergeable(message: impl Into<String>) -> AppError {
 }
 
 /// The checks a merge and a publish share: open, not a draft, the head and
-/// base the owner saw, the head containing the base, and the required checks
-/// succeeded on the head. Returns the head and the base. Call under the
-/// repository lock with the pull request read under it.
+/// base the owner saw, the head containing the base, the required checks
+/// succeeded on the head, and the required approvals of the head. Returns the
+/// head and the base. Call under the repository lock with the pull request
+/// read under it.
 pub async fn check_landable(
     app: &App,
     repo: &Repo,
@@ -1600,6 +1679,13 @@ pub async fn check_landable(
         return Err(not_mergeable(format!(
             "Required checks did not succeed on {head}: {}.",
             missing.join(", ")
+        )));
+    }
+    let approved = approvals(&read_review_states(app, p, &head).await?);
+    if approved < repo.required_approvals {
+        return Err(not_mergeable(format!(
+            "Approvals of {head}: {approved} / {} required.",
+            repo.required_approvals
         )));
     }
     Ok((head, base))

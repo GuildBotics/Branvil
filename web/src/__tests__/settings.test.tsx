@@ -20,6 +20,7 @@ const REPO = {
   url: "",
   protected_branches: ["main"],
   required_checks: [],
+  required_approvals: 1,
   ci_network: false,
   labels: ["bug"],
   upstream: null,
@@ -110,7 +111,7 @@ describe("settings", () => {
     expect(fake.calls("POST", "/api/v1/repos")[0]?.body).toEqual({ path: "acme/demo", default_branch: "main", labels: ["bug", "ui"] });
   });
 
-  it("saves a repository's branches, CI, and labels with the revision the form was filled from", async () => {
+  it("saves a repository's branches, CI and approvals, and labels with the revision the form was filled from", async () => {
     const fake = fakeApi({
       ...SHELL,
       "GET /api/v1/repos": page([REPO]),
@@ -120,7 +121,7 @@ describe("settings", () => {
     renderApp("/-/settings");
     await user.click(await screen.findByRole("button", { name: "Edit" }));
     expect(screen.getByText("http://127.0.0.1:7878/git/acme/demo.git")).toBeInTheDocument();
-    // Required checks live on the CI tab, with the network for jobs.
+    // Required checks and approvals live on the CI tab, with the network for jobs.
     const basics = screen.getByRole("tabpanel", { name: "Basics" });
     expect(within(basics).getByLabelText("Protected branches", { selector: "input:not([type=hidden])" })).toBeInTheDocument();
     expect(within(basics).queryByLabelText("Required checks", { selector: "input:not([type=hidden])" })).not.toBeInTheDocument();
@@ -130,6 +131,11 @@ describe("settings", () => {
     expect(screen.getByText(/public destinations only, never the Branvil machine or private networks/)).toBeInTheDocument();
     await user.click(network);
     await addPills(user, "Required checks", ["test", "lint"]);
+    const approvals = screen.getByRole("textbox", { name: "Required approvals" });
+    expect(approvals).toHaveValue("1");
+    expect(screen.getByText(/must approve the current head in their last review before a merge; 0 needs none/)).toBeInTheDocument();
+    await user.clear(approvals);
+    await user.type(approvals, "2");
     await user.click(screen.getByRole("tab", { name: "Labels" }));
     await addPills(user, "Ticket labels", ["ui"]);
     await user.click(screen.getAllByRole("button", { name: "Save" })[0] as HTMLElement);
@@ -139,6 +145,7 @@ describe("settings", () => {
       default_branch: "main",
       protected_branches: ["main"],
       required_checks: ["test", "lint"],
+      required_approvals: 2,
       ci_network: true,
       labels: ["bug", "ui"],
     });

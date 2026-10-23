@@ -282,6 +282,7 @@ A workspace holds repositories (`<workspace>/<name>`) and has one board.
   "url": "http://127.0.0.1:7878/acme/demo",
   "protected_branches": ["main"],
   "required_checks": ["test"],
+  "required_approvals": 1,
   "ci_network": false,
   "labels": ["bug", "feature"],
   "upstream": null,
@@ -289,12 +290,14 @@ A workspace holds repositories (`<workspace>/<name>`) and has one board.
 }
 ```
 
-`labels` are the labels its tickets may carry. `upstream` is the repository on
+`labels` are the labels its tickets may carry. `required_approvals` is how
+many approvals a merge or a publish needs (`0` needs none; a new repository
+needs 1; see "Pull requests"). `upstream` is the repository on
 a code host it follows and publishes to, or `null` (see "Upstream").
 
 - `GET /api/v1/repos` → items (every repository), by path.
 - `POST /api/v1/repos` (owner) `{"path","default_branch"?,"labels"?}` (default `main`, no labels) → repository. `path` is `<workspace>/<name>` of an existing workspace (`404 not_found` otherwise). An empty bare repository is created.
-- `PATCH /api/v1/repos/{repo}` (owner) `{"revision", "default_branch"?, "required_checks"?, "protected_branches"?, "ci_network"?, "labels"?}` → `409 conflict` when `revision` is stale. Removing a label leaves it on the tickets that carry it. `ci_network` is the network access of CI jobs (`docs/ci.md`; the CI tab of the repository's settings). With an upstream, the default branch follows the upstream's and cannot be changed (`409 conflict`).
+- `PATCH /api/v1/repos/{repo}` (owner) `{"revision", "default_branch"?, "required_checks"?, "required_approvals"?, "protected_branches"?, "ci_network"?, "labels"?}` → `409 conflict` when `revision` is stale. Removing a label leaves it on the tickets that carry it. `ci_network` is the network access of CI jobs (`docs/ci.md`; the CI tab of the repository's settings). With an upstream, the default branch follows the upstream's and cannot be changed (`409 conflict`).
 
 ### `GET /api/v1/repos/{repo}/branches/{branch}`
 
@@ -481,6 +484,11 @@ comment with `meta.routing == "suppress"` as a status notice.
   "base": "main",
   "base_sha": "<40 hex>",
   "reviewers": ["ken"],
+  "review_states": [
+    {"member": "ken", "requested": true, "verdict": "approve", "outdated": true},
+    {"member": "mia", "requested": false, "verdict": "approve", "outdated": false}
+  ],
+  "approvals": 1,
   "tickets": [{"url": "...", "closes": true}],
   "labels": [],
   "changed_files": 2,
@@ -497,7 +505,14 @@ comment with `meta.routing == "suppress"` as a status notice.
 Git at request time (`""` when the branch is gone); a merged pull request's
 `head_sha` is the head it merged (`merge_sha`, or `upstream.pushed` when merged
 on the upstream host). `reviewers` are the pending review
-requests: a member leaves it by submitting a review and is back on a new request. `ready_at` is the last time
+requests: a member leaves it by submitting a review and is back on a new request.
+`review_states` is where every member who was asked or reviewed stands, in the
+order they joined the review (the reviewer badges of the GUI draw it):
+`requested` is an open request, `verdict` the verdict of their last review
+(`null` before any), and `outdated` whether that review is on a commit other
+than `head_sha`. The author is never in it. `approvals` counts the states not
+`requested` whose verdict is `approve` and not `outdated`; a merge and a
+publish need the repository's `required_approvals` of them. `ready_at` is the last time
 the pull request was marked ready for review. `upstream` is set once the pull
 request was published (see "Upstream").
 
@@ -541,8 +556,10 @@ request was published (see "Upstream").
 - `POST .../pulls/{number}/comments` `{"body","meta"?}` → `201` comment; `GET` → items.
 - `POST .../pulls/{number}/reviews` `{"verdict": "approve"|"request_changes"|"comment", "body", "commit"}`
   → `201 {"id","verdict","commit","submitted_at","url"}`; `409 head_moved` when
-  `commit` is not the current head. `body` may be empty. Reviews inform; a merge does not
-  wait for an approval (only the owner merges). A closed pull request takes no reviews or inline comments
+  `commit` is not the current head. `body` may be empty. The author's own review can
+  only be a `comment` (`400 invalid` otherwise). An `approve` on the current head
+  counts toward the approvals a merge and a publish need (`review_states`).
+  A closed pull request takes no reviews or inline comments
   (`409 conflict`). A review removes its author from `reviewers` (the request is
   answered). `GET` → items of review.
 - `POST .../pulls/{number}/inline-comments`
@@ -570,7 +587,9 @@ request was published (see "Upstream").
 - `POST .../pulls/{number}/merge` (owner)
   `{"expected_head": "<sha>", "expected_base": "<sha>"}` → pull request. Fast-forward only:
   the head must contain the base. Refused (`409`) when the head or base moved,
-  or required checks did not succeed on the head. No approval is needed.
+  or required checks did not succeed on the head. Fewer `approvals` than the
+  repository's `required_approvals` is `409 not_mergeable` too (`Approvals of
+  <head>: 1 / 2 required.`).
   A draft, a closed pull request, or a head that adds nothing to the base is
   `409 not_mergeable` too. A repository with an upstream merges there:
   `409 not_mergeable`, publish instead.

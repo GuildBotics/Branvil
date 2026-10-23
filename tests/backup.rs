@@ -260,14 +260,14 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     );
     assert!(text(&out).contains(&serves), "{}", text(&out));
 
-    // A backup of the previous schema version: what version 11 wrote.
+    // A backup of the previous schema version: what version 12 wrote.
     let previous = out_dir.path().join("previous");
     copy_backup(&backup, &previous, &manifest);
     let db = previous.join("branvil.redb");
-    as_schema_11(&db);
+    as_schema_12(&db);
     let bytes = std::fs::read(&db).unwrap();
     let mut old = manifest.clone();
-    old["schema_version"] = json!(11);
+    old["schema_version"] = json!(12);
     for f in old["files"].as_array_mut().unwrap() {
         if f["path"] == "branvil.redb" {
             f["bytes"] = json!(bytes.len());
@@ -301,12 +301,12 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         text(&out)
     );
     assert!(
-        text(&out).contains("from schema version 11 to 12"),
+        text(&out).contains("from schema version 12 to 13"),
         "{}",
         text(&out)
     );
     assert!(
-        text(&out).contains("member(s) got no reviewers"),
+        text(&out).contains("repository(ies) need 1 approval"),
         "{}",
         text(&out)
     );
@@ -383,13 +383,11 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     // The ticket comment made after the backup is not there.
     let tc = r.ok(&format!("{one}/comments"), &w.aiko).await;
     assert!(tc["items"].as_array().unwrap().is_empty());
-    // The account and the upstream are there (every member with no
-    // reviewers, as the upgrade left them); the token must be set again.
+    // The account and the upstream are there (the repository needing one
+    // approval, as the upgrade left it); the token must be set again.
     let members = r.ok("/members?limit=100", &owner).await;
     assert!(members.to_string().contains("alice-gh"), "{members}");
-    for m in members["items"].as_array().unwrap() {
-        assert_eq!(m["reviewers"], json!([]), "{m}");
-    }
+    assert_eq!(r.ok(&w.repo_path(), &owner).await["required_approvals"], 1);
     let (st, v) = r
         .post(
             &format!("/repos/{}/upstream/refresh", encode(REPO)),
