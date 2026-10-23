@@ -512,9 +512,10 @@ requests: a member leaves it by submitting a review and is back on a new request
 `review_states` is where every member who was asked or reviewed stands (the
 reviewer badges of the GUI draw it): first the members who reviewed, in the
 order of their first review, then those asked who have not reviewed:
-`requested` is an open request, `verdict` the verdict of their last review
-(`null` before any), and `outdated` whether that review is on a commit other
-than `head_sha`. The author is never in it. `approvals` counts the states not
+`requested` is an open request, `verdict` the verdict of their last
+`approve` or `request_changes` (a `comment` says neither and keeps it), or
+`comment` while they only commented (`null` before any review), and `outdated`
+whether that review is on a commit other than `head_sha`. The author is never in it. `approvals` counts the states not
 `requested` whose verdict is `approve` and not `outdated`; a merge and a
 publish need the repository's `required_approvals` of them. `ready_at` is the last time
 the pull request was marked ready for review. `upstream` is set once the pull

@@ -123,8 +123,9 @@ and repositories, settings and upstreams, members and their accounts, backups,
 merging, publishing, and marking a draft pull request ready are the owner's. A
 merge or a publish needs the repository's required checks on the head and its
 required approvals (Settings → Repositories → a repository → CI; 1 unless
-changed, 0 needs none): members other than the author whose last review
-approves the current head and who were not asked to review again since. The
+changed, 0 needs none): members other than the author whose last approve or
+request changes approves the current head (a comment keeps it) and who were
+not asked to review again since. The
 author can only comment on their own pull request. With **Land automatically**
 on the same tab, the repository merges (or, with an upstream, publishes once)
 by itself an open pull request that is not a draft as soon as it meets them;

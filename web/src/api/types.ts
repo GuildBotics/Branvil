@@ -282,7 +282,7 @@ export interface PublishPreview {
 
 export type Verdict = "approve" | "request_changes" | "comment";
 
-/** A member's part in a pull request's review: an open request, and the verdict of their last review. */
+/** A member's part in a pull request's review: an open request, and their verdict (a comment keeps an earlier one). */
 export interface ReviewState {
   member: string;
   requested: boolean;

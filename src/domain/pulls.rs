@@ -111,7 +111,8 @@ pub struct ReviewState {
     pub member: String,
     /// Asked to review and not answered since.
     pub requested: bool,
-    /// The verdict of the member's last review; `None` before any.
+    /// The verdict of the member's last approve or request_changes, or
+    /// `comment` while they only commented; `None` before any review.
     pub verdict: Option<String>,
     /// That review is on a commit other than the current head.
     pub outdated: bool,
@@ -127,8 +128,9 @@ impl ReviewState {
 /// Every member's review state, the one place it is decided: the members
 /// who reviewed, in the order of their first review, then those asked who
 /// have not reviewed. `reviews` are in the order they were submitted
-/// (a thread reply is not a review). The author is not a reviewer: their own
-/// reviews (only comments can be submitted) count for nothing.
+/// (a thread reply is not a review). A comment says neither yes nor no, so it
+/// keeps an earlier verdict. The author is not a reviewer: their own reviews
+/// (only comments can be submitted) count for nothing.
 fn review_states(p: &Pull, reviews: &[Review], head: &str) -> Vec<ReviewState> {
     fn entry<'a>(states: &'a mut Vec<ReviewState>, name: &str) -> &'a mut ReviewState {
         let i = states
@@ -151,6 +153,9 @@ fn review_states(p: &Pull, reviews: &[Review], head: &str) -> Vec<ReviewState> {
         .filter(|x| fold(&x.author) != fold(&p.author))
     {
         let s = entry(&mut states, &x.author);
+        if x.verdict == "comment" && s.verdict.as_deref().is_some_and(|v| v != "comment") {
+            continue;
+        }
         s.verdict = Some(x.verdict.clone());
         s.outdated = x.commit != head;
     }
