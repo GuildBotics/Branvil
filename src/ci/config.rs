@@ -28,6 +28,9 @@ pub struct CiConfig {
     /// Queued attempts conclude `startup_failure` when no runner has
     /// contacted the service for this long.
     pub runner_absent_secs: u64,
+    /// How long a stopping service (SIGTERM) waits for the running jobs to
+    /// finish; the ones still running then are queued again in their place.
+    pub stop_wait_secs: u64,
     /// Log size kept per attempt, in MiB.
     pub log_max_mib: u64,
     /// Size of one artifact, in MiB.
@@ -45,6 +48,7 @@ impl Default for CiConfig {
             queue_max: 256,
             lease_secs: 60,
             runner_absent_secs: 120,
+            stop_wait_secs: 3600,
             log_max_mib: 16,
             artifact_max_mib: 64,
             retention_days: 30,

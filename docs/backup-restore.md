@@ -232,14 +232,22 @@ check did not succeed, the commit goes to `builds/attempted`. An update:
    `admin check` on that copy, which is then removed;
 5. records the update in `builds/update`;
 6. `scripts/serve.sh` names the new build in `builds/current`, stops the
-   service, and goes on as the checkout's (possibly new) `scripts/serve.sh`;
+   service, and goes on as the checkout's (possibly new) `scripts/serve.sh`.
+   It stops the service with TERM, as whenever `builds/current` names another
+   build: the service first gives out no new CI job and waits until the
+   running ones finish, at most `ci.stop_wait_secs` (an hour by default;
+   `docs/ci.md`, "Stopping the service"), still serving; the jobs queued
+   meanwhile run after the new build starts. A job still running then is
+   interrupted and queued again in its place, ahead of them, and the service
+   exits with status 3, which is notified;
 7. it starts the new build as above, and the update is done when that is
    ready. Failure is only the new build exiting: a start that takes long is
    waited for (after 30 minutes a notification says so, once). Then
    `builds/` keeps the new build and the one it replaced.
 
-Steps 1 to 5 run while the old build serves, so the service is down only from
-step 6 until the new build is ready. In that time, `admin check` works
+Steps 1 to 5, and the wait for the running CI jobs in step 6, run while the
+old build serves, so the service is down only from the end of that wait until
+the new build is ready. In that time, `admin check` works
 through the database only when it is marked, that is when the update's
 upgrade changed it (or an earlier one did and no check has passed since);
 when the schema does not change, nothing in that time works through the data,
@@ -257,9 +265,9 @@ the disk, and renamed. Write them by hand the same way, for instance
 | `builds/update` | An update in flight: `<new> <previous> [<failed step>]`. |
 | `builds/attempted` | The last commit an update gave up on; not tried again until `main` moves on. |
 | `builds/notified` | The last failure notified (so it is notified once). |
-| `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line). |
+| `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line, and `branvil stopping: …` while a stop waits for its running CI jobs). |
 | `builds/rehearsal`, `builds/*.new`, `builds/*.tmp`, `<data>/branvil-schema-*.redb.partial` | Left only by something cut off; removed at the next start. |
-| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's required checks; recorded in `builds/attempted` but not notified), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. |
+| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's required checks; recorded in `builds/attempted` but not notified), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. A stop that waited for running CI jobs logs "branvil serve of … stopped N seconds after TERM; it waited for its running CI jobs"; one that had to interrupt jobs logs and notifies "branvil serve of … stopped while CI jobs still ran". |
 
 **The state.**
 
@@ -281,8 +289,11 @@ once.
 took effect. Write files as above, never with a plain `>`.
 
 - Start, restart, stop the agent. A restart also checks for an update at once
-  and applies changes to `scripts/serve.sh`. During an update a stop or restart
-  stops the service and waits for the update's running step; a step longer
+  and applies changes to `scripts/serve.sh`. A stop or restart stops the
+  service at once (INT), also while it waits for its running CI jobs: the
+  automatic runner's jobs are interrupted, and queued again in their place,
+  at the service's next start. During an update it also
+  waits for the update's running step; a step longer
   than the agent's `ExitTimeOut` (120 seconds, a build for instance) is killed
   then, and the next round runs that update again.
 

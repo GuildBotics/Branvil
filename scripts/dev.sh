@@ -50,9 +50,10 @@ done
 
 startup_log=
 server_pid=
+# INT: the server stops at once (TERM would wait for its running CI jobs).
 cleanup() {
   if [[ -n "$server_pid" ]]; then
-    kill -TERM "$server_pid" 2>/dev/null || true
+    kill -INT "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
   fi
   if [[ -n "$startup_log" ]]; then rm -f "$startup_log"; fi

@@ -191,14 +191,37 @@ Leases and interruptions:
 - An expired lease (the runner died, lost the service, or the service was
   down) **interrupts** the attempt: it is concluded `cancelled` with the
   details "Interrupted: …", and, the first time for that job and only when it
-  was neither cancelled nor superseded, a new attempt is queued. A second
-  interruption is final ("Interrupted twice …; retry the job").
+  was neither cancelled nor superseded, a new attempt is queued in the place
+  the interrupted one had in the queue, ahead of the jobs queued after it. A
+  second interruption is final ("Interrupted twice …; retry the job").
 - A restart of the service is handled the same way: leases are stored, so a
-  runner that keeps working through a short restart keeps its attempt, and
-  attempts whose lease ran out while the service was down are interrupted by
-  the first sweep after start.
+  runner on another machine that keeps working through a short restart keeps
+  its attempt, and attempts whose lease ran out while the service was down
+  are interrupted by the first sweep after start. The automatic runner
+  (`ci.runner = "auto"`) stops with the service: the attempts it held are
+  interrupted, and queued again in their place, as soon as its next process
+  starts, before that one claims anything.
 - A runner that cannot renew its lease before it expires stops the job and
   reports nothing.
+
+Stopping the service:
+
+- SIGTERM (what `scripts/serve.sh` sends to switch builds, an update for
+  instance) stops CI first: the service gives out no job to any runner and
+  waits until no job runs, at most `ci.stop_wait_secs` (default 3600 s, the
+  default job time limit), while it serves everything else, the runners'
+  heartbeats, logs, and results among it. Jobs queued meanwhile wait and run
+  after the next start. The diagnostics' and the CI settings' runner state is
+  `stopping` meanwhile, and the GUI shows the owner a warning on every page; the
+  service's log says how many jobs it waits for, and its standard output says
+  `branvil stopping: waiting for …` (which `scripts/serve.sh` reads).
+- A job still running when that time is up is interrupted ("Interrupted:
+  Branvil stopped …; queued again in its place") and queued again in its place,
+  so the next start runs it before the jobs queued after it (one already
+  interrupted once ends for good, as above); the service then exits with
+  status 3, which `scripts/serve.sh` notifies.
+- SIGINT (Ctrl-C), also during that wait, stops at once; the running jobs are
+  interrupted as in a restart above.
 
 No runner, no executor:
 
@@ -225,6 +248,7 @@ definition (the pipeline is not read again).
 | artifacts per attempt (before zipping) | 64 MiB (`ci.executor.artifacts_max_mib`) | runner side |
 | job cpus / memory | 4 / 4096 MiB (`ci.executor.max_cpus`, `max_memory_mib`) | every job runs with these |
 | jobs at once | 1 (`ci.executor.max_jobs`) | per runner; the runner claims a job only when it can start it, so the others wait in the service's queue. Jobs at once use that many times the CPUs and memory, and the disk of that many work directories (each with its restored cache, and a copy of it in the cache while it is saved) |
+| stop wait | 3600 s (`ci.stop_wait_secs`) | how long a stopping service waits for its running jobs ("Stopping the service" above) |
 | job time limit | 3600 s (`ci.executor.max_timeout_secs`) | the limit of a job that gives no `timeout_secs`; a larger `timeout_secs` is lowered to it, and the log says so |
 | dependency cache | 2048 MiB (`ci.executor.cache_max_mib`) | least recently used entries are removed |
 | retention | 30 days (`ci.retention_days`) | logs and artifacts of attempts finished earlier are deleted; the attempt records stay |

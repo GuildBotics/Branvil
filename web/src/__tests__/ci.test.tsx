@@ -281,6 +281,15 @@ describe("CI settings", () => {
     await waitFor(() => expect(within(screen.getByRole("region", { name: "Runner" })).getByText("Ready")).toBeInTheDocument(), { timeout: 5000 });
   }, 15_000);
 
+  it("shows that the service waits for the running jobs before it stops", async () => {
+    const stopping = { ...CI, runner: { ...CI.runner, state: "stopping", detail: "Branvil is stopping (an update or a restart)." } };
+    fakeApi({ ...SHELL, "GET /api/v1/admin/ci": json(200, stopping) });
+    renderApp("/-/settings/ci");
+    const runner = await screen.findByRole("region", { name: "Runner" });
+    expect(within(runner).getByText("Stopping")).toBeInTheDocument();
+    expect(within(runner).getByText("Branvil is stopping (an update or a restart).")).toBeInTheDocument();
+  });
+
   it("is not offered to members other than the owner", async () => {
     const fake = fakeApi({
       ...SHELL,

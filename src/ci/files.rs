@@ -185,7 +185,7 @@ pub fn artifact_attempt(
     Ok(queue::attempts_of(r, repo, sha)?
         .into_iter()
         .filter(|a| !a.files_pruned && a.artifacts.iter().any(|x| x.name == name))
-        .max_by(|a, b| a.seq.cmp(&b.seq)))
+        .max_by(|a, b| (&a.created_at, a.seq).cmp(&(&b.created_at, b.seq))))
 }
 
 #[cfg(test)]

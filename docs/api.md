@@ -727,7 +727,8 @@ kind `runner` (created by `branvil runner register`); any other member gets
 `artifacts`), never in the URL.
 
 - `POST /claim` `{"executor": "microsandbox", "executor_state": "ready"|"unavailable", "executor_detail"?: "..."}`
-  → `204` (nothing queued) or
+  → `204` (nothing queued, or the service is stopping: see "Stopping the
+  service" in `docs/ci.md`) or
   `{"attempt_id","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false,"queued_secs"}`.
   `timeout_secs` is `null` when the pipeline gives none; the runner applies its
   own CPUs, memory, and time limit. `cache_scope` is `protected` for a run a
@@ -999,8 +1000,10 @@ runner's (`[ci.microsandbox] home`).
   of two snapshots is the histogram of the requests in between
   (`docs/performance.md`). `runner.state` is
   `ready`, `no_runner` (no runner contacted the service within
-  `ci.runner_absent_secs`), or `executor_unavailable` (the runners report their
-  executor unusable; `detail` says why); `mode` is the `[ci] runner` setting. `upstream` is `{"state": "not_configured"}` without
+  `ci.runner_absent_secs`), `executor_unavailable` (the runners report their
+  executor unusable; `detail` says why), or `stopping` (the service got
+  SIGTERM: it gives out no job and waits for the running ones, `detail` says
+  until when; `docs/ci.md`); `mode` is the `[ci] runner` setting. `upstream` is `{"state": "not_configured"}` without
   repositories that have an upstream, otherwise
 
   ```json
