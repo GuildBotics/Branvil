@@ -286,6 +286,8 @@ pub struct ClaimView {
     pub job: JobDef,
     pub cache_scope: String,
     pub network: bool,
+    /// How long the attempt waited in the queue, in seconds.
+    pub queued_secs: u64,
 }
 
 async fn claim(State(app): State<Shared>, c: Caller, body: axum::body::Bytes) -> R {
@@ -305,11 +307,12 @@ async fn claim(State(app): State<Shared>, c: Caller, body: axum::body::Bytes) ->
     let (runner, lease_secs, now) = (
         c.name().to_string(),
         app.ci.config().lease_secs,
-        util::now(),
+        chrono::Utc::now(),
     );
+    let at = util::format_time(now);
     let claimed = app
         .store
-        .write(move |w| queue::claim(w, &runner, lease_secs, &now))
+        .write(move |w| queue::claim(w, &runner, lease_secs, &at))
         .await?;
     let Some(cl) = claimed else {
         return Ok(StatusCode::NO_CONTENT.into_response());
@@ -327,6 +330,8 @@ async fn claim(State(app): State<Shared>, c: Caller, body: axum::body::Bytes) ->
         job: a.job.clone(),
         cache_scope: a.cache_scope.clone(),
         network: a.network,
+        queued_secs: chrono::DateTime::parse_from_rfc3339(&a.created_at)
+            .map_or(0, |t| (now - t.to_utc()).num_seconds().max(0) as u64),
     }))
 }
 

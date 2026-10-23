@@ -448,6 +448,40 @@ every job gets (`ci.executor.max_memory_mib`). These runs predate jobs getting a
 Git checkout at `/work`, a non-root user, and `/tmp` on a disk volume of their
 own (`docs/ci.md`, "The job's environment"), and the harness's fourth job (a
 Git image, run twice) that came with them; they were not measured again. Not
-measured yet: a release build of the runner, other images,
-jobs with real workloads, Linux and Windows hosts, and the service's own CPU
-and memory during CI.
+measured yet: a release build of the runner, other images, Linux and Windows
+hosts, and the service's own CPU and memory during CI.
+
+### Branvil's own pipeline
+
+The six jobs of `.branvil/ci.toml` on the same machine, read from the lines
+the runner writes in each job's log (`docs/ci.md`, "The runner"), on
+2026-10-23: a throwaway service and one runner (debug build, `max_cpus` 4,
+`max_memory_mib` 6144, one job at a time), the image
+`guildbotics/agent-environment:dev`, the repository's network allowed. **Cold**
+is `fe6defc` on the default branch with an empty cache; **warm** is the next
+commit, `8a40595`, as the head of a pull request, restoring the protected
+branches' entries the cold run saved.
+
+| Job | Commands, cold | Commands, warm | Cache restore, warm | Cache save, warm | Peak memory (cold / warm) |
+| --- | --- | --- | --- | --- | --- |
+| fmt | 0.7 s | 0.7 s | — | — | 557 / 560 MiB |
+| clippy | 67.0 s | 8.2 s | 2.4 s (485 MB) | 3.1 s | 2111 / 1813 MiB |
+| test | 162.7 s | 93.9 s | 2.3 s (999 MB) | 4.3 s | 2695 / 3104 MiB |
+| web | 71.7 s | 58.5 s | 0.2 s (48 MB) | 1.9 s | 1699 / 2138 MiB |
+| dev-script | 332.0 s | 333.9 s | — | — | 599 / 596 MiB |
+| branvil-integration | 168.5 s | 58.7 s | 5.2 s (1228 MB) | 8.8 s | 2196 / 2004 MiB |
+
+Every job: the source fetched in 16–46 ms (a bundle of 0.9 MB), checked out
+in 76–127 ms, its sandbox started in 252–553 ms and removed in 40–66 ms.
+
+- One commit takes 821 s cold and 588 s warm from the first job's start to
+  the last one's end, the jobs one after another. `dev-script` is more than
+  half of the warm run, and its time is the tests' own (`Ran 76 tests in
+  333.686s`).
+- What the runner adds (source, checkout, sandbox start and removal, cache
+  restore and save) is about 30 s of the warm run (5 %). In the warm `test`,
+  Cargo compiles the branvil crate for 53.5 s of the 93.9 s (the pipeline
+  rebuilds it on purpose, `.branvil/ci.toml`).
+- A job's peak memory is what the guest touched: about 560 MiB for a VM that
+  only boots and runs a shell command, and up to about 3.1 GiB for `test`,
+  below the 6 GiB every job gets.

@@ -520,7 +520,8 @@ const MARKER: &[u8] = b"\x1ebranvil:started\n";
 /// (the startup time is noted in its place); everything else goes to the log.
 struct JobLog<'a> {
     started_at: Instant,
-    started: bool,
+    /// When the commands started (the marker arrived).
+    started: Option<Instant>,
     pending: Vec<u8>,
     log: &'a mpsc::Sender<Vec<u8>>,
 }
@@ -539,13 +540,13 @@ impl JobLog<'_> {
     }
 
     async fn feed(&mut self, bytes: &[u8]) {
-        if self.started {
+        if self.started.is_some() {
             let _ = self.log.send(bytes.to_vec()).await;
             return;
         }
         self.pending.extend_from_slice(bytes);
         if let Some(pos) = self.pending.windows(MARKER.len()).position(|w| w == MARKER) {
-            self.started = true;
+            self.started = Some(Instant::now());
             if pos > 0 {
                 let _ = self.log.send(self.pending[..pos].to_vec()).await;
             }
@@ -684,7 +685,7 @@ impl Executor for Microsandbox {
             .stderr(Stdio::piped());
         let mut job_log = JobLog {
             started_at: Instant::now(),
-            started: false,
+            started: None,
             pending: Vec::new(),
             log: &log,
         };
@@ -709,6 +710,12 @@ impl Executor for Microsandbox {
         let deadline = tokio::time::sleep(Duration::from_secs(job.timeout_secs));
         tokio::pin!(deadline);
         let mut tail = tokio::time::interval(Duration::from_millis(50));
+        // The host memory of `msb run` and its VM, sampled every second:
+        // the VM's grows with what the guest touches and does not shrink,
+        // so the last samples hold the peak.
+        let mut memory = tokio::time::interval(Duration::from_secs(1));
+        let pid = child.id();
+        let mut peak_kib = 0;
         let mut out_open = true;
         let mut err_open = true;
         let mut stop: Option<Outcome> = None;
@@ -717,8 +724,13 @@ impl Executor for Microsandbox {
                 _ = tail.tick() => {
                     job_log.read_from(&mut output).await;
                     // The commands run in the VM: msb has picked the image.
-                    if job_log.started {
+                    if job_log.started.is_some() {
                         drop(image_lock.take());
+                    }
+                }
+                _ = memory.tick() => {
+                    if let Some(kib) = tree_rss_kib(pid).await {
+                        peak_kib = peak_kib.max(kib);
                     }
                 }
                 // msb's own words (the job's output is in the log file).
@@ -763,7 +775,7 @@ impl Executor for Microsandbox {
                 Ok(status) => {
                     // Everything the job wrote is in the file once it ended.
                     job_log.read_from(&mut output).await;
-                    if job_log.started {
+                    if job_log.started.is_some() {
                         Outcome::Exited(status.code().unwrap_or(-1))
                     } else {
                         Outcome::StartupFailure(format!(
@@ -779,6 +791,21 @@ impl Executor for Microsandbox {
         job_log.read_from(&mut output).await;
         job_log.flush().await;
         err_reader.abort();
+        if let Some(at) = job_log.started {
+            let note = format!(
+                "[branvil] commands ran for {} ms\n",
+                at.elapsed().as_millis()
+            );
+            let _ = log.send(note.into_bytes()).await;
+        }
+        if peak_kib > 0 {
+            let note = format!(
+                "[branvil] peak memory of msb run and its VM: {} MiB\n",
+                peak_kib.div_ceil(1024)
+            );
+            let _ = log.send(note.into_bytes()).await;
+        }
+        let removing = Instant::now();
         // By label and from the list: one that never came to be is not an
         // error.
         let label = format!("branvil.job={}", job.attempt_id);
@@ -790,6 +817,11 @@ impl Executor for Microsandbox {
         // The volume outlives its sandbox (msb refuses to remove it while a
         // running sandbox has it).
         self.remove_volumes(|n| n == tmp).await;
+        let note = format!(
+            "[branvil] sandbox removed in {} ms\n",
+            removing.elapsed().as_millis()
+        );
+        let _ = log.send(note.into_bytes()).await;
         outcome
     }
 
@@ -812,6 +844,51 @@ impl Executor for Microsandbox {
     }
 }
 
+/// The resident memory of process `pid` and all its descendants, in KiB,
+/// from `ps` (none when it cannot tell).
+async fn tree_rss_kib(pid: Option<u32>) -> Option<u64> {
+    let out = tokio::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,rss="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    out.status.success().then_some(())?;
+    tree_rss(&String::from_utf8_lossy(&out.stdout), pid?)
+}
+
+/// Sums the `rss` of `root` and its descendants in `pid ppid rss` lines;
+/// none when `root` is not listed.
+fn tree_rss(ps: &str, root: u32) -> Option<u64> {
+    let procs: Vec<[u64; 3]> = ps
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace().map(|v| v.parse::<u64>().ok());
+            Some([f.next()??, f.next()??, f.next()??])
+        })
+        .collect();
+    let mut tree = vec![u64::from(root)];
+    let mut i = 0;
+    while let Some(&p) = tree.get(i) {
+        tree.extend(
+            procs
+                .iter()
+                .filter(|q| q[1] == p && q[0] != p)
+                .map(|q| q[0]),
+        );
+        i += 1;
+    }
+    let listed = procs.iter().any(|q| q[0] == u64::from(root));
+    listed.then(|| {
+        procs
+            .iter()
+            .filter(|q| tree.contains(&q[0]))
+            .map(|q| q[2])
+            .sum()
+    })
+}
+
 fn tail(bytes: &[u8], n: usize) -> String {
     let start = bytes.len().saturating_sub(n);
     String::from_utf8_lossy(&bytes[start..]).trim().to_string()
@@ -820,6 +897,14 @@ fn tail(bytes: &[u8], n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_memory_of_a_job_is_its_process_tree() {
+        let ps = "    1     0  9000\n   40     1   100\n   41    40  2000\n   42    41  3000\n   43     1   700\n  junk\n";
+        assert_eq!(tree_rss(ps, 40), Some(5100));
+        assert_eq!(tree_rss(ps, 42), Some(3000));
+        assert_eq!(tree_rss(ps, 99), None);
+    }
 
     #[test]
     fn the_script_quotes_every_command() {
@@ -919,7 +1004,7 @@ esac
         let cache = |name: &str| Microsandbox::new(Msb::Found(msb.clone()), home.clone(), name);
         let (runner, service) = (cache("t"), cache("service"));
 
-        let (log, _logs) = mpsc::channel(64);
+        let (log, mut logs) = mpsc::channel(64);
         let (digest, image_lock) = runner.resolve_image("img:dev", &log).await.unwrap();
         assert_eq!(digest, Some(a.clone()));
         let loading = tokio::spawn(async move {
@@ -966,6 +1051,20 @@ esac
         assert!(!running.is_finished(), "the job still runs");
         std::fs::write(state.join("done"), "").unwrap();
         assert_eq!(running.await.unwrap(), Outcome::Exited(0));
+        // The log times the commands and the removal, and gives the peak
+        // memory of `msb run` and what it started.
+        let mut text = String::new();
+        while let Ok(bytes) = logs.try_recv() {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        for line in [
+            "[branvil] sandbox started in ",
+            "[branvil] commands ran for ",
+            "[branvil] peak memory of msb run and its VM: ",
+            "[branvil] sandbox removed in ",
+        ] {
+            assert!(text.contains(line), "{line} in {text}");
+        }
         // The job ran as the fixed user, its directories presented as that
         // user's, its /tmp on a disk volume of its own; the volume is removed
         // after the sandbox.
