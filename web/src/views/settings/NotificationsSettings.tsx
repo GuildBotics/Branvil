@@ -9,6 +9,9 @@ import { useT } from "../../i18n";
 import { useWebhook } from "../../query/hooks";
 import { keys } from "../../query/keys";
 
+/** What a secret field shows while one is saved, as in GuildBotics Desktop. */
+const MASKED_SECRET = "••••••••••••";
+
 /** The webhook told of automatic publishes. Its URL is a secret: entered here, never shown again (only its host). */
 export function NotificationsSettings() {
   const t = useT();
@@ -59,6 +62,7 @@ export function NotificationsSettings() {
               <PasswordInput
                 label={t("notifications.url")}
                 description={t("notifications.urlHelp")}
+                placeholder={webhook.data.set ? MASKED_SECRET : undefined}
                 value={url}
                 onChange={(e) => setUrl(e.currentTarget.value)}
                 style={{ flex: 1 }}

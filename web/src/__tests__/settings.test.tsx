@@ -194,17 +194,20 @@ describe("settings", () => {
     await user.click(await screen.findByRole("link", { name: "Notifications" }));
     expect(await screen.findByText("Not set")).toBeInTheDocument();
     const form = screen.getByRole("form", { name: "Webhook URL" });
+    expect(within(form).getByLabelText("Webhook URL")).not.toHaveAttribute("placeholder");
     await user.type(within(form).getByLabelText("Webhook URL"), secret);
     await user.click(within(form).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(fake.calls("PUT", "/api/v1/admin/webhook")).toHaveLength(1));
     expect(fake.calls("PUT", "/api/v1/admin/webhook")[0]?.body).toEqual({ url: secret });
     expect(await screen.findByText("Set (hooks.example.test)")).toBeInTheDocument();
     expect(screen.getByText("The last send failed (retried): the webhook answered 500 Internal Server Error")).toBeInTheDocument();
-    // The URL is gone from the page once saved.
+    // The URL is gone from the page once saved; the field shows that one is saved.
     expect(within(form).getByLabelText("Webhook URL")).toHaveValue("");
+    expect(within(form).getByLabelText("Webhook URL")).toHaveAttribute("placeholder", "••••••••••••");
     expect(document.body.innerHTML).not.toContain("hook-71c2");
     await user.click(screen.getByRole("button", { name: "Remove" }));
     expect(await screen.findByText("Not set")).toBeInTheDocument();
+    expect(within(form).getByLabelText("Webhook URL")).not.toHaveAttribute("placeholder");
     expect(fake.calls("DELETE", "/api/v1/admin/webhook")).toHaveLength(1);
   });
 
