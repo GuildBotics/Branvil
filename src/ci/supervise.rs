@@ -1,7 +1,8 @@
 //! `[ci] runner = "auto"`: `branvil serve` starts one `branvil runner` child
 //! (the same binary, a separate process) and restarts it when it exits. The
 //! mode and the limits the child reads can change while the service runs
-//! (Settings → CI, `settings.rs`). The child authenticates as the runner
+//! (Settings → CI, `settings.rs`): the child reads the limits again before
+//! every claim, so only the mode stops it. The child authenticates as the runner
 //! member `branvil-runner` with a token minted at each start (the previous
 //! automatic token is revoked), passed through the environment, never the
 //! command line.
@@ -10,7 +11,6 @@ use std::time::Duration;
 
 use crate::app::Shared;
 use crate::ci::config::RunnerMode;
-use crate::ci::settings::Desired;
 use crate::domain::members::{NewMember, insert_member};
 use crate::error::{AppError, AppResult};
 use crate::model::{Member, MemberKind};
@@ -46,14 +46,14 @@ async fn mint_token(app: &Shared) -> AppResult<String> {
 }
 
 /// Supervises the runner child for the lifetime of the service: runs one
-/// while the mode is `auto`, stops it when the owner switches the mode off,
-/// and starts it again when the limits it reads change.
+/// while the mode is `auto`, and stops it when the owner switches the mode
+/// off.
 pub fn start(app: Shared, url: String) {
     tokio::spawn(async move {
         let mut desired = app.ci.settings().subscribe();
         let mut backoff = 2;
         loop {
-            if desired.borrow_and_update().mode != RunnerMode::Auto {
+            if *desired.borrow_and_update() != RunnerMode::Auto {
                 if desired.changed().await.is_err() {
                     return;
                 }
@@ -103,7 +103,7 @@ pub fn start(app: Shared, url: String) {
                             if changed.is_err() {
                                 return;
                             }
-                            tracing::info!("CI: the runner settings changed; the automatic runner stopped");
+                            tracing::info!("CI: the runner mode changed; the automatic runner stopped");
                             backoff = 2;
                             continue;
                         }
@@ -122,16 +122,16 @@ pub fn start(app: Shared, url: String) {
     });
 }
 
-/// Waits `secs`, or less when the settings change; false when they never
-/// can any more.
-async fn wait(desired: &mut tokio::sync::watch::Receiver<Desired>, secs: u64) -> bool {
+/// Waits `secs`, or less when the mode changes; false when it never can
+/// any more.
+async fn wait(desired: &mut tokio::sync::watch::Receiver<RunnerMode>, secs: u64) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs(secs)) => true,
         changed = desired.changed() => changed.is_ok(),
     }
 }
 
-/// After the child was killed: the microVM of the job it ran is removed
+/// After the child was killed: the microVMs of the jobs it ran are removed
 /// (the child could not), and the diagnostics stop counting it.
 async fn stopped(app: &Shared) {
     app.ci.forget_runner(AUTO_RUNNER);

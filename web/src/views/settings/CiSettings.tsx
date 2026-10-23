@@ -160,6 +160,7 @@ const LIMIT_FIELDS: { key: keyof CiLimits; label: MessageKey; min: number; max: 
   { key: "max_memory_mib", label: "ci.settings.maxMemory", min: 128, max: 65536 },
   { key: "max_timeout_secs", label: "ci.settings.maxTimeout", min: 1, max: 86400 },
   { key: "cache_max_mib", label: "ci.settings.cacheMax", min: 0, max: 1048576 },
+  { key: "max_jobs", label: "ci.settings.maxJobs", min: 1, max: 64 },
 ];
 
 function Limits({ limits }: { limits: CiLimits }) {
@@ -184,6 +185,7 @@ function Limits({ limits }: { limits: CiLimits }) {
             max_memory_mib: Number(form.max_memory_mib),
             max_timeout_secs: Number(form.max_timeout_secs),
             cache_max_mib: Number(form.cache_max_mib),
+            max_jobs: Number(form.max_jobs),
           });
         }}
       >
