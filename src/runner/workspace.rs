@@ -280,28 +280,29 @@ fn make_parents(root: &Path, rel: &str) -> io::Result<()> {
 }
 
 /// Restores the first cache entry found among `keys` into the work
-/// directory. Returns the key used.
+/// directory. Returns the key used and the bytes copied.
 pub fn restore(
     cache_root: &Path,
     keys: &[String],
     cache: &CacheDef,
     work: &Path,
-) -> io::Result<Option<String>> {
+) -> io::Result<Option<(String, u64)>> {
     for key in keys {
         let entry = cache_root.join(key);
         if !entry.is_dir() {
             continue;
         }
+        let mut total = 0;
         for p in &cache.paths {
             let src = entry.join("paths").join(p.trim_end_matches('/'));
             if fs::symlink_metadata(&src).is_ok() {
                 let rel = p.trim_end_matches('/');
                 make_parents(work, rel)?;
-                copy_tree(&src, &work.join(rel))?;
+                total += copy_tree(&src, &work.join(rel))?;
             }
         }
         record_use(&entry, SystemTime::now())?;
-        return Ok(Some(key.clone()));
+        return Ok(Some((key.clone(), total)));
     }
     Ok(None)
 }
@@ -526,7 +527,7 @@ mod tests {
         );
         assert_eq!(
             restore(&root, std::slice::from_ref(&k1), &cache, &fresh).unwrap(),
-            Some(k1.clone())
+            Some((k1.clone(), 6))
         );
         assert_eq!(
             fs::read_to_string(fresh.join("target/a.o")).unwrap(),
@@ -576,7 +577,7 @@ mod tests {
         save(&root, "z-old", &cache, &work, 100).unwrap();
         assert_eq!(
             restore(&root, &["z-old".into()], &cache, &fresh).unwrap(),
-            Some("z-old".into())
+            Some(("z-old".into(), 6))
         );
         // Fix the restored entry's use time so the test never depends on
         // how far the wall clock advances between restore and save.

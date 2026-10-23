@@ -12,7 +12,7 @@ pub mod zip;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use clap::Subcommand;
@@ -144,6 +144,7 @@ pub struct Claim {
     pub job: JobDef,
     pub cache_scope: String,
     pub network: bool,
+    pub queued_secs: u64,
 }
 
 impl Api {
@@ -216,8 +217,8 @@ impl Api {
         resp.json().await.map(Some).map_err(Self::net)
     }
 
-    /// Writes the commit's Git bundle to `dest`.
-    pub async fn source(&self, c: &Claim, dest: &Path) -> Result<(), ApiError> {
+    /// Writes the commit's Git bundle to `dest`; returns its size.
+    pub async fn source(&self, c: &Claim, dest: &Path) -> Result<u64, ApiError> {
         use tokio::io::AsyncWriteExt;
         let resp = self
             .http
@@ -230,10 +231,13 @@ impl Api {
         let mut resp = Self::check(resp).await?;
         let io = |e: std::io::Error| ApiError::Other(format!("cannot write the source: {e}"));
         let mut file = tokio::fs::File::create(dest).await.map_err(io)?;
+        let mut bytes = 0;
         while let Some(chunk) = resp.chunk().await.map_err(Self::net)? {
             file.write_all(&chunk).await.map_err(io)?;
+            bytes += chunk.len() as u64;
         }
-        file.flush().await.map_err(io)
+        file.flush().await.map_err(io)?;
+        Ok(bytes)
     }
 
     /// Returns whether the service asks the runner to stop.
@@ -608,6 +612,7 @@ impl Runner {
             if c.network { "public only" } else { "off" }
         ))
         .await;
+        say(format!("queued for {} s", c.queued_secs)).await;
         if let Some(t) = job.timeout_secs.filter(|t| *t > max) {
             say(format!(
                 "timeout_secs {t} exceeds the runner limit {max}; using {max}"
@@ -674,8 +679,15 @@ impl Runner {
                 );
             }
             let bundle = dir.join("source.bundle");
+            let fetching = Instant::now();
             match self.api.source(c, &bundle).await {
-                Ok(()) => {
+                Ok(bytes) => {
+                    say(format!(
+                        "source fetched in {} ({bytes} bytes)",
+                        ms(fetching)
+                    ))
+                    .await;
+                    let checking_out = Instant::now();
                     let checked_out =
                         workspace::checkout(&bundle, &work, &root.join("gitconfig")).await;
                     let _ = std::fs::remove_file(&bundle);
@@ -685,6 +697,7 @@ impl Runner {
                             Some(format!("Checking out the source failed: {e}")),
                         );
                     }
+                    say(format!("checked out in {}", ms(checking_out))).await;
                 }
                 Err(ApiError::Lost) => {
                     lost.store(true, Ordering::SeqCst);
@@ -719,11 +732,19 @@ impl Runner {
                 if c.cache_scope != "protected" {
                     keys.push(cache_key(cache, "protected"));
                 }
+                let restoring = Instant::now();
                 match workspace::restore(&cache_root, &keys, cache, &work) {
-                    Ok(Some(k)) if &k == key => say("cache restored".into()).await,
-                    Ok(Some(_)) => {
-                        say("cache restored from the protected branches' cache (read only)".into())
-                            .await
+                    Ok(Some((k, bytes))) => {
+                        let from = if &k == key {
+                            ""
+                        } else {
+                            " from the protected branches' cache (read only)"
+                        };
+                        say(format!(
+                            "cache restored{from} in {} ({bytes} bytes)",
+                            ms(restoring)
+                        ))
+                        .await
                     }
                     Ok(None) => say("no cache entry yet".into()).await,
                     Err(e) => say(format!("cache restore failed: {e}")).await,
@@ -782,7 +803,10 @@ impl Runner {
                     .unwrap_or_default()
             ))
             .await;
-            if matches!(outcome, Outcome::Exited(_) | Outcome::TimedOut) {
+            if matches!(outcome, Outcome::Exited(_) | Outcome::TimedOut)
+                && !job.artifacts.is_empty()
+            {
+                let collecting = Instant::now();
                 let mut budget = self.limits.artifacts_max_mib << 20;
                 for a in &job.artifacts {
                     let mut notes = Vec::new();
@@ -809,10 +833,12 @@ impl Runner {
                         Err(e) => say(format!("artifact {}: {e}", a.name)).await,
                     }
                 }
+                say(format!("artifacts handled in {}", ms(collecting))).await;
             }
             if conclusion == "success"
                 && let (Some(cache), Some(key)) = (&job.cache, &key)
             {
+                let saving = Instant::now();
                 match workspace::save(
                     &cache_root,
                     key,
@@ -822,7 +848,8 @@ impl Runner {
                 ) {
                     Ok(bytes) => {
                         say(format!(
-                            "cache saved ({bytes} bytes, scope {})",
+                            "cache saved in {} ({bytes} bytes, scope {})",
+                            ms(saving),
                             c.cache_scope
                         ))
                         .await
@@ -835,6 +862,11 @@ impl Runner {
         .await;
         (conclusion, details, Some(digest))
     }
+}
+
+/// The time since `since`, for the log.
+fn ms(since: Instant) -> String {
+    format!("{} ms", since.elapsed().as_millis())
 }
 
 /// Renews the lease every third of its length. The service asking to stop,
@@ -1183,12 +1215,27 @@ mod tests {
         let digest = digest_of("alpine");
         assert_eq!(job(&id).await["image_digest"], digest.as_str());
         let (log, _) = app.ci.log_tail(&id, 1 << 20).await.unwrap();
+        let (first, rest) = log.split_once("\n[branvil] queued for ").unwrap();
+        assert_eq!(
+            first,
+            format!(
+                "[branvil] attempt 1 of job ok on acme/demo {sha} (executor fake, image alpine, 3 cpu, 2048 MiB, timeout 100 s, network off)"
+            )
+        );
         assert!(
-            log.starts_with(&format!(
-                "[branvil] attempt 1 of job ok on acme/demo {sha} (executor fake, image alpine, 3 cpu, 2048 MiB, timeout 100 s, network off)\n[branvil] image alpine is {digest}\n"
-            )),
+            rest.split_once(" s\n")
+                .is_some_and(|(secs, rest)| secs.parse::<u64>().is_ok()
+                    && rest.starts_with(&format!("[branvil] image alpine is {digest}\n"))),
             "{log}"
         );
+        // Each step of the runner's own says how long it took.
+        for step in [
+            "[branvil] source fetched in ",
+            "[branvil] checked out in ",
+            "[branvil] artifacts handled in ",
+        ] {
+            assert!(log.contains(step), "{step} in {log}");
+        }
         assert!(log.contains("hello from the job"), "{log}");
         // The work directory is a checkout of the commit with its history
         // and the tags it reaches, and without a remote.

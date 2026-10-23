@@ -390,7 +390,7 @@ async fn jobs_run_in_microvms_without_network_or_host_files() {
     let cached_log = job_log(&w, &cached).await;
     assert_eq!(cached["conclusion"], "success", "{cached}\n{cached_log}");
     assert!(
-        cached_log.contains("[branvil] cache restored\n") && cached_log.contains("cached 1 2\n"),
+        cached_log.contains("[branvil] cache restored in ") && cached_log.contains("cached 1 2\n"),
         "{cached_log}"
     );
 

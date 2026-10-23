@@ -261,6 +261,7 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
     assert_eq!(c["repo"], REPO);
     assert_eq!(c["network"], false);
     assert_eq!(c["cache_scope"], "branch:feature");
+    assert!(c["queued_secs"].is_u64(), "{c}");
     assert_eq!(check(&checks(&w, n).await, "test")["status"], "in_progress");
 
     // The source is a Git bundle made by the service: the head as HEAD,

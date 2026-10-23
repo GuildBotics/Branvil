@@ -683,9 +683,10 @@ kind `runner` (created by `branvil runner register`); any other member gets
 
 - `POST /claim` `{"executor": "microsandbox", "executor_state": "ready"|"unavailable", "executor_detail"?: "..."}`
   → `204` (nothing queued) or
-  `{"attempt_id","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false}`.
+  `{"attempt_id","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false,"queued_secs"}`.
   `timeout_secs` is `null` when the pipeline gives none; the runner applies its
-  own CPUs, memory, and time limit.
+  own CPUs, memory, and time limit. `queued_secs` is how long the attempt
+  waited in the queue (from its registration to this claim).
   The executor state is shown in the diagnostics; a runner whose executor is
   unavailable still claims and concludes `startup_failure`.
 - `GET /attempts/{id}/source` → `application/x-git-bundle`: a v2 Git bundle of
