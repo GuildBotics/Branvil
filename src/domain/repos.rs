@@ -19,6 +19,8 @@ pub struct RepoView {
     pub url: String,
     pub protected_branches: Vec<String>,
     pub required_checks: Vec<String>,
+    pub required_approvals: u64,
+    pub auto_land: bool,
     pub ci_network: bool,
     pub labels: Vec<String>,
     /// The upstream it follows and publishes to, with what the last poll found.
@@ -34,6 +36,8 @@ pub fn repo_view(app: &App, r: &Repo) -> RepoView {
         url: app.repo_url(&r.path),
         protected_branches: r.protected(),
         required_checks: r.required_checks.clone(),
+        required_approvals: r.required_approvals,
+        auto_land: r.auto_land,
         ci_network: r.ci_network,
         labels: r.labels.clone(),
         upstream: crate::upstream::upstream_view(app, r),
@@ -132,6 +136,8 @@ pub async fn create(app: &App, caller: &Caller, input: NewRepo) -> AppResult<Rep
         default_branch,
         protected_branches: Vec::new(),
         required_checks: Vec::new(),
+        required_approvals: 1,
+        auto_land: false,
         ci_network: false,
         labels: input.labels,
         upstream: None,
@@ -172,6 +178,8 @@ pub struct RepoPatch {
     pub revision: u64,
     pub default_branch: Option<String>,
     pub required_checks: Option<Vec<String>>,
+    pub required_approvals: Option<u64>,
+    pub auto_land: Option<bool>,
     pub protected_branches: Option<Vec<String>>,
     pub ci_network: Option<bool>,
     pub labels: Option<Vec<String>>,
@@ -231,6 +239,12 @@ pub async fn update(
             }
             if let Some(c) = patch.required_checks {
                 r.required_checks = c;
+            }
+            if let Some(n) = patch.required_approvals {
+                r.required_approvals = n;
+            }
+            if let Some(a) = patch.auto_land {
+                r.auto_land = a;
             }
             if let Some(p) = patch.protected_branches {
                 r.protected_branches = p;

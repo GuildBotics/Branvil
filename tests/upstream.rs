@@ -10,13 +10,13 @@ use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-const GH: &str = "octo/demo";
+pub(crate) const GH: &str = "octo/demo";
 const OWNER_TOKEN: &str = "gh-owner-4c1d";
 const AIKO_TOKEN: &str = "gh-aiko-9e2b";
 
 /// A world whose `acme/demo` follows `octo/demo` on the stand-in, with the
 /// owner's account set.
-async fn followed() -> (World, FakeGitHub) {
+pub(crate) async fn followed() -> (World, FakeGitHub) {
     let mut w = World::new().await;
     let gh = FakeGitHub::start(&w.dir.path().join("github")).await;
     gh.repository(GH, &w.work);
@@ -44,7 +44,7 @@ async fn followed() -> (World, FakeGitHub) {
     (w, gh)
 }
 
-async fn refresh(w: &World) -> Value {
+pub(crate) async fn refresh(w: &World) -> Value {
     let (st, v) = w
         .server
         .post(
@@ -57,7 +57,7 @@ async fn refresh(w: &World) -> Value {
     v
 }
 
-async fn publish(w: &World, number: u64) -> (StatusCode, Value) {
+pub(crate) async fn publish(w: &World, number: u64) -> (StatusCode, Value) {
     let pull = format!("{}/pulls/{number}", w.repo_path());
     let p = w.server.ok(&pull, &w.owner).await;
     w.server
@@ -84,7 +84,7 @@ fn branvil_tip(w: &World, branch: &str) -> String {
 
 /// Adds a commit to `branch` of the stand-in's repository (someone working on
 /// GitHub directly).
-fn commit_on_github(gh: &FakeGitHub, branch: &str, message: &str) -> String {
+pub(crate) fn commit_on_github(gh: &FakeGitHub, branch: &str, message: &str) -> String {
     let dir = gh.dir(GH);
     let d = dir.to_str().unwrap();
     let parent = gh.tip(GH, branch).unwrap();
@@ -364,6 +364,32 @@ async fn a_pull_request_is_published_as_its_author_and_follows_the_host_to_the_m
         )
         .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+    // An approval the repository asks for is missing, then given.
+    let repo = s.ok(&w.repo_path(), &w.owner).await;
+    let (st, v) = s
+        .patch(
+            &w.repo_path(),
+            &w.owner,
+            json!({"revision": repo["revision"], "required_approvals": 1}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "not_mergeable");
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("0 / 1"),
+        "{v}"
+    );
+    assert_eq!(gh.tip(GH, "ticket/1"), None);
+    let (st, v) = s
+        .post(
+            &format!("{pull}/reviews"),
+            &w.ken,
+            json!({"verdict": "approve", "commit": head}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
     let (st, v) = publish(&w, n).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let number = v["upstream"]["number"].as_u64().unwrap();
@@ -583,7 +609,7 @@ async fn unchanged_resources_are_read_with_conditional_requests() {
     );
 }
 
-async fn with_aiko_account(w: &World) {
+pub(crate) async fn with_aiko_account(w: &World) {
     let (st, v) = w
         .server
         .put(
@@ -597,7 +623,7 @@ async fn with_aiko_account(w: &World) {
 
 /// Sets the stand-in's `branch` of `octo/demo` to `sha` (a branch made there
 /// directly).
-fn branch_on_github(gh: &FakeGitHub, branch: &str, sha: &str) {
+pub(crate) fn branch_on_github(gh: &FakeGitHub, branch: &str, sha: &str) {
     let dir = gh.dir(GH);
     let d = dir.to_str().unwrap();
     git_ok(

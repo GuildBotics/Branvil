@@ -7,7 +7,7 @@ import { ticketRef, type Check } from "../api/types";
 import { ErrorMessage, Loading, Post, PostHead, StateBadge } from "../components/common";
 import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
-import { ReviewersPicker, reviewStates } from "../components/PeoplePicker";
+import { ReviewersPicker } from "../components/PeoplePicker";
 import { useT } from "../i18n";
 import { useMemberKinds, usePull, usePullActivity, usePullFiles, usePullThreads, useRepo, usePeople } from "../query/hooks";
 import { keys } from "../query/keys";
@@ -60,7 +60,6 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
   const state = pr.merged ? "merged" : pr.state;
   const workspace = repo.split("/")[0] as string;
   const fileItems = files.data?.items;
-  const states = reviewStates(pr, activity.data?.reviews ?? []);
 
   return (
     <Stack gap="lg">
@@ -107,7 +106,7 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
         right={
           <ReviewersPicker
             people={people}
-            states={states}
+            states={pr.review_states}
             author={pr.author}
             disabled={pr.state !== "open" || reviewer.isPending}
             onToggle={(name, request) => reviewer.mutate({ name, request })}
@@ -160,9 +159,9 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
 
       {pr.state === "open" &&
         (repository.data?.upstream ? (
-          <PublishCard pull={pr} upstream={repository.data.upstream} requiredChecks={repository.data.required_checks} />
+          <PublishCard pull={pr} repo={repository.data} upstream={repository.data.upstream} />
         ) : repository.data ? (
-          <MergeCard pull={pr} requiredChecks={repository.data.required_checks} />
+          <MergeCard pull={pr} repo={repository.data} />
         ) : null)}
 
       <Group justify="flex-end" gap="xs" component="section" aria-label={t("pull.otherActions")}>

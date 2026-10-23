@@ -24,6 +24,8 @@ pub struct App {
     pub ci: Ci,
     /// The upstream code host: following it and publishing to it.
     pub upstream: crate::upstream::Upstream,
+    /// Landing pull requests automatically, and the webhook told of it.
+    pub autoland: crate::autoland::Autoland,
     /// Signs collection cursors.
     pub cursor_key: Vec<u8>,
     /// Shared with the hook processes this service spawns (through the Git
@@ -136,6 +138,7 @@ impl App {
             events,
             ci,
             upstream: crate::upstream::Upstream::new(&config.upstream),
+            autoland: Default::default(),
             cursor_key,
             hook_secret: crate::util::random_secret::<32>(),
             hook_url,

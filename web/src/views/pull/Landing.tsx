@@ -7,7 +7,7 @@ import { CloudUpload, GitMerge, Pencil, Users } from "lucide-react";
 import { useState } from "react";
 import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
-import type { PullRequest, Upstream } from "../../api/types";
+import type { PullRequest, Repository, Upstream } from "../../api/types";
 import { ErrorMessage, Notice, Refusal, Sha, StateBadge } from "../../components/common";
 import { useT, type Translate } from "../../i18n";
 import { useChecks, usePublishPreview } from "../../query/hooks";
@@ -41,10 +41,22 @@ function RequiredChecks({ checks, missing }: { checks: string[]; missing: string
   );
 }
 
-/** A repository without an upstream merges here (fast-forward). */
-export function MergeCard({ pull, requiredChecks }: { pull: PullRequest; requiredChecks: string[] }) {
+/** The pull request's approvals (the server's count, as check_landable counts them) against those required. */
+function Approvals({ pull, required }: { pull: PullRequest; required: number }) {
   const t = useT();
+  return (
+    <Text size="sm" c={pull.approvals < required ? "var(--color-warning-text)" : undefined}>
+      {required ? t("merge.approvals", { count: pull.approvals, required }) : t("merge.noRequiredApprovals")}
+    </Text>
+  );
+}
+
+/** A repository without an upstream merges here (fast-forward). */
+export function MergeCard({ pull, repo }: { pull: PullRequest; repo: Repository }) {
+  const t = useT();
+  const { required_checks: requiredChecks, required_approvals: requiredApprovals } = repo;
   const missing = useMissingChecks(pull, requiredChecks);
+  const blocked = missing.length > 0 || pull.approvals < requiredApprovals;
   const client = useQueryClient();
   const merge = useMutation({
     mutationFn: () => api.pulls.merge(pull.repository, pull.number, pull.head_sha, pull.base_sha),
@@ -66,14 +78,20 @@ export function MergeCard({ pull, requiredChecks }: { pull: PullRequest; require
         </Text>
         {merge.isError && <Refusal>{refusalOf(t, merge.error, "merge.notMergeable")}</Refusal>}
         {merge.isSuccess && <Notice>{t("merge.done")}</Notice>}
+        {repo.auto_land && (
+          <Text size="sm" c="dimmed">
+            {t("merge.auto")}
+          </Text>
+        )}
         {pull.draft && (
           <Text size="sm" c="dimmed">
             {t("merge.draft")}
           </Text>
         )}
         <RequiredChecks checks={requiredChecks} missing={missing} />
+        <Approvals pull={pull} required={requiredApprovals} />
         <Group justify="flex-end">
-          <Button leftSection={<GitMerge size={16} />} disabled={merge.isPending || pull.draft || !pull.head_sha || !pull.base_sha || missing.length > 0} onClick={() => merge.mutate()}>
+          <Button leftSection={<GitMerge size={16} />} disabled={merge.isPending || pull.draft || !pull.head_sha || !pull.base_sha || blocked} onClick={() => merge.mutate()}>
             {merge.isPending ? t("merge.merging") : t("merge.submit")}
           </Button>
         </Group>
@@ -103,6 +121,11 @@ function PublishedState({ pull }: { pull: PullRequest }) {
         <Text size="xs" c="dimmed">
           {t("publish.as", { account: x.account })}
         </Text>
+        {x.auto && (
+          <Text size="xs" c="dimmed">
+            {t("publish.automatically")}
+          </Text>
+        )}
       </Group>
       {x.stopped && <Refusal>{t("publish.stopped", { reason: x.stopped })}</Refusal>}
       {x.error && (
@@ -119,9 +142,11 @@ function PublishedState({ pull }: { pull: PullRequest }) {
  * this says why, shows exactly what publishing posts there and as whom, and
  * publishes.
  */
-export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequest; upstream: Upstream; requiredChecks: string[] }) {
+export function PublishCard({ pull, repo, upstream }: { pull: PullRequest; repo: Repository; upstream: Upstream }) {
   const t = useT();
+  const { required_checks: requiredChecks, required_approvals: requiredApprovals } = repo;
   const missing = useMissingChecks(pull, requiredChecks);
+  const blocked = missing.length > 0 || pull.approvals < requiredApprovals;
   const client = useQueryClient();
   const host = upstream.host;
   const [editing, setEditing] = useState(false);
@@ -173,12 +198,22 @@ export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequ
           ) : null)}
         {editing && <TitleBodyEditor pull={pull} host={host} onDone={() => setEditing(false)} />}
         {publish.isError && <Refusal>{refusalOf(t, publish.error, "publish.notReady")}</Refusal>}
+        {!published && repo.auto_land && (
+          <Text size="sm" c="dimmed">
+            {t("publish.auto", { host })}
+          </Text>
+        )}
         {!published && pull.draft && (
           <Text size="sm" c="dimmed">
             {t("publish.draft")}
           </Text>
         )}
-        {!published && <RequiredChecks checks={requiredChecks} missing={missing} />}
+        {!published && (
+          <>
+            <RequiredChecks checks={requiredChecks} missing={missing} />
+            <Approvals pull={pull} required={requiredApprovals} />
+          </>
+        )}
         {!editing && (
           <Group justify="space-between">
             <Button size="xs" variant="default" leftSection={<Pencil size={14} />} onClick={() => setEditing(true)}>
@@ -187,7 +222,7 @@ export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequ
             {!published && (
               <Button
                 leftSection={<CloudUpload size={16} />}
-                disabled={publish.isPending || pull.draft || !pull.head_sha || !pull.base_sha || missing.length > 0 || (p !== undefined && p.login === null)}
+                disabled={publish.isPending || pull.draft || !pull.head_sha || !pull.base_sha || blocked || (p !== undefined && p.login === null)}
                 onClick={() => (!again || window.confirm(t("publish.confirmAgain", { host }))) && publish.mutate()}
               >
                 {publish.isPending ? t("publish.publishing") : t(again ? "publish.again" : "publish.submit", { host })}

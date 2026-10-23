@@ -13,7 +13,7 @@ const IMAGE: &str = "docker.io/library/alpine:3.22";
 /// The configuration digest the scripted runner reports for the image.
 const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
-fn pipeline(jobs: &[&str]) -> String {
+pub(crate) fn pipeline(jobs: &[&str]) -> String {
     let mut s = String::new();
     for j in jobs {
         s.push_str(&format!(
@@ -24,14 +24,14 @@ fn pipeline(jobs: &[&str]) -> String {
 }
 
 /// A scripted runner talking to the runner API.
-struct Runner {
+pub(crate) struct Runner {
     url: String,
     token: String,
     http: reqwest::Client,
 }
 
 impl Runner {
-    async fn new(w: &World, name: &str) -> Runner {
+    pub(crate) async fn new(w: &World, name: &str) -> Runner {
         Runner {
             url: w.server.url.clone(),
             token: w.server.member(&w.owner, name, "runner").await,
@@ -115,7 +115,7 @@ impl Runner {
     }
 
     /// Claims every queued attempt and finishes it with `conclusion`.
-    async fn drain(&self, conclusion: &str) -> usize {
+    pub(crate) async fn drain(&self, conclusion: &str) -> usize {
         let mut n = 0;
         while let Some(c) = self.claim().await {
             assert_eq!(self.finish(&c, conclusion).await.0, 200);
@@ -126,7 +126,7 @@ impl Runner {
 }
 
 /// Brings the work clone's main to the service's main.
-fn sync_main(w: &World) {
+pub(crate) fn sync_main(w: &World) {
     git_as_ok(&w.work, "alice", &w.owner, &["fetch", "-q", "origin"]);
     git_ok(&w.work, &["checkout", "-q", "-B", "main", "origin/main"]);
 }
@@ -192,7 +192,7 @@ fn check<'a>(v: &'a Value, name: &str) -> &'a Value {
 }
 
 /// Polls `f` until it returns true (the service sweeps every 5 s).
-async fn eventually<F, Fut>(what: &str, mut f: F)
+pub(crate) async fn eventually<F, Fut>(what: &str, mut f: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,

@@ -354,7 +354,9 @@ pub fn encode(path: &str) -> String {
 }
 
 /// A seeded service: the workspace `acme` with `acme/demo`, which has an
-/// initial `main` and the labels `bug`, `feature`, `docs`, `ui`, and members:
+/// initial `main` and the labels `bug`, `feature`, `docs`, `ui`, and needs no
+/// approval for a merge or a publish (the tests of approvals ask for them),
+/// and members:
 /// - `alice` the owner (from init)
 /// - `ken` and `aiko`, agents
 pub struct World {
@@ -388,6 +390,17 @@ impl World {
             .await
             .0,
             StatusCode::CREATED
+        );
+        let repo = format!("/repos/{}", encode(REPO));
+        assert_eq!(
+            s.patch(
+                &repo,
+                &owner,
+                json!({"revision": 1, "required_approvals": 0})
+            )
+            .await
+            .0,
+            StatusCode::OK
         );
         let mut tokens = Vec::new();
         for name in ["ken", "aiko"] {
@@ -554,14 +567,22 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Makes the database file `db` (the service stopped) look as schema
-/// version 11 wrote it: no member has reviewers.
-pub fn as_schema_11(db: &Path) {
-    edit_records(db, "members", |m| {
-        assert!(m.as_object_mut().unwrap().remove("reviewers").is_some());
+/// version 13 wrote it: no repository says whether it lands by itself, no
+/// published pull request whether Branvil published it or when the webhook
+/// was told, and a pending merge names who merged it.
+pub fn as_schema_13(db: &Path) {
+    edit_records(db, "repos", |r| {
+        assert!(r.as_object_mut().unwrap().remove("auto_land").is_some());
     });
+    edit_records(db, "pulls", |p| {
+        if let Some(x) = p["upstream"].as_object_mut() {
+            assert!(x.remove("auto").is_some() && x.remove("notified_at").is_some());
+        }
+    });
+    edit_records(db, "ref_journal", |e| e["op"]["merged_by"] = json!("alice"));
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(11);
+            *v = json!(13);
         }
     });
 }

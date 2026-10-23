@@ -93,8 +93,6 @@ describe("pages", () => {
       "GET /api/v1/repos": page([repo("acme/demo"), repo("acme/web"), repo("beta/x")]),
       "GET /api/v1/repos/acme/demo/pulls": page([older]),
       "GET /api/v1/repos/acme/web/pulls": page([newer]),
-      "GET /api/v1/repos/acme/demo/pulls/3/activity": json(200, { comments: [], reviews: [], threads: [] }),
-      "GET /api/v1/repos/acme/web/pulls/1/activity": json(200, { comments: [], reviews: [], threads: [] }),
       "GET /api/v1/repos/acme/demo/pulls/3/checks": json(200, { head_sha: "a", base_sha: "b", behind_by: 0, checks: [], checks_expected: false, base_checks: 0 }),
       "GET /api/v1/repos/acme/web/pulls/1/checks": json(200, { head_sha: "a", base_sha: "b", behind_by: 0, checks: [], checks_expected: false, base_checks: 0 }),
     });
@@ -242,23 +240,21 @@ describe("pages", () => {
   });
 
   it("refreshes review status in the list after a pull event, preserving row navigation", async () => {
-    const pr = pull({ reviewers: [] });
-    const activity = (reviews: unknown[]) => json(200, { comments: [], reviews, threads: [] });
+    const pr = pull({ reviewers: [], review_states: [] });
     const fake = fakeApi({
       ...SHELL,
       "GET /api/v1/repos": page([repo("acme/demo")]),
-      "GET /api/v1/repos/acme/demo/pulls": page([pr]),
-      "GET /api/v1/repos/acme/demo/pulls/3/activity": [activity([]), activity([
-        { id: "rv_1", author: "review-bot", verdict: "approve", commit: pr.head_sha, submitted_at: "2026-10-23T10:00:00Z", reply_only: false },
-      ])],
+      "GET /api/v1/repos/acme/demo/pulls": [page([pr]), page([{ ...pr, review_states: [
+        { member: "review-bot", requested: false, verdict: "approve", outdated: false },
+      ] }])],
     });
     const { client } = renderApp("/acme/-/pulls");
     const row = await screen.findByRole("row", { name: "acme/demo !3 Fix login" });
-    await waitFor(() => expect(client.getQueryData(["repo", "acme/demo", "pull", 3, "activity"])).toBeDefined());
-    expect(fake.calls("GET", "/api/v1/repos/acme/demo/pulls/3/activity")).toHaveLength(1);
     expect(await within(row).findByRole("img", { name: "Reviewers: No one" })).toBeInTheDocument();
     act(() => applyChange({ kind: "pull", path: "acme/demo", id: "3" }, client));
     const status = await within(row).findByRole("img", { name: "Reviewers: review-bot (Approved)" });
+    expect(fake.calls("GET", "/api/v1/repos/acme/demo/pulls")).toHaveLength(2);
+    expect(fake.calls("GET", "/api/v1/repos/acme/demo/pulls/3/activity")).toHaveLength(0);
     await userEvent.setup().click(status);
     expect(window.location.pathname).toBe("/acme/demo/-/pulls/3");
   });

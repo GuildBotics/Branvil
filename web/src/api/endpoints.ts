@@ -34,6 +34,7 @@ import type {
   TicketLink,
   TokenInfo,
   Verdict,
+  Webhook,
   Workspace,
 } from "./types";
 
@@ -86,6 +87,8 @@ export interface RepoPatch {
   revision: number;
   default_branch?: string;
   required_checks?: string[];
+  required_approvals?: number;
+  auto_land?: boolean;
   ci_network?: boolean;
   protected_branches?: string[];
   labels?: string[];
@@ -232,4 +235,7 @@ export const admin = {
   /** Starts an image operation (one at a time); the answer's `operation` is running. */
   pullImage: (reference: string) => request<CiSettings>("POST", "/admin/ci/images/pull", { body: { reference } }),
   loadImage: (path: string) => request<CiSettings>("POST", "/admin/ci/images/load", { body: { path } }),
+  webhook: () => get<Webhook>("/admin/webhook"),
+  setWebhook: (url: string) => request<Webhook>("PUT", "/admin/webhook", { body: { url } }),
+  deleteWebhook: () => request<Webhook>("DELETE", "/admin/webhook"),
 };

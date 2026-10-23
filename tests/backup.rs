@@ -22,7 +22,7 @@ fn text(out: &std::process::Output) -> String {
 }
 
 /// Every file under `dir` contains no `needle`.
-fn absent_everywhere(dir: &Path, needle: &str) {
+pub(crate) fn absent_everywhere(dir: &Path, needle: &str) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
@@ -139,6 +139,15 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         )
         .await;
     assert_eq!(st, 200, "{v}");
+    let webhook = "hook-5e7a";
+    let (st, v) = s
+        .put(
+            "/admin/webhook",
+            &w.owner,
+            json!({"url": format!("https://hooks.example.test/services/{webhook}")}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
 
     // Only the owner backs up; the target must be new and absolute.
     let out_dir = tempfile::tempdir().unwrap();
@@ -185,6 +194,7 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         absent_everywhere(&backup, &token);
     }
     absent_everywhere(&backup, &w.owner);
+    absent_everywhere(&backup, webhook);
     // A second backup into the same directory is refused.
     let again = s.cli(&w.owner, &["backup", "--to", backup.to_str().unwrap()]);
     assert!(!again.status.success());
@@ -260,14 +270,14 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     );
     assert!(text(&out).contains(&serves), "{}", text(&out));
 
-    // A backup of the previous schema version: what version 11 wrote.
+    // A backup of the previous schema version: what version 13 wrote.
     let previous = out_dir.path().join("previous");
     copy_backup(&backup, &previous, &manifest);
     let db = previous.join("branvil.redb");
-    as_schema_11(&db);
+    as_schema_13(&db);
     let bytes = std::fs::read(&db).unwrap();
     let mut old = manifest.clone();
-    old["schema_version"] = json!(11);
+    old["schema_version"] = json!(13);
     for f in old["files"].as_array_mut().unwrap() {
         if f["path"] == "branvil.redb" {
             f["bytes"] = json!(bytes.len());
@@ -301,12 +311,12 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         text(&out)
     );
     assert!(
-        text(&out).contains("from schema version 11 to 12"),
+        text(&out).contains("from schema version 13 to 14"),
         "{}",
         text(&out)
     );
     assert!(
-        text(&out).contains("member(s) got no reviewers"),
+        text(&out).contains("repository(ies) land nothing by themselves"),
         "{}",
         text(&out)
     );
@@ -383,13 +393,11 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     // The ticket comment made after the backup is not there.
     let tc = r.ok(&format!("{one}/comments"), &w.aiko).await;
     assert!(tc["items"].as_array().unwrap().is_empty());
-    // The account and the upstream are there (every member with no
-    // reviewers, as the upgrade left them); the token must be set again.
+    // The account and the upstream are there (the repository landing
+    // nothing by itself, as the upgrade left it); the token must be set again.
     let members = r.ok("/members?limit=100", &owner).await;
     assert!(members.to_string().contains("alice-gh"), "{members}");
-    for m in members["items"].as_array().unwrap() {
-        assert_eq!(m["reviewers"], json!([]), "{m}");
-    }
+    assert_eq!(r.ok(&w.repo_path(), &owner).await["auto_land"], false);
     let (st, v) = r
         .post(
             &format!("/repos/{}/upstream/refresh", encode(REPO)),

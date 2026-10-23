@@ -184,6 +184,11 @@ impl Layout {
     pub fn accounts(&self) -> PathBuf {
         self.secrets().join("accounts")
     }
+    /// The webhook told of automatic publishes (`0600`): a credential of
+    /// another system.
+    pub fn webhook(&self) -> PathBuf {
+        self.secrets().join("webhook.url")
+    }
     pub fn repo_dir(&self, path: &str) -> PathBuf {
         let mut dir = self.repos();
         let mut parts: Vec<&str> = path.split('/').collect();
@@ -230,6 +235,25 @@ impl Layout {
         restrict(&path, false)?;
         Ok(key)
     }
+}
+
+/// Writes a secret to its `0600` file: a new file, then renamed over the old
+/// one.
+pub fn write_secret(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(unix)]

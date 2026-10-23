@@ -123,6 +123,10 @@ pub struct Repo {
     /// addition to these.
     pub protected_branches: Vec<String>,
     pub required_checks: Vec<String>,
+    /// The approvals a merge or a publish needs (`domain::pulls::check_landable`).
+    pub required_approvals: u64,
+    /// Its pull requests land by themselves once they can (`autoland`).
+    pub auto_land: bool,
     pub ci_network: bool,
     /// The labels its tickets may carry.
     pub labels: Vec<String>,
@@ -365,6 +369,10 @@ pub struct Published {
     /// Why sending the branch stopped (the host has commits Branvil did not
     /// push, or refused); only publishing again resumes it.
     pub stopped: Option<String>,
+    /// Published by Branvil itself (`autoland`), not by the owner.
+    pub auto: bool,
+    /// When the webhook was told of an automatic publish (once).
+    pub notified_at: Option<String>,
 }
 
 /// One check run on the upstream host.
@@ -477,7 +485,7 @@ pub struct JournalEntry {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JournalOp {
-    Merge { number: u64, merged_by: String },
+    Merge { number: u64 },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
