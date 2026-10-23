@@ -374,10 +374,8 @@ pub async fn publish_pull(
     input: MergeInput,
     auto: bool,
 ) -> AppResult<PullView> {
-    let setting = setting_of(repo)?;
-    let host = app.upstream.hosts.get(&setting.provider)?;
     let _guard = app.upstream.pull_lock(&repo.id, number).await;
-    let (repo, p, head) = {
+    let (repo, setting, p, head) = {
         let lock = app.repo_lock(&repo.id);
         let _guard = lock.lock().await;
         let id = repo.id.clone();
@@ -389,6 +387,7 @@ pub async fn publish_pull(
                 Ok((repo, p))
             })
             .await?;
+        let setting = setting_of(&repo)?;
         if p.base != repo.default_branch {
             return Err(AppError::conflict_code(
                 "not_mergeable",
@@ -406,9 +405,10 @@ pub async fn publish_pull(
                 format!("!{number} was published before; only the owner publishes it again."),
             ));
         }
-        let (head, _) = check_landable(app, &repo, &p, &input).await?;
-        (repo, p, head)
+        let (head, _) = check_landable(app, &repo, &p, &input, auto).await?;
+        (repo, setting, p, head)
     };
+    let host = app.upstream.hosts.get(&setting.provider)?;
     // A record of another place (the upstream changed since) is replaced.
     let earlier = p
         .upstream

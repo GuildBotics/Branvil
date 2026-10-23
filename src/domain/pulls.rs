@@ -1630,16 +1630,24 @@ fn not_mergeable(message: impl Into<String>) -> AppError {
 
 /// The checks a merge and a publish share: open, not a draft, the head and
 /// base the owner saw, the head containing the base, the required checks
-/// succeeded on the head, and the required approvals of the head. Returns the
-/// head and the base. Call under the repository lock with the pull request
-/// read under it.
+/// succeeded on the head, and the required approvals of the head; for one
+/// made by the repository itself (`auto`), that it still lands by itself.
+/// Returns the head and the base. Call under the repository lock with the
+/// repository and the pull request read under it.
 pub async fn check_landable(
     app: &App,
     repo: &Repo,
     p: &Pull,
     input: &MergeInput,
+    auto: bool,
 ) -> AppResult<(String, String)> {
     let number = p.number;
+    if auto && !repo.auto_land {
+        return Err(not_mergeable(format!(
+            "{} no longer lands its pull requests by itself.",
+            repo.path
+        )));
+    }
     if p.state != "open" {
         return Err(not_mergeable(format!("!{number} is not open.")));
     }
@@ -1710,16 +1718,17 @@ pub async fn merge(
 ) -> AppResult<PullView> {
     let (repo, _) = visible(app, caller, repo_path, number).await?;
     caller.require_owner()?;
-    merge_pull(app, &repo, number, input).await
+    merge_pull(app, &repo, number, input, false).await
 }
 
-/// Merges a pull request of `repo` (the owner's, or the repository landing
-/// automatically: `autoland`).
+/// Merges a pull request of `repo`, by the owner or (`auto`) by the
+/// repository landing automatically (`autoland`).
 pub async fn merge_pull(
     app: &App,
     repo: &Repo,
     number: u64,
     input: MergeInput,
+    auto: bool,
 ) -> AppResult<PullView> {
     let lock = app.repo_lock(&repo.id);
     let _guard = lock.lock().await;
@@ -1737,7 +1746,7 @@ pub async fn merge_pull(
     }
     let r2 = repo.clone();
     let p = app.store.read(move |r| load_pull(r, &r2, number)).await?;
-    let (head, base) = check_landable(app, &repo, &p, &input).await?;
+    let (head, base) = check_landable(app, &repo, &p, &input, auto).await?;
     let dir = app.git.repo_dir(&repo.path);
     keep_merged(app, &repo, number, &head).await?;
     let entry = JournalEntry {

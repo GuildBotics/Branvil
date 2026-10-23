@@ -4,7 +4,7 @@
 //! upstream, published to the host. A publish made this way is told once to
 //! the owner's webhook, since people merge it there.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -29,22 +29,27 @@ use crate::util;
 /// Every repository is looked at again this often, whatever changed.
 const TICK: Duration = Duration::from_secs(60);
 
-/// The webhook's client and how its last send went.
+/// The webhook's client and how its last send went, and why pull requests
+/// failed to land (each said once).
 pub struct Autoland {
     client: reqwest::Client,
     /// Why the last send to the webhook failed (the next sweep tries again).
     problem: Mutex<Option<String>>,
+    /// `<repo> !<n>` → why landing it last failed unexpectedly.
+    failures: Mutex<HashMap<String, String>>,
 }
 
 impl Default for Autoland {
     fn default() -> Self {
         Self {
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
+                // A webhook that hangs holds up the sweep no longer.
+                .timeout(Duration::from_secs(10))
                 .user_agent(concat!("branvil/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .expect("an HTTP client"),
             problem: Mutex::new(None),
+            failures: Mutex::default(),
         }
     }
 }
@@ -107,11 +112,13 @@ async fn sweep(app: &App, dirty: &Dirty) {
         Ok(r) => r,
         Err(e) => return tracing::error!("autoland: {e}"),
     };
+    // There is one webhook: once a send to it fails, this sweep sends no more.
+    let mut webhook_ok = true;
     for repo in repos
         .iter()
         .filter(|r| dirty.all || dirty.paths.contains(&r.path))
     {
-        if let Err(e) = sweep_repo(app, repo).await {
+        if let Err(e) = sweep_repo(app, repo, &mut webhook_ok).await {
             tracing::warn!("autoland: {}: {e}", repo.path);
         }
     }
@@ -122,9 +129,10 @@ fn awaits_notice(x: &Published) -> bool {
     x.auto && x.number.is_some() && x.notified_at.is_none()
 }
 
-/// Tells the webhook of the repository's automatic publishes it was not told
-/// of, then lands what it can when it lands automatically.
-async fn sweep_repo(app: &App, repo: &Repo) -> AppResult<()> {
+/// Lands what the repository can when it lands automatically, then tells the
+/// webhook of its automatic publishes it was not told of (while `webhook_ok`).
+/// `repo` is as the sweep read it: landing reads it again under its lock.
+async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<()> {
     let r2 = repo.clone();
     let (notices, candidates) = app
         .store
@@ -142,13 +150,11 @@ async fn sweep_repo(app: &App, repo: &Repo) -> AppResult<()> {
             Ok((notices, candidates))
         })
         .await?;
-    for number in notices {
-        notify(app, repo, number).await?;
-    }
-    if candidates.is_empty() {
-        return Ok(());
-    }
-    let tips = pulls::tips(app, repo).await?;
+    let tips = if candidates.is_empty() {
+        Default::default()
+    } else {
+        pulls::tips(app, repo).await?
+    };
     for p in candidates {
         let input = MergeInput {
             expected_head: tips.get(&p.head).cloned().unwrap_or_default(),
@@ -157,24 +163,38 @@ async fn sweep_repo(app: &App, repo: &Repo) -> AppResult<()> {
         let (done, landed) = match repo.upstream {
             None => (
                 "merged",
-                pulls::merge_pull(app, repo, p.number, input).await,
+                pulls::merge_pull(app, repo, p.number, input, true).await,
             ),
             Some(_) => (
                 "published",
                 crate::upstream::ops::publish_pull(app, repo, p.number, input, true).await,
             ),
         };
+        let what = format!("{} !{}", repo.path, p.number);
         match landed {
-            Ok(_) => tracing::info!("autoland: {} !{} {done}", repo.path, p.number),
+            Ok(_) => tracing::info!("autoland: {what} {done}"),
             // Not yet: the next change or tick tries again.
             Err(e)
                 if ["not_mergeable", "head_moved", "base_moved", "no_account"]
                     .contains(&e.code) =>
             {
-                tracing::debug!("autoland: {} !{}: {e}", repo.path, p.number)
+                tracing::debug!("autoland: {what}: {e}")
             }
-            Err(e) => tracing::warn!("autoland: {} !{}: {e}", repo.path, p.number),
+            Err(e) => {
+                let mut failures = app.autoland.failures.lock().unwrap();
+                if failures.insert(what.clone(), e.message.clone()) != Some(e.message.clone()) {
+                    tracing::warn!("autoland: {what}: {e}");
+                }
+                continue;
+            }
         }
+        app.autoland.failures.lock().unwrap().remove(&what);
+    }
+    for number in notices {
+        if !*webhook_ok {
+            break;
+        }
+        *webhook_ok = notify(app, repo, number).await?;
     }
     Ok(())
 }
@@ -210,16 +230,18 @@ fn worth_trying(r: &impl Rd, repo: &Repo, p: &Pull) -> AppResult<bool> {
 
 /// Tells the webhook, once, that Branvil published pull request `number`.
 /// Without a webhook nothing is sent; a failure is kept and tried again.
-async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<()> {
+/// Returns false when the send failed. A crash between the webhook's answer
+/// and the write of `notified_at` sends it again: at least once.
+async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<bool> {
     let Ok(url) = std::fs::read_to_string(app.layout.webhook()) else {
-        return Ok(());
+        return Ok(true);
     };
     // The poller rewrites the record under the same lock.
     let _guard = app.upstream.pull_lock(&repo.id, number).await;
     let r2 = repo.clone();
     let p = app.store.read(move |r| load_pull(r, &r2, number)).await?;
     let Some(mut x) = p.upstream.filter(awaits_notice) else {
-        return Ok(());
+        return Ok(true);
     };
     let text = format!(
         "{} ({} !{number}) was published to {} automatically and awaits a merge there.\n{}\n{}",
@@ -243,12 +265,12 @@ async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<()> {
             s => Err(format!("the webhook answered {s}")),
         });
     if let Err(why) = sent {
-        tracing::warn!(
-            "autoland: telling the webhook of {} !{number} failed: {why}",
-            repo.path
-        );
-        *app.autoland.problem.lock().unwrap() = Some(why);
-        return Ok(());
+        let mut problem = app.autoland.problem.lock().unwrap();
+        if problem.as_ref() != Some(&why) {
+            tracing::warn!("autoland: the webhook failed: {why}");
+        }
+        *problem = Some(why);
+        return Ok(false);
     }
     *app.autoland.problem.lock().unwrap() = None;
     x.notified_at = Some(util::now());
@@ -257,7 +279,7 @@ async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<()> {
         .write(move |w| pulls::store_published(w, &r2, number, x, None))
         .await?;
     app.events.publish("pull", &repo.path, number.to_string());
-    Ok(())
+    Ok(true)
 }
 
 /// The webhook as the API shows it: never its URL, which is a credential of

@@ -888,14 +888,18 @@ backups.
   invalid` unless it is an `http` or `https` URL. It replaces the one set.
 - `DELETE /api/v1/admin/webhook` → the same, with `set: false`.
 
-For each automatic publish whose pull request is open on the host and in
-Branvil, Branvil posts once `{"text": "<title> (<repo> !<n>) was published to
-GitHub automatically and awaits a merge there.\n<Branvil pull request
-URL>\n<host pull request URL>"}` (a Slack Incoming Webhook takes it as it
-is). A `2xx` answer sets the pull request's `upstream.notified_at`; anything
-else is retried at the next look. Nothing is sent without a webhook (one set
-later is told of the automatic publishes still open), for a merge, or for the
-owner's publish.
+For each pull request open in Branvil that Branvil published by itself
+(`upstream.auto`), whose pull request was opened on the host (`upstream.number`)
+and whose webhook was not told (`upstream.notified_at` is `null`), Branvil
+posts `{"text": "<title> (<repo> !<n>) was published to GitHub automatically
+and awaits a merge there.\n<Branvil pull request URL>\n<host pull request
+URL>"}` (a Slack Incoming Webhook takes it as it is), whether the repository
+still lands automatically or not. A `2xx` answer sets `upstream.notified_at`;
+anything else (or no answer within 10 seconds) is retried at the next look,
+which sends nothing more to the webhook once one send failed. Delivery is at
+least once: a crash between the answer and the write of `notified_at` sends it
+again. Nothing is sent without a webhook (one set later is told of the
+automatic publishes still open), for a merge, or for the owner's publish.
 
 ### CI settings
 

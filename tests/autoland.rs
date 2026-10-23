@@ -5,7 +5,7 @@
 //! and keeps the webhook's URL a secret. Also the upgrade from version 13.
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
@@ -50,82 +50,135 @@ fn number(p: &Value) -> u64 {
     p["number"].as_u64().unwrap()
 }
 
-/// `acme/other` with a `main` of its own, landing by itself when
-/// `auto_land`; returns its clone.
-async fn other_repo(w: &World, auto_land: bool) -> PathBuf {
+/// Another repository of the workspace and its clone.
+struct Other {
+    path: &'static str,
+    dir: PathBuf,
+}
+
+/// The repository `path` with a `main` of its own, needing no approval and
+/// landing by itself when `auto_land`.
+async fn other_repo(w: &World, path: &'static str, auto_land: bool) -> Other {
     let s = &w.server;
-    let (st, v) = s.post("/repos", &w.owner, json!({"path": OTHER})).await;
+    let (st, v) = s.post("/repos", &w.owner, json!({"path": path})).await;
     assert_eq!(st, StatusCode::CREATED, "{v}");
     let (st, v) = s
         .patch(
-            &format!("/repos/{}", encode(OTHER)),
+            &format!("/repos/{}", encode(path)),
             &w.owner,
             json!({"revision": 1, "required_approvals": 0, "auto_land": auto_land}),
         )
         .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    let dir = w.dir.path().join("other");
+    let dir = w.dir.path().join(path.replace('/', "-"));
     std::fs::create_dir_all(&dir).unwrap();
     git_ok(&dir, &["init", "-q", "-b", "main"]);
     std::fs::write(dir.join("README.md"), "other\n").unwrap();
     git_ok(&dir, &["add", "README.md"]);
     git_ok(&dir, &["commit", "-qm", "initial"]);
-    git_ok(&dir, &["remote", "add", "origin", &s.remote(OTHER)]);
-    git_as_ok(&dir, "alice", &w.owner, &["push", "-q", "origin", "main"]);
-    dir
+    // The first push of a protected branch is the owner's.
+    let remote = s.remote(path);
+    git_as_ok(
+        &dir,
+        "alice",
+        &w.owner,
+        &["push", "-q", &remote, "HEAD:refs/heads/main"],
+    );
+    Other { path, dir }
+}
+
+/// Pushes the clone's `HEAD` to `branch` of the repository, at the service's
+/// current address.
+fn push(w: &World, other: &Other, branch: &str) {
+    let to = format!("HEAD:refs/heads/{branch}");
+    let remote = w.server.remote(other.path);
+    git_as_ok(&other.dir, "aiko", &w.aiko, &["push", "-q", &remote, &to]);
+}
+
+/// Commits a file on the clone's `HEAD`, pushes it as `branch`, and opens a
+/// pull request of it.
+async fn open_in(w: &World, other: &Other, branch: &str) -> Value {
+    std::fs::write(other.dir.join(format!("{branch}.txt")), branch).unwrap();
+    git_ok(&other.dir, &["add", "."]);
+    git_ok(&other.dir, &["commit", "-qm", branch]);
+    push(w, other, branch);
+    let (st, v) = w
+        .server
+        .post(
+            &format!("/repos/{}/pulls", encode(other.path)),
+            &w.aiko,
+            json!({"head": branch, "title": branch}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    v["pull"].clone()
+}
+
+async fn other_pull(w: &World, other: &Other, n: u64) -> Value {
+    let at = format!("/repos/{}/pulls/{n}", encode(other.path));
+    w.server.ok(&at, &w.owner).await
 }
 
 /// Returns once everything that changed before was swept: a pull request
-/// opened in `acme/other` (`other_repo` landing by itself) lands, and one
-/// task sweeps the changes in the order they came.
-async fn swept(w: &World, other: &Path) {
-    let k = git_ok(other, &["rev-list", "--count", "HEAD"]);
-    let branch = format!("s{k}");
-    std::fs::write(other.join("s.txt"), &k).unwrap();
-    git_ok(other, &["add", "s.txt"]);
-    git_ok(other, &["commit", "-qm", &branch]);
-    git_as_ok(
-        other,
-        "aiko",
-        &w.aiko,
-        &["push", "-q", "origin", &format!("HEAD:refs/heads/{branch}")],
-    );
-    let pulls = format!("/repos/{}/pulls", encode(OTHER));
-    let (st, v) = w
-        .server
-        .post(&pulls, &w.aiko, json!({"head": branch, "title": "Sweep"}))
-        .await;
-    assert_eq!(st, StatusCode::CREATED, "{v}");
-    let n = number(&v["pull"]);
+/// opened in `other` (landing by itself) lands, and one task sweeps the
+/// changes in the order they came.
+async fn swept(w: &World, other: &Other) {
+    let k = git_ok(&other.dir, &["rev-list", "--count", "HEAD"]);
+    let n = number(&open_in(w, other, &format!("s{k}")).await);
     eventually("the sweep", || async {
-        w.server.ok(&format!("{pulls}/{n}"), &w.owner).await["merged"] == true
+        other_pull(w, other, n).await["merged"] == true
     })
     .await;
 }
 
-/// A Slack-like Incoming Webhook: keeps what it receives and answers with
-/// `answers` in turn, then 200.
-struct Hook {
-    received: Arc<Mutex<Vec<(u16, Value)>>>,
+/// Turns `auto_land` of `path` on in the database of the stopped service.
+fn auto_land_on(w: &World, path: &str) {
+    edit_records(&w.server.data.join("branvil.redb"), "repos", |r| {
+        if r["path"] == path {
+            r["auto_land"] = json!(true);
+        }
+    });
 }
 
-type HookState = (Arc<Mutex<Vec<(u16, Value)>>>, Arc<Mutex<VecDeque<u16>>>);
+/// A Slack-like Incoming Webhook: keeps what it receives (on arrival) and,
+/// once let through, answers with `answers` in turn, then 200.
+struct Hook {
+    received: Arc<Mutex<Vec<(u16, Value)>>>,
+    gate: Arc<tokio::sync::Semaphore>,
+}
+
+type HookState = (
+    Arc<Mutex<Vec<(u16, Value)>>>,
+    Arc<Mutex<VecDeque<u16>>>,
+    Arc<tokio::sync::Semaphore>,
+);
 
 async fn hook_receive(
-    State((received, answers)): State<HookState>,
+    State((received, answers, gate)): State<HookState>,
     axum::Json(body): axum::Json<Value>,
 ) -> Status {
     let status = answers.lock().unwrap().pop_front().unwrap_or(200);
     received.lock().unwrap().push((status, body));
+    gate.acquire().await.unwrap().forget();
     Status::from_u16(status).unwrap()
 }
 
 impl Hook {
+    /// The service's webhook, answering at once.
     async fn start(w: &World, answers: &[u16]) -> Hook {
+        let hook = Hook::held(w, answers).await;
+        hook.release();
+        hook
+    }
+
+    /// The service's webhook, answering nothing until `release`.
+    async fn held(w: &World, answers: &[u16]) -> Hook {
         let received = Arc::new(Mutex::new(Vec::new()));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let state: HookState = (
             received.clone(),
             Arc::new(Mutex::new(answers.iter().copied().collect())),
+            gate.clone(),
         );
         let app = axum::Router::new()
             .route("/services/T0/hook-9f3c", post(hook_receive))
@@ -141,7 +194,11 @@ impl Hook {
             .put("/admin/webhook", &w.owner, json!({"url": url}))
             .await;
         assert_eq!(st, StatusCode::OK, "{v}");
-        Hook { received }
+        Hook { received, gate }
+    }
+
+    fn release(&self) {
+        self.gate.add_permits(1 << 20);
     }
 
     fn received(&self) -> Vec<(u16, Value)> {
@@ -188,7 +245,7 @@ async fn a_pull_request_merges_itself_once_approved_and_its_required_check_succe
 #[tokio::test]
 async fn a_draft_lands_only_once_it_is_marked_ready() {
     let w = World::new().await;
-    let other = other_repo(&w, true).await;
+    let other = other_repo(&w, OTHER, true).await;
     settings(&w, json!({"auto_land": true})).await;
     w.push_change("draft", "d.txt", "d\n");
     let (st, v) = w
@@ -218,7 +275,7 @@ async fn a_draft_lands_only_once_it_is_marked_ready() {
 #[tokio::test]
 async fn only_the_owner_turns_landing_on_and_it_lands_what_waits_even_at_start() {
     let mut w = World::new().await;
-    let other = other_repo(&w, true).await;
+    let other = other_repo(&w, OTHER, true).await;
     // Off: a pull request that can land stays.
     let n = {
         w.push_change("one", "one.txt", "1\n");
@@ -249,11 +306,7 @@ async fn only_the_owner_turns_landing_on_and_it_lands_what_waits_even_at_start()
     w.push_change("two", "two.txt", "2\n");
     let n = number(&w.open_pull("two", json!([])).await);
     w.server.stop();
-    edit_records(&w.server.data.join("branvil.redb"), "repos", |r| {
-        if r["path"] == REPO {
-            r["auto_land"] = json!(true);
-        }
-    });
+    auto_land_on(&w, REPO);
     w.restart(&[]);
     merged(&w, n).await;
 }
@@ -261,7 +314,7 @@ async fn only_the_owner_turns_landing_on_and_it_lands_what_waits_even_at_start()
 #[tokio::test]
 async fn a_head_behind_its_base_waits_until_it_is_updated() {
     let w = World::new().await;
-    let other = other_repo(&w, true).await;
+    let other = other_repo(&w, OTHER, true).await;
     settings(&w, json!({"auto_land": true})).await;
     w.push_change("b", "b.txt", "b\n");
     git_ok(&w.work, &["checkout", "-q", "main"]);
@@ -287,7 +340,7 @@ async fn a_head_behind_its_base_waits_until_it_is_updated() {
 async fn a_pull_request_publishes_itself_as_its_author_and_the_webhook_is_told_once() {
     let (w, gh) = followed().await;
     let hook = Hook::start(&w, &[]).await;
-    let other = other_repo(&w, true).await;
+    let other = other_repo(&w, OTHER, true).await;
     settings(&w, json!({"auto_land": true})).await;
     let head = w.push_change("feat", "f.txt", "one\n");
     let n = number(&w.open_pull("feat", json!([])).await);
@@ -332,7 +385,7 @@ async fn a_pull_request_publishes_itself_as_its_author_and_the_webhook_is_told_o
 async fn an_automatic_publish_the_host_refuses_is_left_to_the_owner() {
     let (w, gh) = followed().await;
     with_aiko_account(&w).await;
-    let other = other_repo(&w, true).await;
+    let other = other_repo(&w, OTHER, true).await;
     // GitHub has a branch feat that Branvil did not push.
     let main = gh.tip(GH, "main").unwrap();
     w.push_change("feat", "f.txt", "one\n");
@@ -370,7 +423,7 @@ async fn a_failed_notice_is_sent_again_and_a_manual_publish_tells_nobody() {
     let (w, _gh) = followed().await;
     with_aiko_account(&w).await;
     let hook = Hook::start(&w, &[500]).await;
-    let other = other_repo(&w, true).await;
+    let other = other_repo(&w, OTHER, true).await;
     settings(&w, json!({"auto_land": true})).await;
     w.push_change("feat", "f.txt", "one\n");
     let n = number(&w.open_pull("feat", json!([])).await);
@@ -430,6 +483,8 @@ async fn the_webhook_url_is_a_secret_shown_only_by_its_host() {
     assert_eq!(st, StatusCode::FORBIDDEN);
     let (st, _) = s.put("/admin/webhook", &w.aiko, json!({"url": url})).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = s.delete("/admin/webhook", &w.aiko).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
     for bad in ["ftp://hooks.example.test/x", "not a url"] {
         let (st, v) = s.put("/admin/webhook", &w.owner, json!({"url": bad})).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
@@ -453,6 +508,106 @@ async fn the_webhook_url_is_a_secret_shown_only_by_its_host() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_webhook_set_later_is_told_of_an_automatic_publish_whatever_auto_land() {
+    let (w, _gh) = followed().await;
+    with_aiko_account(&w).await;
+    settings(&w, json!({"auto_land": true})).await;
+    w.push_change("feat", "f.txt", "one\n");
+    let n = number(&w.open_pull("feat", json!([])).await);
+    eventually("the publish", || async {
+        pull(&w, n).await["upstream"]["number"].is_u64()
+    })
+    .await;
+    // No webhook then; it is set after the repository stopped landing.
+    settings(&w, json!({"auto_land": false})).await;
+    let hook = Hook::start(&w, &[]).await;
+    let (st, _) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/comments", w.repo_path()),
+            &w.ken,
+            json!({"body": "waiting for GitHub"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED);
+    eventually("the notice", || async {
+        pull(&w, n).await["upstream"]["notified_at"].is_string()
+    })
+    .await;
+    assert_eq!(hook.received().len(), 1);
+}
+
+/// A service started again (now) whose `acme/demo` has two pull requests
+/// Branvil published by itself while no webhook was set, and whose
+/// `acme/other` has a pull request that can land, landing by itself from this
+/// start; the webhook holds every answer. The start sweeps `acme/demo`
+/// (created first), then `acme/other`. Returns that pull request's number.
+async fn notices_before_a_landing() -> (World, Hook, Other, u64) {
+    let (mut w, _gh) = followed().await;
+    with_aiko_account(&w).await;
+    settings(&w, json!({"auto_land": true})).await;
+    for branch in ["one", "two"] {
+        git_ok(&w.work, &["checkout", "-q", "main"]);
+        w.push_change(branch, &format!("{branch}.txt"), "x\n");
+        let n = number(&w.open_pull(branch, json!([])).await);
+        eventually("the publish", || async {
+            pull(&w, n).await["upstream"]["number"].is_u64()
+        })
+        .await;
+    }
+    let other = other_repo(&w, OTHER, false).await;
+    let fix = number(&open_in(&w, &other, "fix").await);
+    let hook = Hook::held(&w, &[]).await;
+    w.server.stop();
+    auto_land_on(&w, OTHER);
+    w.restart(&[]);
+    (w, hook, other, fix)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repository_switched_off_while_a_sweep_walks_lands_nothing() {
+    let (w, hook, other, fix) = notices_before_a_landing().await;
+    // The sweep waits at acme/demo's first notice; acme/other is switched off.
+    eventually("the notice", || async { hook.received().len() == 1 }).await;
+    let at = format!("/repos/{}", encode(OTHER));
+    let repo = w.server.ok(&at, &w.owner).await;
+    let (st, v) = w
+        .server
+        .patch(
+            &at,
+            &w.owner,
+            json!({"revision": repo["revision"], "auto_land": false}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    hook.release();
+    let sentinel = other_repo(&w, "acme/zzz", true).await;
+    swept(&w, &sentinel).await;
+    assert_eq!(other_pull(&w, &other, fix).await["state"], "open");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_webhook_that_hangs_holds_landing_in_another_repository_up_once_at_most() {
+    let (w, hook, other, fix) = notices_before_a_landing().await;
+    let started = std::time::Instant::now();
+    eventually("the landing", || async {
+        other_pull(&w, &other, fix).await["merged"] == true
+    })
+    .await;
+    // One send that timed out (10 s), and no other in that sweep: every
+    // sweep tries the first notice only.
+    let waited = started.elapsed();
+    assert!(waited < std::time::Duration::from_secs(20), "{waited:?}");
+    let received = hook.received();
+    assert!(
+        received
+            .iter()
+            .all(|(_, b)| b["text"].as_str().unwrap().starts_with("PR one ")),
+        "{received:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_upgrade_from_version_13_lands_nothing_by_itself_and_told_nobody() {
     let (mut w, _gh) = followed().await;
     with_aiko_account(&w).await;
@@ -466,21 +621,10 @@ async fn the_upgrade_from_version_13_lands_nothing_by_itself_and_told_nobody() {
     // A card, whose index entry the failing check below takes away.
     w.ticket("One").await;
     // A second repository, with a merge interrupted after its ref update.
-    let other = other_repo(&w, false).await;
-    git_ok(&other, &["checkout", "-q", "-b", "fix"]);
-    std::fs::write(other.join("fix.txt"), "fix\n").unwrap();
-    git_ok(&other, &["add", "fix.txt"]);
-    git_ok(&other, &["commit", "-qm", "fix"]);
-    git_as_ok(&other, "aiko", &w.aiko, &["push", "-q", "origin", "fix"]);
-    let at = format!("/repos/{}/pulls", encode(OTHER));
-    let (st, v) = w
-        .server
-        .post(&at, &w.aiko, json!({"head": "fix", "title": "Fix"}))
-        .await;
-    assert_eq!(st, StatusCode::CREATED, "{v}");
-    let interrupted = format!("{at}/{}", number(&v["pull"]));
-    let input =
-        json!({"expected_head": v["pull"]["head_sha"], "expected_base": v["pull"]["base_sha"]});
+    let other = other_repo(&w, OTHER, false).await;
+    let fix = open_in(&w, &other, "fix").await;
+    let interrupted = format!("/repos/{}/pulls/{}", encode(OTHER), number(&fix));
+    let input = json!({"expected_head": fix["head_sha"], "expected_base": fix["base_sha"]});
     w.restart(&[("BRANVIL_FAILPOINT", "merge_after_update_ref")]);
     let _ = w
         .server

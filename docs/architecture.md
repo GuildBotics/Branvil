@@ -396,10 +396,15 @@ published as its author (`publish_pull`).
   ref changes; CI attempts; repository settings and upstreams; a member's
   account set on a host, as `repo` of the repositories on it). The stream ends
   at shutdown, and so does the task.
+- **The sweep reads the repositories once**, so a setting may change while
+  it walks them: `merge_pull` and `publish_pull`, told that the repository
+  acts (`auto`), read it again under its lock and refuse (`not_mergeable`)
+  when it no longer lands by itself; a publish goes to the upstream read
+  there.
 - **A failure is not stored**, so it makes no event and no loop: a pull
   request not yet landable (`not_mergeable`, `head_moved`, `base_moved`,
-  `no_account`) is logged at debug, anything else as a warning, and the next
-  event or minute tries again. Before publishing, the sweep leaves quietly what
+  `no_account`) is logged at debug, anything else as a warning when its
+  message changes, and the next event or minute tries again. Before publishing, the sweep leaves quietly what
   cannot be published (a base that is not the default branch, an author without
   an account on the host, a pull request with an `upstream` record).
 - **Once.** Branvil publishes a pull request by itself only while it has no
@@ -413,8 +418,12 @@ published as its author (`publish_pull`).
   request with `auto`, a host pull request, and no `notified_at` is posted
   `{"text": …}` (a Slack Incoming Webhook takes it) under the upstream lock of
   that pull request, which the poller holds while it rewrites the record. A
-  `2xx` sets `notified_at` and publishes a `pull` event; a failure is kept in
-  memory (`GET /admin/webhook`'s `problem`, never with the URL) and retried.
+  `2xx` sets `notified_at` and publishes a `pull` event (at least once: a
+  crash before that write sends it again); a failure is kept in memory
+  (`GET /admin/webhook`'s `problem`, never with the URL) and retried. A
+  repository's notices come after its landing, a send times out after 10
+  seconds, and after one failed send a sweep sends no more, so a webhook that
+  hangs holds a sweep up once, for 10 seconds at most.
 
 ## Backups
 

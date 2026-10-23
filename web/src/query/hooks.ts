@@ -98,9 +98,10 @@ export const useMemberTokens = (name: string) =>
 export const useDiagnostics = () =>
   useQuery({ queryKey: keys.diagnostics(), queryFn: () => api.admin.diagnostics(), refetchInterval: 30_000 });
 
-/** The CI settings; polled while an image operation runs (it has no events). */
-export const useWebhook = () => useQuery({ queryKey: keys.webhook(), queryFn: () => api.admin.webhook() });
+/** The notification webhook; polled, since how its last send went has no events. */
+export const useWebhook = () => useQuery({ queryKey: keys.webhook(), queryFn: () => api.admin.webhook(), refetchInterval: 30_000 });
 
+/** The CI settings; polled while an image operation runs (it has no events). */
 export const useCiSettings = () =>
   useQuery({
     queryKey: keys.ci(),
