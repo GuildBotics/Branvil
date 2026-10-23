@@ -10,8 +10,8 @@ pub mod workspace;
 pub mod zip;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
@@ -52,6 +52,9 @@ pub struct Settings {
     pub token: Option<String>,
     pub work_dir: PathBuf,
     pub executor: ExecutorConfig,
+    /// The configuration file and data directory the limits are read from
+    /// again before every claim, while the file exists.
+    pub config: Option<(PathBuf, PathBuf)>,
     pub msb_path: Option<PathBuf>,
     pub msb_home: PathBuf,
 }
@@ -80,6 +83,7 @@ impl Settings {
                 .clone()
                 .unwrap_or_else(|| executor::branvil_home().join("msb-home")),
             executor: ci.executor,
+            config: config.map(|c| (c.file.clone(), c.data_dir.clone())),
         })
     }
 
@@ -458,54 +462,143 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         );
     }
     let executor = settings.microsandbox(&name);
-    let runner = Runner {
+    let runner = Runner::new(
         api,
-        work_dir: settings.work_dir.clone(),
-        limits: settings.executor.clone(),
-    };
+        settings.work_dir.clone(),
+        settings.config.clone(),
+        settings.executor.clone(),
+    );
     tracing::info!(
         "runner {name} serving {} (work directory {})",
         settings.url,
         settings.work_dir.display()
     );
-    runner.serve(&executor).await
+    Arc::new(runner).serve(Arc::new(executor)).await
 }
 
 pub struct Runner {
     pub api: Api,
     pub work_dir: PathBuf,
-    pub limits: ExecutorConfig,
+    /// Where `limits` are read from again before every claim, so that new
+    /// limits apply to the next job and leave the running ones alone.
+    config: Option<(PathBuf, PathBuf)>,
+    /// The limits last read, and why the file last could not be read (said
+    /// once, not at every claim).
+    limits: Mutex<(ExecutorConfig, Option<String>)>,
+    cache: Arc<workspace::Cache>,
 }
 
 impl Runner {
-    /// Sweeps leftovers, then claims and runs attempts forever.
-    pub async fn serve<E: Executor>(&self, executor: &E) -> anyhow::Result<()> {
-        executor.sweep().await;
-        let _ = std::fs::remove_dir_all(self.work_dir.join("jobs"));
-        let mut backoff = 1;
-        loop {
-            match self.once(executor).await {
-                Ok(true) => backoff = 1,
-                Ok(false) => {
-                    backoff = 1;
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-                Err(ApiError::Unauthorized) => bail!("{}", ApiError::Unauthorized),
-                Err(e) => {
-                    tracing::warn!("{e}");
-                    tokio::time::sleep(Duration::from_secs(backoff)).await;
-                    backoff = (backoff * 2).min(30);
-                }
-            }
+    pub fn new(
+        api: Api,
+        work_dir: PathBuf,
+        config: Option<(PathBuf, PathBuf)>,
+        limits: ExecutorConfig,
+    ) -> Self {
+        Self {
+            cache: Arc::new(workspace::Cache::new(work_dir.join("cache"))),
+            api,
+            work_dir,
+            config,
+            limits: Mutex::new((limits, None)),
         }
     }
 
-    /// Claims and runs at most one attempt. Returns whether there was one.
-    pub async fn once<E: Executor>(&self, executor: &E) -> Result<bool, ApiError> {
+    /// The limits for the next job: the configuration file's as it reads
+    /// now (the last ones read when it cannot be read).
+    fn limits(&self) -> ExecutorConfig {
+        let mut last = self.limits.lock().unwrap();
+        let (limits, problem) = &mut *last;
+        if let Some((file, data_dir)) = self.config.as_ref().filter(|(f, _)| f.is_file()) {
+            match crate::config::Config::load(Some(file), Some(data_dir), None, None) {
+                Ok(c) => (*limits, *problem) = (c.ci.executor, None),
+                Err(e) => {
+                    let e = format!("{e:#}");
+                    if problem.as_ref() != Some(&e) {
+                        tracing::warn!("keeping the runner's limits: {e}");
+                    }
+                    *problem = Some(e);
+                }
+            }
+        }
+        limits.clone()
+    }
+
+    /// Sweeps leftovers, then claims attempts and runs up to `max_jobs` of
+    /// them at once, until its token is refused. It claims only when it can
+    /// start the job, so waiting attempts stay queued in the service; with
+    /// the token refused, the running attempts end on their own (each
+    /// removing its microVM) before it returns.
+    pub async fn serve<E: Executor + 'static>(
+        self: Arc<Self>,
+        executor: Arc<E>,
+    ) -> anyhow::Result<()> {
+        executor.sweep().await;
+        let _ = std::fs::remove_dir_all(self.work_dir.join("jobs"));
+        let mut running = tokio::task::JoinSet::new();
+        let mut backoff = 1;
+        'claiming: loop {
+            let limits = self.limits();
+            let mut wait = Duration::from_secs(2);
+            if running.len() < limits.max_jobs as usize {
+                match self.claim(&*executor).await {
+                    Ok(Some((claim, health))) => {
+                        backoff = 1;
+                        let (runner, executor) = (self.clone(), executor.clone());
+                        running.spawn(async move {
+                            runner.run(&*executor, &health, claim, &limits).await
+                        });
+                        continue;
+                    }
+                    Ok(None) => backoff = 1,
+                    Err(ApiError::Unauthorized) => break 'claiming,
+                    Err(e) => {
+                        tracing::warn!("{e}");
+                        wait = Duration::from_secs(backoff);
+                        backoff = (backoff * 2).min(30);
+                    }
+                }
+            }
+            tokio::select! {
+                Some(ended) = running.join_next() => match ended {
+                    Ok(Err(ApiError::Unauthorized)) => break 'claiming,
+                    Ok(Err(e)) => tracing::warn!("{e}"),
+                    Ok(Ok(())) => {}
+                    Err(e) => tracing::error!("an attempt's task failed: {e}"),
+                },
+                _ = tokio::time::sleep(wait) => {}
+            }
+        }
+        while running.join_next().await.is_some() {}
+        bail!("{}", ApiError::Unauthorized)
+    }
+
+    /// Claims an attempt, telling the service how the executor is.
+    async fn claim<E: Executor>(&self, executor: &E) -> Result<Option<(Claim, Health)>, ApiError> {
         let health = executor.health().await;
-        let Some(claim) = self.api.claim(executor.name(), &health).await? else {
+        let claim = self.api.claim(executor.name(), &health).await?;
+        Ok(claim.map(|c| (c, health)))
+    }
+
+    /// Claims and runs at most one attempt. Returns whether there was one.
+    #[cfg(test)]
+    pub async fn once<E: Executor>(&self, executor: &E) -> Result<bool, ApiError> {
+        let limits = self.limits();
+        let Some((claim, health)) = self.claim(executor).await? else {
             return Ok(false);
         };
+        self.run(executor, &health, claim, &limits).await?;
+        Ok(true)
+    }
+
+    /// Runs a claimed attempt with `limits` and removes its directory.
+    async fn run<E: Executor>(
+        &self,
+        executor: &E,
+        health: &Health,
+        claim: Claim,
+        limits: &ExecutorConfig,
+    ) -> Result<(), ApiError> {
         tracing::info!(
             "attempt {} ({} #{} of {} {})",
             claim.attempt_id,
@@ -514,18 +607,17 @@ impl Runner {
             claim.repo,
             claim.sha
         );
-        let result = self.attempt(executor, &health, &claim).await;
+        let result = self.attempt(executor, health, &claim, limits).await;
         let _ = std::fs::remove_dir_all(self.job_dir(&claim));
         match result {
-            Ok(()) => Ok(true),
             Err(ApiError::Lost) => {
                 tracing::warn!(
                     "attempt {}: the lease was lost; result dropped",
                     claim.attempt_id
                 );
-                Ok(true)
+                Ok(())
             }
-            Err(e) => Err(e),
+            r => r,
         }
     }
 
@@ -538,6 +630,7 @@ impl Runner {
         executor: &E,
         health: &Health,
         c: &Claim,
+        limits: &ExecutorConfig,
     ) -> Result<(), ApiError> {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let lost = Arc::new(AtomicBool::new(false));
@@ -554,7 +647,7 @@ impl Runner {
             log_rx,
         ));
         let result = self
-            .work(executor, health, c, log_tx, cancel_rx, &lost)
+            .work(executor, health, c, limits, log_tx, cancel_rx, &lost)
             .await;
         let _ = uploader.await;
         beat.abort();
@@ -570,11 +663,13 @@ impl Runner {
     /// Everything between the claim and the finish. Returns the conclusion,
     /// its details, and the configuration digest of the image the job ran on
     /// (none when it did not get that far).
+    #[allow(clippy::too_many_arguments)]
     async fn work<E: Executor>(
         &self,
         executor: &E,
         health: &Health,
         c: &Claim,
+        limits: &ExecutorConfig,
         log: mpsc::Sender<Vec<u8>>,
         cancel: watch::Receiver<bool>,
         lost: &AtomicBool,
@@ -598,8 +693,8 @@ impl Runner {
             );
         }
         let job = &c.job;
-        let (cpus, memory_mib) = (self.limits.max_cpus, self.limits.max_memory_mib);
-        let max = self.limits.max_timeout_secs;
+        let (cpus, memory_mib) = (limits.max_cpus, limits.max_memory_mib);
+        let max = limits.max_timeout_secs;
         let timeout_secs = job.timeout_secs.map_or(max, |t| t.min(max));
         say(format!(
             "attempt {} of job {} on {} {} (executor {}, image {}, {cpus} cpu, {memory_mib} MiB, timeout {timeout_secs} s, network {})",
@@ -689,7 +784,7 @@ impl Runner {
                     .await;
                     let checking_out = Instant::now();
                     let checked_out =
-                        workspace::checkout(&bundle, &work, &root.join("gitconfig")).await;
+                        workspace::checkout(&bundle, &work, &dir.join("gitconfig")).await;
                     let _ = std::fs::remove_file(&bundle);
                     if let Err(e) = checked_out {
                         return (
@@ -719,7 +814,6 @@ impl Runner {
                     Some(format!("Unsafe work directory: {e}")),
                 );
             }
-            let cache_root = self.work_dir.join("cache");
             let cache_key = |cache: &CacheDef, scope: &str| {
                 workspace::cache_key(&c.repo, job, &digest, cache, scope, &work)
             };
@@ -733,7 +827,8 @@ impl Runner {
                     keys.push(cache_key(cache, "protected"));
                 }
                 let restoring = Instant::now();
-                match workspace::restore(&cache_root, &keys, cache, &work) {
+                let (store, def, into) = (self.cache.clone(), cache.clone(), work.clone());
+                match blocking(move || store.restore(&keys, &def, &into)).await {
                     Ok(Some((k, bytes))) => {
                         let from = if &k == key {
                             ""
@@ -807,7 +902,7 @@ impl Runner {
                 && !job.artifacts.is_empty()
             {
                 let collecting = Instant::now();
-                let mut budget = self.limits.artifacts_max_mib << 20;
+                let mut budget = limits.artifacts_max_mib << 20;
                 for a in &job.artifacts {
                     let mut notes = Vec::new();
                     let packed = workspace::pack(&work, a, &mut budget, &mut notes);
@@ -839,13 +934,10 @@ impl Runner {
                 && let (Some(cache), Some(key)) = (&job.cache, &key)
             {
                 let saving = Instant::now();
-                match workspace::save(
-                    &cache_root,
-                    key,
-                    cache,
-                    &work,
-                    self.limits.cache_max_mib << 20,
-                ) {
+                let (store, def, from, key) =
+                    (self.cache.clone(), cache.clone(), work.clone(), key.clone());
+                let max = limits.cache_max_mib << 20;
+                match blocking(move || store.save(&key, &def, &from, max)).await {
                     Ok(bytes) => {
                         say(format!(
                             "cache saved in {} ({bytes} bytes, scope {})",
@@ -862,6 +954,16 @@ impl Runner {
         .await;
         (conclusion, details, Some(digest))
     }
+}
+
+/// Runs the cache's copies off the async threads, where the heartbeats and
+/// logs of the other jobs run.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)))
 }
 
 /// The time since `since`, for the log.
@@ -974,6 +1076,19 @@ mod tests {
         hold_images: AtomicBool,
         /// What every run got: (image, cpus, memory MiB, timeout s).
         ran: std::sync::Mutex<Vec<(String, u32, u64, u64)>>,
+        /// `wait`s that saw the stop (an aborted run never does).
+        stopped: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Fake {
+        fn new() -> Self {
+            Self {
+                ready: AtomicBool::new(true),
+                hold_images: AtomicBool::new(false),
+                ran: Default::default(),
+                stopped: Default::default(),
+            }
+        }
     }
 
     /// The configuration digest the fake cache holds `image` as.
@@ -1034,6 +1149,7 @@ mod tests {
                     ["exit", code] => return Outcome::Exited(code.parse().unwrap()),
                     ["wait"] => loop {
                         if cancel.changed().await.is_err() || *cancel.borrow() {
+                            self.stopped.fetch_add(1, Ordering::SeqCst);
                             return Outcome::Cancelled;
                         }
                     },
@@ -1074,8 +1190,22 @@ mod tests {
         String::from_utf8(out.stdout).unwrap()
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_runner_loop_reports_results_cancellation_and_an_unavailable_executor() {
+    /// An in-process service with the owner alice, the runner member runner1,
+    /// and the repository acme/demo, whose main (tagged v1; the tag `later`
+    /// is of a commit it does not reach) has `pipeline`, recorded so that its
+    /// run is queued.
+    struct Service {
+        dir: tempfile::TempDir,
+        app: crate::app::Shared,
+        url: String,
+        owner: String,
+        runner_token: String,
+        http: reqwest::Client,
+        repo: crate::model::Repo,
+        bare: PathBuf,
+    }
+
+    async fn service(pipeline: &str) -> Service {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
@@ -1138,12 +1268,7 @@ mod tests {
         // directly (no hooks: the hooks directory is empty) and recorded.
         let work = dir.path().join("work");
         std::fs::create_dir_all(work.join(".branvil")).unwrap();
-        std::fs::write(
-            work.join(".branvil/ci.toml"),
-            "[[jobs]]\nname = \"ok\"\nimage = \"alpine\"\ncommands = [\"echo hello from the job\", \"write out/r.txt report\", \"git rev-parse HEAD\", \"git describe --tags\", \"git tag --list\", \"git ls-files\", \"git config --list --local\"]\nartifacts = [{name = \"report\", paths = [\"out/\"]}]\n\n\
-             [[jobs]]\nname = \"slow\"\nimage = \"alpine\"\ncommands = [\"wait\"]\ntimeout_secs = 5000\n",
-        )
-        .unwrap();
+        std::fs::write(work.join(".branvil/ci.toml"), pipeline).unwrap();
         git(&work, &["init", "-q", "-b", "main"]);
         git(&work, &["add", "."]);
         git(&work, &["commit", "-qm", "pipeline"]);
@@ -1164,22 +1289,239 @@ mod tests {
             .await
             .unwrap();
         crate::refs::record_refs(&app, &repo).await.unwrap();
+        Service {
+            dir,
+            app,
+            url,
+            owner,
+            runner_token,
+            http,
+            repo,
+            bare,
+        }
+    }
 
-        let runner = Runner {
-            api: Api::new(&url, &runner_token),
-            work_dir: dir.path().join("runner"),
-            limits: ExecutorConfig {
+    /// Up to `max_jobs` attempts run at once, each to its own end. The
+    /// runner reads the limit from its configuration before every claim, so
+    /// a new limit applies to the next claim and stops no running job.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_runner_runs_up_to_max_jobs_attempts_at_once() {
+        let pipeline: String = ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| {
+                format!("[[jobs]]\nname = \"{n}\"\nimage = \"alpine\"\ncommands = [\"wait\"]\n\n")
+            })
+            .collect();
+        let Service {
+            dir,
+            app,
+            url,
+            owner,
+            runner_token,
+            http,
+            repo,
+            bare,
+        } = service(&pipeline).await;
+        let config = dir.path().join("runner.toml");
+        let max_jobs =
+            |n: u32| std::fs::write(&config, format!("[ci.executor]\nmax_jobs = {n}\n")).unwrap();
+        max_jobs(2);
+        let runner = Runner::new(
+            Api::new(&url, &runner_token),
+            dir.path().join("runner"),
+            Some((config.clone(), dir.path().to_path_buf())),
+            ExecutorConfig::default(),
+        );
+        let fake = Fake::new();
+        let serving = tokio::spawn(Arc::new(runner).serve(Arc::new(fake)));
+        let sha = app.git.branch_tips(&bare).await.unwrap()["main"].clone();
+        // The checks once `done` holds of them (by name: status, attempt).
+        let settle = |done: fn(&[(String, String, u64)]) -> bool| {
+            let (app, repo, sha) = (app.clone(), repo.clone(), sha.clone());
+            async move {
+                for _ in 0..100 {
+                    let mut seen: Vec<(String, String, u64, String)> = app
+                        .ci
+                        .head_checks(&repo, &sha)
+                        .await
+                        .unwrap()
+                        .checks
+                        .into_iter()
+                        .map(|c| {
+                            let status = c.conclusion.unwrap_or(c.status);
+                            (
+                                c.name,
+                                status,
+                                c.attempt.unwrap_or(0),
+                                c.attempt_id.unwrap_or_default(),
+                            )
+                        })
+                        .collect();
+                    seen.sort();
+                    let states: Vec<_> = seen
+                        .iter()
+                        .map(|c| (c.0.clone(), c.1.clone(), c.2))
+                        .collect();
+                    if done(&states) {
+                        return seen;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                panic!("the checks never settled");
+            }
+        };
+        let cancel = |id: String| {
+            let (http, url, owner) = (http.clone(), url.clone(), owner.clone());
+            async move {
+                let resp = http
+                    .post(format!("{url}/api/v1/repos/acme%2Fdemo/jobs/{id}/cancel"))
+                    .bearer_auth(&owner)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), 200);
+            }
+        };
+        fn count(s: &[(String, String, u64)], status: &str) -> usize {
+            s.iter().filter(|c| c.1 == status).count()
+        }
+
+        // Two run at once; the others wait in the queue, and the end of one
+        // starts the next.
+        let seen = settle(|s| count(s, "in_progress") == 2 && count(s, "queued") == 2).await;
+        cancel(
+            seen.iter()
+                .find(|c| c.1 == "in_progress")
+                .unwrap()
+                .3
+                .clone(),
+        )
+        .await;
+        let seen = settle(|s| {
+            count(s, "cancelled") == 1 && count(s, "in_progress") == 2 && count(s, "queued") == 1
+        })
+        .await;
+        let running: Vec<_> = seen.iter().filter(|c| c.1 == "in_progress").collect();
+        // With the limit lowered to one, the end of one job leaves the other
+        // running and the last queued.
+        max_jobs(1);
+        cancel(running[0].3.clone()).await;
+        settle(|s| count(s, "cancelled") == 2 && count(s, "in_progress") == 1).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let seen = settle(|s| count(s, "in_progress") == 1 && count(s, "queued") == 1).await;
+        assert!(
+            seen.iter()
+                .any(|c| c.0 == running[1].0 && c.1 == "in_progress" && c.2 == 1),
+            "{seen:?}"
+        );
+        // Raised again, the last starts next to it.
+        max_jobs(2);
+        let seen = settle(|s| count(s, "in_progress") == 2 && count(s, "cancelled") == 2).await;
+        for c in seen.iter().filter(|c| c.1 == "in_progress") {
+            assert_eq!(c.2, 1, "never interrupted: {seen:?}");
+            cancel(c.3.clone()).await;
+        }
+        settle(|s| count(s, "cancelled") == 4).await;
+        serving.abort();
+    }
+
+    /// A refused token stops the runner, but only once the jobs it runs have
+    /// ended on their own (each stopping and removing its microVM), not by
+    /// dropping them with their VMs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refused_token_lets_the_running_jobs_end_first() {
+        let pipeline = "[[jobs]]\nname = \"a\"\nimage = \"alpine\"\ncommands = [\"wait\"]\n\n[[jobs]]\nname = \"b\"\nimage = \"alpine\"\ncommands = [\"wait\"]\n";
+        let Service {
+            dir,
+            app,
+            url,
+            owner,
+            runner_token,
+            http,
+            repo,
+            bare,
+        } = service(pipeline).await;
+        let runner = Runner::new(
+            Api::new(&url, &runner_token),
+            dir.path().join("runner"),
+            None,
+            ExecutorConfig {
+                max_jobs: 2,
+                ..ExecutorConfig::default()
+            },
+        );
+        let fake = Arc::new(Fake::new());
+        let serving = tokio::spawn(Arc::new(runner).serve(fake.clone()));
+        let sha = app.git.branch_tips(&bare).await.unwrap()["main"].clone();
+        for _ in 0..100 {
+            let checks = app.ci.head_checks(&repo, &sha).await.unwrap().checks;
+            if checks.iter().all(|c| c.status == "in_progress") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let tokens: serde_json::Value = http
+            .get(format!("{url}/api/v1/members/runner1/tokens"))
+            .bearer_auth(&owner)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        for t in tokens["items"].as_array().unwrap() {
+            let resp = http
+                .delete(format!(
+                    "{url}/api/v1/members/runner1/tokens/{}",
+                    t["id"].as_str().unwrap()
+                ))
+                .bearer_auth(&owner)
+                .send()
+                .await
+                .unwrap();
+            assert!(resp.status().is_success(), "{}", resp.status());
+        }
+        let stopped = tokio::time::timeout(Duration::from_secs(30), serving)
+            .await
+            .expect("the runner stops")
+            .unwrap();
+        assert!(stopped.is_err());
+        assert_eq!(
+            fake.stopped.load(Ordering::SeqCst),
+            2,
+            "both jobs ended on their own"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_runner_loop_reports_results_cancellation_and_an_unavailable_executor() {
+        let Service {
+            dir,
+            app,
+            url,
+            owner,
+            runner_token,
+            http,
+            repo,
+            bare,
+        } = service(
+            "[[jobs]]\nname = \"ok\"\nimage = \"alpine\"\ncommands = [\"echo hello from the job\", \"write out/r.txt report\", \"git rev-parse HEAD\", \"git describe --tags\", \"git tag --list\", \"git ls-files\", \"git config --list --local\"]\nartifacts = [{name = \"report\", paths = [\"out/\"]}]\n\n\
+             [[jobs]]\nname = \"slow\"\nimage = \"alpine\"\ncommands = [\"wait\"]\ntimeout_secs = 5000\n",
+        )
+        .await;
+
+        let runner = Runner::new(
+            Api::new(&url, &runner_token),
+            dir.path().join("runner"),
+            None,
+            ExecutorConfig {
                 max_cpus: 3,
                 max_memory_mib: 2048,
                 max_timeout_secs: 100,
                 ..ExecutorConfig::default()
             },
-        };
-        let fake = Fake {
-            ready: AtomicBool::new(true),
-            hold_images: AtomicBool::new(false),
-            ran: Default::default(),
-        };
+        );
+        let fake = Fake::new();
         let job = |id: &str| {
             let (http, url, owner, id) = (http.clone(), url.clone(), owner.clone(), id.to_string());
             async move {

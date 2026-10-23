@@ -33,8 +33,9 @@ cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # 
   `BRANVIL_REPOSITORY`, `BRANVIL_SHA`, `BRANVIL_JOB`, `BRANVIL_ATTEMPT`,
   `BRANVIL_ATTEMPT_ID`. No tokens, no host variables. See "The job's
   environment" for `/work`, the user, and `/tmp`.
-- Jobs of one run are queued together and run one after another on a
-  runner (there are no dependencies between jobs).
+- Jobs of one run are queued together; a runner runs queued jobs, of any
+  run, up to `ci.executor.max_jobs` at once, each in a microVM of its own
+  (there are no dependencies between jobs).
 - Validation is strict: an unknown key (`cpus` and `memory_mib` included,
   with a reason of their own: they are the runner's), a value out of range, a
   path that is absolute or contains `..`, an image reference that is not
@@ -68,8 +69,10 @@ cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # 
   (a file of `MSB_HOME`) exclusively, and a job holds it shared from checking
   its image until its VM has started, so a load that re-points the tag waits
   for the jobs that are starting and never changes the image a checked job
-  runs; a job that waits for a pull or a load says so in its log and can be
-  cancelled meanwhile (`msb` used by hand does not take the lock). Settings → CI shows the tag to write and the digest of
+  runs (with several jobs at once, a pull or a load waits for a moment when
+  no job is starting); a job that waits for a pull or a load says so in its
+  log and can be cancelled meanwhile (`msb` used by hand does not take the
+  lock). Settings → CI shows the tag to write and the digest of
   every cached image. (A runner started by hand on another machine loads such
   an archive with `msb load` under its own `MSB_HOME`.)
 
@@ -218,6 +221,7 @@ definition (the pipeline is not read again).
 | one artifact | 64 MiB (`ci.artifact_max_mib`) | `413 too_large`; at most 16 artifacts per attempt, zip only, names `[A-Za-z0-9_.-]` declared by the job |
 | artifacts per attempt (before zipping) | 64 MiB (`ci.executor.artifacts_max_mib`) | runner side |
 | job cpus / memory | 4 / 4096 MiB (`ci.executor.max_cpus`, `max_memory_mib`) | every job runs with these |
+| jobs at once | 1 (`ci.executor.max_jobs`) | per runner; the runner claims a job only when it can start it, so the others wait in the service's queue. Jobs at once use that many times the CPUs and memory, and the disk of that many work directories (each with its restored cache, and a copy of it in the cache while it is saved) |
 | job time limit | 3600 s (`ci.executor.max_timeout_secs`) | the limit of a job that gives no `timeout_secs`; a larger `timeout_secs` is lowered to it, and the log says so |
 | dependency cache | 2048 MiB (`ci.executor.cache_max_mib`) | least recently used entries are removed |
 | retention | 30 days (`ci.retention_days`) | logs and artifacts of attempts finished earlier are deleted; the attempt records stay |
@@ -286,10 +290,12 @@ exits. The child reads the service's configuration file for its
 The owner changes the mode and the job resources under Settings → CI
 (`docs/api.md`, "CI settings") without restarting the service: they are
 written to `branvil.toml` (the rest of the file is kept as it is), switching
-the mode off stops the child, and new limits start it again; the settings
-already in effect change nothing. Stopping or restarting the child interrupts
-the attempt it is running, which is queued once more (see "Leases and
-interruptions"); the service then removes the microVM the child left. The
+the mode off stops the child, and the runner reads the limits from the file
+again before every claim, so new limits apply from the next job it starts and
+the running jobs keep theirs (a runner started by hand reads its own
+configuration file the same way). Stopping or restarting the child interrupts
+the attempts it is running, which are queued once more (see "Leases and
+interruptions"); the service then removes the microVMs the child left. The
 child refuses to start when it cannot read the configuration file. The image
 cache Settings → CI
 manages is the supervised runner's (`[ci.microsandbox] home`); a runner
@@ -411,8 +417,12 @@ reports itself unavailable without it, as without `msb`).
 - `src/runner/mod.rs`: the runner loop against an in-process service with a
   fake executor that starts no VM (results, cancellation, an unusable
   executor, the runner's CPUs, memory, and time limit, the image's digest on
-  the attempt and in the log, and a work directory that is a checkout of the
-  commit with the tags it reaches and no remote).
+  the attempt and in the log, a work directory that is a checkout of the
+  commit with the tags it reaches and no remote, up to `max_jobs` jobs at
+  once with the limit read before every claim, and a refused token that
+  lets the running jobs end before the runner stops).
+- `src/runner/workspace.rs`: the dependency cache (keys, eviction, and
+  restores and saves of one entry at once copying whole entries).
 - `src/runner/executor.rs`: `msb` run as a fake script (the user, the mounts
   and `/tmp` volume a job gets, their removal, and the sweep of this runner's
   leftovers only).

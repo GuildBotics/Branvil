@@ -6,6 +6,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::time::SystemTime;
 
 use crate::ci::pipeline::{ArtifactDef, CacheDef, JobDef, check_relative};
@@ -279,69 +280,100 @@ fn make_parents(root: &Path, rel: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Restores the first cache entry found among `keys` into the work
-/// directory. Returns the key used and the bytes copied.
-pub fn restore(
-    cache_root: &Path,
-    keys: &[String],
-    cache: &CacheDef,
-    work: &Path,
-) -> io::Result<Option<(String, u64)>> {
-    for key in keys {
-        let entry = cache_root.join(key);
-        if !entry.is_dir() {
-            continue;
+/// The runner's dependency cache. The jobs a runner runs at once share it:
+/// a save replaces its entry and evicts others only while no restore copies
+/// from the cache, so a restore copies an entry whole, the old one or the new
+/// one. One runner uses a work directory (`runner.lock`), so a lock of the
+/// process is enough.
+pub struct Cache {
+    root: PathBuf,
+    lock: RwLock<()>,
+}
+
+impl Cache {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            lock: RwLock::new(()),
         }
-        let mut total = 0;
-        for p in &cache.paths {
-            let src = entry.join("paths").join(p.trim_end_matches('/'));
-            if fs::symlink_metadata(&src).is_ok() {
-                let rel = p.trim_end_matches('/');
-                make_parents(work, rel)?;
-                total += copy_tree(&src, &work.join(rel))?;
+    }
+
+    /// Restores the first cache entry found among `keys` into the work
+    /// directory. Returns the key used and the bytes copied.
+    pub fn restore(
+        &self,
+        keys: &[String],
+        cache: &CacheDef,
+        work: &Path,
+    ) -> io::Result<Option<(String, u64)>> {
+        let _reading = self.lock.read().unwrap_or_else(|e| e.into_inner());
+        for key in keys {
+            let entry = self.root.join(key);
+            if !entry.is_dir() {
+                continue;
             }
+            let mut total = 0;
+            for p in &cache.paths {
+                let src = entry.join("paths").join(p.trim_end_matches('/'));
+                if fs::symlink_metadata(&src).is_ok() {
+                    let rel = p.trim_end_matches('/');
+                    make_parents(work, rel)?;
+                    total += copy_tree(&src, &work.join(rel))?;
+                }
+            }
+            record_use(&entry, SystemTime::now())?;
+            return Ok(Some((key.clone(), total)));
         }
-        record_use(&entry, SystemTime::now())?;
-        return Ok(Some((key.clone(), total)));
+        Ok(None)
     }
-    Ok(None)
-}
 
-/// Saves the cached paths of a successful job under `key`, then removes the
-/// least recently used entries beyond `max_bytes`.
-pub fn save(
-    cache_root: &Path,
-    key: &str,
-    cache: &CacheDef,
-    work: &Path,
-    max_bytes: u64,
-) -> io::Result<u64> {
-    save_with_clock(cache_root, key, cache, work, max_bytes, SystemTime::now)
-}
+    /// Saves the cached paths of a successful job under `key`, then removes
+    /// the least recently used entries beyond `max_bytes`.
+    pub fn save(
+        &self,
+        key: &str,
+        cache: &CacheDef,
+        work: &Path,
+        max_bytes: u64,
+    ) -> io::Result<u64> {
+        self.save_with_clock(key, cache, work, max_bytes, SystemTime::now)
+    }
 
-fn save_with_clock(
-    cache_root: &Path,
-    key: &str,
-    cache: &CacheDef,
-    work: &Path,
-    max_bytes: u64,
-    now: impl FnOnce() -> SystemTime,
-) -> io::Result<u64> {
-    fs::create_dir_all(cache_root)?;
-    let tmp = cache_root.join(format!(".{key}.{}", crate::util::random_secret::<6>()));
-    let mut total = 0;
-    for p in &cache.paths {
-        if let Ok(src) = no_links_below(work, p) {
-            total += copy_tree(&src, &tmp.join("paths").join(p.trim_end_matches('/')))?;
+    fn save_with_clock(
+        &self,
+        key: &str,
+        cache: &CacheDef,
+        work: &Path,
+        max_bytes: u64,
+        now: impl FnOnce() -> SystemTime,
+    ) -> io::Result<u64> {
+        fs::create_dir_all(&self.root)?;
+        // Copied aside without the lock (the copy is the long part), then
+        // put in place under it.
+        let tmp = self
+            .root
+            .join(format!(".{key}.{}", crate::util::random_secret::<6>()));
+        let saved = (|| {
+            let mut total = 0;
+            for p in &cache.paths {
+                if let Ok(src) = no_links_below(work, p) {
+                    total += copy_tree(&src, &tmp.join("paths").join(p.trim_end_matches('/')))?;
+                }
+            }
+            fs::create_dir_all(&tmp)?;
+            record_use(&tmp, now())?;
+            let _writing = self.lock.write().unwrap_or_else(|e| e.into_inner());
+            let entry = self.root.join(key);
+            let _ = fs::remove_dir_all(&entry);
+            fs::rename(&tmp, &entry)?;
+            evict(&self.root, max_bytes, &entry)?;
+            Ok(total)
+        })();
+        if saved.is_err() {
+            let _ = fs::remove_dir_all(&tmp);
         }
+        saved
     }
-    fs::create_dir_all(&tmp)?;
-    record_use(&tmp, now())?;
-    let entry = cache_root.join(key);
-    let _ = fs::remove_dir_all(&entry);
-    fs::rename(&tmp, &entry)?;
-    evict(cache_root, max_bytes, &entry)?;
-    Ok(total)
 }
 
 fn evict(cache_root: &Path, max_bytes: u64, saved_entry: &Path) -> io::Result<()> {
@@ -517,7 +549,9 @@ mod tests {
             ),
             "the image's digest is in the key"
         );
-        save(&root, &k1, &cache, &work, 1 << 20).unwrap();
+        Cache::new(root.clone())
+            .save(&k1, &cache, &work, 1 << 20)
+            .unwrap();
         let fresh = dir.path().join("fresh");
         fs::create_dir_all(&fresh).unwrap();
         fs::write(fresh.join("Cargo.lock"), "v1").unwrap();
@@ -526,7 +560,9 @@ mod tests {
             k1
         );
         assert_eq!(
-            restore(&root, std::slice::from_ref(&k1), &cache, &fresh).unwrap(),
+            Cache::new(root.clone())
+                .restore(std::slice::from_ref(&k1), &cache, &fresh)
+                .unwrap(),
             Some((k1.clone(), 6))
         );
         assert_eq!(
@@ -537,7 +573,9 @@ mod tests {
         let k2 = cache_key("acme/demo", &job, IMAGE, &cache, "protected", &fresh);
         assert_ne!(k1, k2, "key files are in the key");
         // A limit that fits only one entry keeps the newest.
-        save(&root, &k2, &cache, &fresh, 8).unwrap();
+        Cache::new(root.clone())
+            .save(&k2, &cache, &fresh, 8)
+            .unwrap();
         assert!(!root.join(&k1).exists());
     }
 
@@ -574,9 +612,13 @@ mod tests {
         fs::create_dir_all(work.join("target")).unwrap();
         fs::create_dir(&fresh).unwrap();
         fs::write(work.join("target/object"), b"object").unwrap();
-        save(&root, "z-old", &cache, &work, 100).unwrap();
+        Cache::new(root.clone())
+            .save("z-old", &cache, &work, 100)
+            .unwrap();
         assert_eq!(
-            restore(&root, &["z-old".into()], &cache, &fresh).unwrap(),
+            Cache::new(root.clone())
+                .restore(&["z-old".into()], &cache, &fresh)
+                .unwrap(),
             Some(("z-old".into(), 6))
         );
         // Fix the restored entry's use time so the test never depends on
@@ -590,7 +632,9 @@ mod tests {
         // Simulate a coarse clock: the save has exactly the restore's
         // timestamp, and its key sorts before the restored entry's key.
         assert_eq!(
-            save_with_clock(&root, "a-new", &cache, &fresh, 6, || restored_at).unwrap(),
+            Cache::new(root.clone())
+                .save_with_clock("a-new", &cache, &fresh, 6, || restored_at)
+                .unwrap(),
             6
         );
         assert!(!root.join("z-old").exists());
@@ -633,5 +677,67 @@ mod tests {
             !root.join("c").exists(),
             "timestamp precedes save preference"
         );
+    }
+
+    /// The jobs a runner runs at once share its cache: a restore while a
+    /// save replaces the same entry copies the old entry or the new one,
+    /// whole, and saves of one key leave no temporary directory behind.
+    #[test]
+    fn concurrent_restores_and_saves_of_one_key_see_whole_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(Cache::new(dir.path().join("cache")));
+        let def = CacheDef {
+            paths: vec!["target".into()],
+            key_files: vec![],
+        };
+        let saves: Vec<_> = (0..4)
+            .map(|n| {
+                let work = dir.path().join(format!("work{n}"));
+                for f in 0..200 {
+                    let file = work.join("target").join(format!("{f:03}"));
+                    fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    fs::write(file, format!("v{n}")).unwrap();
+                }
+                let (cache, def) = (cache.clone(), def.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..10 {
+                        cache.save("k", &def, &work, 1 << 30).unwrap();
+                    }
+                })
+            })
+            .collect();
+        let restores: Vec<_> = (0..4)
+            .map(|n| {
+                let (cache, def, root) = (cache.clone(), def.clone(), dir.path().to_path_buf());
+                std::thread::spawn(move || {
+                    for i in 0..20 {
+                        let fresh = root.join(format!("fresh{n}-{i}"));
+                        fs::create_dir_all(&fresh).unwrap();
+                        if cache
+                            .restore(&["k".into()], &def, &fresh)
+                            .unwrap()
+                            .is_none()
+                        {
+                            continue;
+                        }
+                        let versions: std::collections::BTreeSet<String> =
+                            fs::read_dir(fresh.join("target"))
+                                .unwrap()
+                                .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+                                .collect();
+                        let files = fs::read_dir(fresh.join("target")).unwrap().count();
+                        assert_eq!((versions.len(), files), (1, 200), "{versions:?}");
+                    }
+                })
+            })
+            .collect();
+        for t in saves.into_iter().chain(restores) {
+            t.join().unwrap();
+        }
+        let names: Vec<_> = fs::read_dir(dir.path().join("cache"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["k".to_string()]);
     }
 }
