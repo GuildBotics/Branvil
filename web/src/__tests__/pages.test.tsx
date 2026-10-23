@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { choose } from "../test/mantine";
-import { LOST_AFTER_MS } from "../query/events";
+import { applyChange, LOST_AFTER_MS } from "../query/events";
 import { pull } from "./fixtures";
 
 const page = (items: unknown[]) => json(200, { items, next_cursor: null });
@@ -104,6 +104,11 @@ describe("pages", () => {
     expect(rows.map((r) => r.getAttribute("aria-label"))).toEqual(["acme/web !1 Draft work", "acme/demo !3 Fix login"]);
     expect(rows[1]).toHaveAttribute("href", "/acme/demo/-/pulls/3");
     expect(within(rows[0] as HTMLElement).getByText("Draft")).toBeInTheDocument();
+    expect(within(table).getByRole("columnheader", { name: "Reviewers" })).toBeInTheDocument();
+    for (const row of rows) {
+      expect(within(row).getByRole("img", { name: "Reviewers: owner (Requested)" })).toBeInTheDocument();
+      expect(within(row).queryByRole("button")).not.toBeInTheDocument();
+    }
     // Another workspace's repository is not read.
     expect(fake.calls("GET", "/api/v1/repos/beta/x/pulls")).toHaveLength(0);
 
@@ -212,11 +217,46 @@ describe("pages", () => {
     expect(await screen.findByText("main has no commits yet.")).toBeInTheDocument();
   });
 
-  it("shows no default branch's checks on a workspace's list of pull requests", async () => {
-    const fake = fakeApi({ ...SHELL, "GET /api/v1/repos": page([repo("acme/demo")]), "GET /api/v1/repos/acme/demo/pulls": page([]) });
+  it("keeps the default branch checks below the list in the same card, with a collapsed workspace summary", async () => {
+    const tip = "f".repeat(40);
+    const fake = fakeApi({
+      ...SHELL,
+      "GET /api/v1/repos": page([repo("acme/demo")]),
+      "GET /api/v1/repos/acme/demo": json(200, repo("acme/demo")),
+      "GET /api/v1/repos/acme/demo/branches/main": json(200, { name: "main", sha: tip }),
+      [`GET /api/v1/repos/acme/demo/commits/${tip}/checks`]: json(200, { sha: tip, checks: [], checks_expected: false }),
+      "GET /api/v1/repos/acme/demo/pulls": page([]),
+    });
     renderApp("/acme/-/pulls");
-    expect(await screen.findByText("No open pull requests.")).toBeInTheDocument();
-    expect(fake.calls("GET", "/api/v1/repos/acme/demo")).toHaveLength(0);
+    const list = await screen.findByRole("table", { name: "Pull requests" });
+    await waitFor(() => expect(fake.calls("GET", `/api/v1/repos/acme/demo/commits/${tip}/checks`)).toHaveLength(1));
+    const summary = screen.getByRole("button", { expanded: false });
+    expect(list.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(list.closest(".mantine-Card-root")).toBe(summary.closest(".mantine-Card-root"));
+    const user = userEvent.setup();
+    await user.click(summary);
+    const sha = await screen.findByTitle(tip);
+    expect(sha.closest("a")).toHaveAttribute("href", `/acme/demo/-/commits/${tip}`);
+  });
+
+  it("refreshes review status in the list after a pull event, preserving row navigation", async () => {
+    const pr = pull({ reviewers: [], review_states: [] });
+    const fake = fakeApi({
+      ...SHELL,
+      "GET /api/v1/repos": page([repo("acme/demo")]),
+      "GET /api/v1/repos/acme/demo/pulls": [page([pr]), page([{ ...pr, review_states: [
+        { member: "review-bot", requested: false, verdict: "approve", outdated: false },
+      ] }])],
+    });
+    const { client } = renderApp("/acme/-/pulls");
+    const row = await screen.findByRole("row", { name: "acme/demo !3 Fix login" });
+    expect(await within(row).findByRole("img", { name: "Reviewers: no one" })).toBeInTheDocument();
+    act(() => applyChange({ kind: "pull", path: "acme/demo", id: "3" }, client));
+    const status = await within(row).findByRole("img", { name: "Reviewers: review-bot (Approved)" });
+    expect(fake.calls("GET", "/api/v1/repos/acme/demo/pulls")).toHaveLength(2);
+    expect(fake.calls("GET", "/api/v1/repos/acme/demo/pulls/3/activity")).toHaveLength(0);
+    await userEvent.setup().click(status);
+    expect(window.location.pathname).toBe("/acme/demo/-/pulls/3");
   });
 
   it("warns only when CI cannot run or an upstream cannot be followed, and a dismissed warning stays away", async () => {

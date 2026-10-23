@@ -6,7 +6,7 @@ import { Avatar, Menu, Text, UnstyledButton } from "@mantine/core";
 import { Check, MessageSquare, UserPlus, X } from "lucide-react";
 import type { ReactNode } from "react";
 import type { MemberKind, ReviewState } from "../api/types";
-import { useT } from "../i18n";
+import { useT, type Translate } from "../i18n";
 import { MemberAvatar } from "./common";
 
 export interface Person {
@@ -91,6 +91,16 @@ const Lead = ({ on, avatar }: { on: boolean; avatar: ReactNode }) => (
   </span>
 );
 
+/** The same avatar and state mark in the picker and the pull request list. */
+export function ReviewAvatar({ name, kind, state, size = 28 }: Person & { state?: ReviewState; size?: number }) {
+  return (
+    <span className="review-mark-anchor">
+      <MemberAvatar name={name} kind={kind} size={size} />
+      {state && <Mark state={state} />}
+    </span>
+  );
+}
+
 function Mark({ state }: { state: ReviewState }) {
   if (state.requested) return <span className="review-mark pending" />;
   if (!state.verdict) return null;
@@ -103,8 +113,12 @@ function stateKey(state: ReviewState): "requested" | "requestedAgain" | "approve
   return state.verdict ?? "requested";
 }
 
+export function reviewStateText(state: ReviewState, t: Translate): string {
+  return t(`people.review.${stateKey(state)}`) + (state.outdated && !state.requested ? t("people.review.stale") : "");
+}
+
 /**
- * Several people: the avatars of those `shown` (each with its `mark`) and an
+ * Several people: the avatars of those `shown` (each with its review `state`) and an
  * empty one open the menu, where choosing a person toggles them (the menu
  * stays open). `except` is not offered. The menu opens from the trigger's
  * `position` edge, which stays put as avatars come and go.
@@ -114,7 +128,7 @@ export function PeopleToggle({
   except,
   shown,
   on,
-  mark,
+  state,
   note,
   label,
   help,
@@ -126,7 +140,7 @@ export function PeopleToggle({
   except: string;
   shown: string[];
   on: (name: string) => boolean;
-  mark?: (name: string) => ReactNode;
+  state?: (name: string) => ReviewState | undefined;
   note?: (name: string) => string | null;
   label: string;
   help: string;
@@ -136,10 +150,7 @@ export function PeopleToggle({
 }) {
   const kindOf = (name: string) => people.find((p) => p.name === name)?.kind;
   const avatar = (name: string, size: number) => (
-    <span key={name} className="review-mark-anchor">
-      <MemberAvatar name={name} kind={kindOf(name)} size={size} />
-      {mark?.(name)}
-    </span>
+    <ReviewAvatar key={name} name={name} kind={kindOf(name)} size={size} state={state?.(name)} />
   );
   return (
     <Menu position={position} withinPortal closeOnItemClick={false}>
@@ -199,7 +210,7 @@ export function ReviewersPicker({
   disabled?: boolean;
 }) {
   const t = useT();
-  const text = (s: ReviewState) => t(`people.review.${stateKey(s)}`) + (s.outdated && !s.requested ? t("people.review.stale") : "");
+  const text = (s: ReviewState) => reviewStateText(s, t);
   const state = (name: string) => states.find((s) => s.member === name);
   return (
     <PeopleToggle
@@ -207,16 +218,13 @@ export function ReviewersPicker({
       except={author}
       shown={states.map((s) => s.member)}
       on={(name) => !!state(name)?.requested}
-      mark={(name) => {
-        const s = state(name);
-        return s && <Mark state={s} />;
-      }}
+      state={state}
       note={(name) => {
         const s = state(name);
         return s ? text(s) : null;
       }}
       label={t("people.reviewersTrigger", {
-        names: states.map((s) => `${s.member} (${text(s)})`).join(", ") || t("people.nobody"),
+        names: states.map((s) => `${s.member} (${text(s)})`).join(", ") || t("member.reviewersNobody"),
       })}
       help={t("people.reviewersHelp", { author })}
       onToggle={onToggle}
