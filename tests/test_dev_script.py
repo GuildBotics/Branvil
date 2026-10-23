@@ -1670,14 +1670,18 @@ for _row in OUTCOMES:
 
 
 class Reports(list):
-    """What a test that has run told its result (startTest, addSuccess, ...),
-    to tell it again."""
+    """What a test that has run told `result` (its callbacks: startTest,
+    addSuccess, addSubTest, ...), to tell it again. What a test asks of the
+    result (failfast) is the result's own."""
 
-    def __init__(self, test):
+    def __init__(self, test, result):
         super().__init__()
+        self.failfast = result.failfast
         test(self)
 
     def __getattr__(self, name):
+        if not name.startswith(("start", "stop", "add")):
+            raise AttributeError(name)
         return lambda *args: self.append((name, args))
 
 
@@ -1691,10 +1695,25 @@ class Concurrently(unittest.TestSuite):
                 yield from tests(test) if isinstance(test, unittest.TestSuite) else [test]
 
         with ThreadPoolExecutor(os.cpu_count()) as pool:
-            for reports in [pool.submit(Reports, test) for test in tests(self)]:
+            for reports in [pool.submit(Reports, test, result) for test in tests(self)]:
                 for name, args in reports.result():
                     getattr(result, name)(*args)
         return result
+
+
+class ConcurrentlyTests(unittest.TestCase):
+    def test_every_subtest_is_reported_unless_the_run_fails_fast(self):
+        class Failing(unittest.TestCase):
+            def test_cases(self):
+                for case in range(2):
+                    with self.subTest(case=case):
+                        self.fail(f"case {case}")
+
+        for failfast, failures in [(False, 2), (True, 1)]:
+            result = unittest.TestResult()
+            result.failfast = failfast
+            Concurrently([Failing("test_cases")]).run(result)
+            self.assertEqual(len(result.failures), failures, f"failfast={failfast}")
 
 
 def load_tests(loader, tests, pattern):
