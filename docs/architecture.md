@@ -524,6 +524,8 @@ repositories by CI status;
 opening it lists repository links, default branches, status badges and commit
 links. The first 30 repositories are read, with any omission shown. The queries
 stay active while folded and use the same event invalidation as the other pages.
+The list sizes state and CI columns to their contents, wraps reviewer avatars,
+and scrolls horizontally within its own frame when the columns need more room.
 The pull request's check list marks required checks. Its merge or publish card
 names required checks that have not succeeded on the displayed head and disables
 the action until they do; while checks are loading or cannot be read, required

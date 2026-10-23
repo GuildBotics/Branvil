@@ -250,7 +250,7 @@ describe("pages", () => {
     });
     const { client } = renderApp("/acme/-/pulls");
     const row = await screen.findByRole("row", { name: "acme/demo !3 Fix login" });
-    expect(await within(row).findByRole("img", { name: "Reviewers: No one" })).toBeInTheDocument();
+    expect(await within(row).findByRole("img", { name: "Reviewers: no one" })).toBeInTheDocument();
     act(() => applyChange({ kind: "pull", path: "acme/demo", id: "3" }, client));
     const status = await within(row).findByRole("img", { name: "Reviewers: review-bot (Approved)" });
     expect(fake.calls("GET", "/api/v1/repos/acme/demo/pulls")).toHaveLength(2);

@@ -224,7 +224,7 @@ export function ReviewersPicker({
         return s ? text(s) : null;
       }}
       label={t("people.reviewersTrigger", {
-        names: states.map((s) => `${s.member} (${text(s)})`).join(", ") || t("people.nobody"),
+        names: states.map((s) => `${s.member} (${text(s)})`).join(", ") || t("member.reviewersNobody"),
       })}
       help={t("people.reviewersHelp", { author })}
       onToggle={onToggle}

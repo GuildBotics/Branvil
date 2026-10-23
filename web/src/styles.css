@@ -1031,8 +1031,20 @@ pre {
   white-space: nowrap;
 }
 
+.pull-list {
+  grid-template-columns: minmax(90px, 120px) max-content minmax(160px, 1fr) max-content max-content 110px 124px max-content;
+  column-gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
 .pull-cols {
-  grid-template-columns: minmax(90px, 120px) 44px minmax(160px, 1fr) 80px 72px 100px 100px 140px;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+}
+
+.pull-list > .empty-row {
+  grid-column: 1 / -1;
 }
 
 .empty-row {

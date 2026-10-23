@@ -193,6 +193,12 @@ describe("pull request review", () => {
     expect(fake.calls("DELETE", `${P}/reviewers/owner`)[0]?.headers["X-Branvil-CSRF"]).toBe("csrf-123");
   });
 
+  it.each(["en", "ja"] as const)("uses a reviewer-specific empty label in the picker in %s", async (language) => {
+    fakeApi(pullRoutes({ [`GET ${P}`]: json(200, pull({ review_states: [] })) }));
+    renderApp("/acme/demo/-/pulls/3", language);
+    expect(await screen.findByRole("button", { name: language === "ja" ? "レビュアー: なし — クリックで依頼を変更" : "Reviewers: no one — click to request or withdraw" })).toBeInTheDocument();
+  });
+
   it("merges with the expected head and base and shows the refusal", async () => {
     const fake = fakeApi(
       pullRoutes({

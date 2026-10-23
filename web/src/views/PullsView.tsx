@@ -104,7 +104,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
         ) : pending ? (
           <Loading />
         ) : (
-          <div className="list" role="table" aria-label={t("pulls.title")}>
+          <div className="list pull-list" role="table" aria-label={t("pulls.title")}>
             <div className="list-header pull-cols" role="row">
               <span role="columnheader">{t("pulls.repository")}</span>
               <span role="columnheader">PR</span>
@@ -136,7 +136,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
                     <span role="cell">{p.state === "open" && <CiCell pull={p} load={i < CI_BUDGET} />}</span>
                     <Group gap={6} role="cell" wrap="nowrap">
                       <MemberAvatar name={p.author} kind={kindOf(p.author)} size={20} />
-                      <Text span size="sm">
+                      <Text span size="sm" truncate style={{ minWidth: 0 }} title={p.author}>
                         {p.author}
                       </Text>
                     </Group>

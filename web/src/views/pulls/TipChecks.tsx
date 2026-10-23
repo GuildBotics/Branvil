@@ -80,10 +80,10 @@ function WorkspaceTipChecks({ workspace, paths }: { workspace: string; paths: st
             {rows.map((row) => (
               <Box key={row.path}>
                 <Group gap="sm">
-                  <Link to={href.repo(row.path)} aria-label={row.path} style={{ flex: 1, textDecoration: "none" }}>
+                  <Link to={href.repo(row.path)} style={{ flex: 1, textDecoration: "none" }}>
                     <Group gap="sm">
-                      <Text span size="sm">{row.path}</Text>
-                      <Text span size="sm" c="dimmed">{row.branch ?? "—"}</Text>
+                      <Text span size="sm">{row.path}</Text>{" "}
+                      <Text span size="sm" c="dimmed">{row.branch ?? "—"}</Text>{" "}
                       <StateBadge tone={TONE[row.status]}>{label(row.status)}</StateBadge>
                     </Group>
                   </Link>

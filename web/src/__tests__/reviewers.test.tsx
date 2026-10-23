@@ -9,7 +9,7 @@ import { fakeApi, json } from "../test/fakeApi";
 import { ReviewersCell } from "../views/pulls/ReviewersCell";
 import { NEW_HEAD, pull } from "./fixtures";
 
-function renderReviewers(pr = pull()) {
+function renderReviewers(pr = pull(), language: "en" | "ja" = "en") {
   const fake = fakeApi({
     "GET /api/v1/members": json(200, { items: [], next_cursor: null }),
   });
@@ -17,7 +17,7 @@ function renderReviewers(pr = pull()) {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <MantineProvider env="test">
       <QueryClientProvider client={client}>
-        <I18nProvider initial="en">{children}</I18nProvider>
+        <I18nProvider initial={language}>{children}</I18nProvider>
       </QueryClientProvider>
     </MantineProvider>
   );
@@ -64,9 +64,9 @@ describe("pull request list reviewers", () => {
     expect(container.querySelector(".review-mark.approve")).toHaveClass("stale");
   });
 
-  it("shows no reviewer avatar when the server returns no review states", () => {
-    const { container } = renderReviewers(pull({ review_states: [] }));
-    expect(screen.getByRole("img", { name: "Reviewers: No one" })).toHaveTextContent("—");
+  it.each(["en", "ja"] as const)("uses a reviewer-specific empty label in %s", (language) => {
+    const { container } = renderReviewers(pull({ review_states: [] }), language);
+    expect(screen.getByRole("img", { name: language === "ja" ? "レビュアー: なし" : "Reviewers: no one" })).toHaveTextContent("—");
     expect(container.querySelector(".review-mark-anchor")).not.toBeInTheDocument();
   });
 });

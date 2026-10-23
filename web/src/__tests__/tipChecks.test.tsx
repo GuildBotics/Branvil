@@ -57,7 +57,7 @@ describe("default branch CI under the pull list", () => {
     });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle).toHaveTextContent("8 repositories");
-    expect(screen.queryByRole("link", { name: paths[0] })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /^acme\/passing\b/ })).not.toBeInTheDocument();
     await user.click(toggle);
     const section = await screen.findByRole("region", { name: "Default branch CI of acme" });
     expect(within(section).getAllByRole("link", { name: /^acme\// })).toHaveLength(8);
@@ -99,7 +99,7 @@ describe("default branch CI under the pull list", () => {
     await user.click(toggle);
     const section = await screen.findByRole("region", { name: "Default branch CI of acme" });
     expect(within(section).getByText("trunk")).toBeInTheDocument();
-    await user.click(within(section).getByRole("link", { name: "acme/demo" }));
+    await user.click(within(section).getByRole("link", { name: "acme/demo trunk pending" }));
     expect(window.location.pathname).toBe("/acme/demo");
     window.history.replaceState(null, "", "/acme/-/pulls");
     await user.click(within(section).getByText("trunk"));
