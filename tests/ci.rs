@@ -438,7 +438,8 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
         )
         .await;
     assert_eq!(st, 200, "{v}");
-    // The fast-forwarded main keeps the head's run: nothing runs again, and
+    // The fast-forwarded main keeps the head's run: nothing runs again (no
+    // job has a dependency cache), and
     // the merged pull request still shows its check once its branch is gone.
     assert!(runner.claim().await.is_none());
     let v = checks(&w, n).await;
@@ -447,6 +448,68 @@ async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
     let diag = w.server.ok("/admin/diagnostics", &w.owner).await;
     assert_eq!(diag["runner"]["state"], "ready", "{diag}");
     assert_eq!(diag["runner"]["runners"][0]["name"], "runner1");
+}
+
+/// A fast-forward merge runs no job of the merged head again, but those
+/// with a dependency cache: only a protected branch's run saves the cache, and
+/// a merged head's jobs ran for its pull request.
+#[tokio::test]
+async fn a_merge_runs_the_jobs_with_a_cache_again_as_the_default_branchs() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    let jobs = format!(
+        "[[jobs]]\nname = \"build\"\nimage = \"{IMAGE}\"\ncommands = [\"echo build\"]\ncache = {{ paths = [\"target\"] }}\n\n{}",
+        pipeline(&["lint"])
+    );
+    land(&w, "setup", &[(".branvil/ci.toml", &jobs)], None).await;
+    // Merged while its jobs waited, the setup's commit runs them as main's.
+    for _ in 0..2 {
+        let c = runner.claim().await.unwrap();
+        assert_eq!(c["cache_scope"], "protected", "{c}");
+        assert_eq!(runner.finish(&c, "success").await.0, 200);
+    }
+
+    let head = w.push_change("feature", "f.txt", "one\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    // `build` still runs for the pull request when it is merged.
+    let running = runner.claim().await.unwrap();
+    assert_eq!(running["job"]["name"], "build");
+    assert_eq!(running["cache_scope"], "branch:feature", "{running}");
+    let lint = runner.claim().await.unwrap();
+    assert_eq!(runner.finish(&lint, "success").await.0, 200);
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/merge", w.repo_path()),
+            &w.owner,
+            json!({"expected_head": head, "expected_base": p["base_sha"]}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    // The pull request's run of it is asked to stop; main's runs instead.
+    assert_eq!(runner.heartbeat(&running).await.1["cancel"], true);
+    let c = runner.claim().await.expect("build runs again as main's");
+    assert_eq!(
+        (
+            &c["job"]["name"],
+            &c["sha"],
+            &c["attempt"],
+            &c["cache_scope"]
+        ),
+        (
+            &json!("build"),
+            &json!(head),
+            &json!(2),
+            &json!("protected")
+        )
+    );
+    assert!(runner.claim().await.is_none(), "lint has no cache");
+    assert_eq!(runner.finish(&c, "success").await.0, 200);
+    let v = checks(&w, n).await;
+    assert_eq!(check(&v, "build")["conclusion"], "success", "{v}");
+    assert_eq!(check(&v, "build")["attempt"], 2, "{v}");
+    assert_eq!(check(&v, "lint")["attempt"], 1, "{v}");
 }
 
 #[tokio::test]

@@ -20,7 +20,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 
 use crate::ci::config::ExecutorConfig;
-use crate::ci::pipeline::{CacheDef, JobDef};
+use crate::ci::pipeline::JobDef;
 use executor::{Executor, Health, JobRun, Microsandbox, Outcome};
 
 #[derive(Subcommand)]
@@ -814,29 +814,18 @@ impl Runner {
                     Some(format!("Unsafe work directory: {e}")),
                 );
             }
-            let cache_key = |cache: &CacheDef, scope: &str| {
-                workspace::cache_key(&c.repo, job, &digest, cache, scope, &work)
-            };
             let key = job
                 .cache
                 .as_ref()
-                .map(|cache| cache_key(cache, &c.cache_scope));
+                .map(|cache| workspace::cache_key(&c.repo, job, &digest, cache, &work));
             if let (Some(cache), Some(key)) = (&job.cache, &key) {
-                let mut keys = vec![key.clone()];
-                if c.cache_scope != "protected" {
-                    keys.push(cache_key(cache, "protected"));
-                }
                 let restoring = Instant::now();
-                let (store, def, into) = (self.cache.clone(), cache.clone(), work.clone());
-                match blocking(move || store.restore(&keys, &def, &into)).await {
-                    Ok(Some((k, bytes))) => {
-                        let from = if &k == key {
-                            ""
-                        } else {
-                            " from the protected branches' cache (read only)"
-                        };
+                let (store, def, into, key) =
+                    (self.cache.clone(), cache.clone(), work.clone(), key.clone());
+                match blocking(move || store.restore(&key, &def, &into)).await {
+                    Ok(Some(bytes)) => {
                         say(format!(
-                            "cache restored{from} in {} ({bytes} bytes)",
+                            "cache restored in {} ({bytes} bytes)",
                             ms(restoring)
                         ))
                         .await
@@ -930,7 +919,12 @@ impl Runner {
                 }
                 say(format!("artifacts handled in {}", ms(collecting))).await;
             }
-            if conclusion == "success"
+            // Only the runs of protected branches write the cache, which every
+            // run reads: a pull request plants nothing, and pushes none of
+            // its entries out.
+            if conclusion == "success" && job.cache.is_some() && c.cache_scope != "protected" {
+                say("cache not saved (only a protected branch's run saves it)".into()).await;
+            } else if conclusion == "success"
                 && let (Some(cache), Some(key)) = (&job.cache, &key)
             {
                 let saving = Instant::now();
@@ -939,12 +933,7 @@ impl Runner {
                 let max = limits.cache_max_mib << 20;
                 match blocking(move || store.save(&key, &def, &from, max)).await {
                     Ok(bytes) => {
-                        say(format!(
-                            "cache saved in {} ({bytes} bytes, scope {})",
-                            ms(saving),
-                            c.cache_scope
-                        ))
-                        .await
+                        say(format!("cache saved in {} ({bytes} bytes)", ms(saving))).await
                     }
                     Err(e) => say(format!("cache save failed: {e}")).await,
                 }
@@ -1299,6 +1288,86 @@ mod tests {
             repo,
             bare,
         }
+    }
+
+    /// The run of a protected branch saves the cache; a pull request's run
+    /// restores that entry and saves nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn only_a_protected_branch_saves_the_cache() {
+        let Service {
+            dir,
+            app,
+            url,
+            owner,
+            runner_token,
+            http,
+            repo,
+            bare,
+        } = service(
+            "[[jobs]]\nname = \"build\"\nimage = \"alpine\"\ncommands = [\"write target/out built\"]\ncache = { paths = [\"target\"] }\n",
+        )
+        .await;
+        let runner = Runner::new(
+            Api::new(&url, &runner_token),
+            dir.path().join("runner"),
+            None,
+            ExecutorConfig::default(),
+        );
+        let fake = Fake::new();
+        let log_of = |sha: String| {
+            let (app, repo) = (app.clone(), repo.clone());
+            async move {
+                let checks = app.ci.head_checks(&repo, &sha).await.unwrap().checks;
+                let id = checks[0].attempt_id.clone().unwrap();
+                app.ci.log_tail(&id, 1 << 20).await.unwrap().0
+            }
+        };
+        let main = app.git.branch_tips(&bare).await.unwrap()["main"].clone();
+        assert!(runner.once(&fake).await.unwrap());
+        let log = log_of(main).await;
+        assert!(log.contains("[branvil] no cache entry yet\n"), "{log}");
+        assert!(log.contains("[branvil] cache saved in "), "{log}");
+
+        let work = dir.path().join("work");
+        git(&work, &["checkout", "-qb", "feature"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "feature"]);
+        git(&work, &["push", "-q", bare.to_str().unwrap(), "feature"]);
+        crate::refs::record_refs(&app, &repo).await.unwrap();
+        let resp = http
+            .post(format!("{url}/api/v1/repos/acme%2Fdemo/pulls"))
+            .bearer_auth(&owner)
+            .json(&serde_json::json!({"title": "feature", "head": "feature", "base": "main"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+        let feature = app.git.branch_tips(&bare).await.unwrap()["feature"].clone();
+        assert!(runner.once(&fake).await.unwrap());
+        let log = log_of(feature).await;
+        assert!(log.contains("[branvil] cache restored in "), "{log}");
+        assert!(
+            log.contains("[branvil] cache not saved (only a protected branch's run saves it)\n")
+                && !log.contains("cache saved"),
+            "{log}"
+        );
+        let entries = std::fs::read_dir(dir.path().join("runner/cache"))
+            .unwrap()
+            .count();
+        assert_eq!(entries, 1, "the pull request added no entry");
+
+        // main's next commit restores the entry and saves it again.
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "next"]);
+        git(&work, &["push", "-q", bare.to_str().unwrap(), "main"]);
+        crate::refs::record_refs(&app, &repo).await.unwrap();
+        let next = app.git.branch_tips(&bare).await.unwrap()["main"].clone();
+        assert!(runner.once(&fake).await.unwrap());
+        let log = log_of(next).await;
+        assert!(
+            log.contains("[branvil] cache restored in ")
+                && log.contains("[branvil] cache saved in "),
+            "{log}"
+        );
     }
 
     /// Up to `max_jobs` attempts run at once, each to its own end. The

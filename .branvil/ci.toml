@@ -9,8 +9,9 @@
 # look newer than the checked-out files: the first command makes them newer
 # than any restored output, so Cargo rebuilds this crate and reuses only the
 # dependencies.
-# As this crate is rebuilt anyway, incremental data would only fill the
-# cache (CARGO_INCREMENTAL=0).
+# Incremental data would save little of that rebuild and fill the cache
+# (CARGO_INCREMENTAL=0; measured in docs/performance.md, "Branvil's own
+# pipeline").
 #
 # npm's cache is under the work directory too; `node_modules` is installed
 # again by `npm ci` every time.

@@ -113,7 +113,10 @@ Every commit runs its own pipeline: a tip of the default branch and the head
 of an open pull request alike read `.branvil/ci.toml` from that commit. A pull
 request that changes the pipeline runs the changed pipeline as its checks, so
 a mistake in it shows before the merge. A merge is a fast-forward, so the
-default branch's new tip keeps the run the head already has.
+default branch's new tip keeps the run the head already has; only the jobs
+with a dependency cache run again, as the default branch's, since only a
+protected branch's run saves the cache ("Dependency cache"). Their checks show
+the new attempt.
 
 A pull request can therefore change its own jobs, but not the repository's
 settings, which only the owner changes (`PATCH /api/v1/repos/{repo}`):
@@ -128,7 +131,7 @@ settings, which only the owner changes (`PATCH /api/v1/repos/{repo}`):
   runner's CPUs and memory, and its time limit capped by the runner's; its
   image is the version the owner put in the runner's cache under the tag the
   pipeline names (a pipeline cannot name a digest), and a pull request's run
-  never writes the protected cache ("Dependency cache"). Settings → CI lists
+  never writes the cache ("Dependency cache"). Settings → CI lists
   the images of the default branches' pipelines; a pull request that names
   another image concludes `startup_failure` with the reason until the owner
   pulls or loads it.
@@ -242,18 +245,35 @@ is refused, and nothing outside the work directory is read.
 
 ## Dependency cache
 
-`cache.paths` are restored into the work directory before the job and saved
-after a successful job. The key is the SHA-256 of the repository, the job
-name, the configuration digest of the image the job runs on (a new version of
-the tag does not reuse what the previous one built), the user the job runs as
-(microsandbox records with each file the job writes the owner the VM saw, and
-the copies keep it), the cached paths, the content of `cache.key_files`, and the
-**scope**: `protected` for runs a protected branch asked for, `branch:<name>`
-otherwise. A run reads its own scope and, when it is not protected, the
-protected scope too, but writes only its own: a pull request cannot plant a
-cache entry that the default branch would use. Copies never write through a
-symbolic link at the destination. The cache lives in
-`<runner work dir>/cache/`.
+`cache.paths` are restored into the work directory before the job, and saved
+after a successful job of a run that a protected branch asked for (its cache
+scope is `protected`). When a protected branch comes to want a commit whose
+jobs ran for a pull request (a fast-forward merge), the jobs with a cache run
+again as its own (one still running for the pull request is stopped), and an
+attempt still queued takes its run's scope when a runner claims it. So a merge
+costs one more run of every job with a cache (four of the six of Branvil's
+own pipeline), and when the branch moves on before they end, they are
+superseded and the next commit's run saves the cache.
+A pull request's run (`branch:<name>`) restores the
+same entries and saves nothing (its log says `cache not saved`): it cannot
+plant a cache entry that the default branch would use, and its runs never
+push out of the cache the entries every run restores. The key is the SHA-256
+of the repository, the job name, the configuration digest of the image the
+job runs on (a new version of the tag does not reuse what the previous one
+built), the user the job runs as (microsandbox records with each file the job
+writes the owner the VM saw, and the copies keep it), the cached paths, and
+the content of `cache.key_files`. Copies never write through a symbolic link
+at the destination. The cache lives in `<runner work dir>/cache/`.
+
+A job finds no entry (`no cache entry yet`) when no protected branch's run
+has saved one for its key yet: its `cache.key_files` differ from those a
+protected branch last ran with (a pull request that changes a lock file
+builds its dependencies again on every push until a protected branch has run
+with that file), its image tag has a new version, or the entry was evicted.
+The cache holds one entry per job with a cache of every repository the runner
+serves. While a protected branch's run saves the entries of a new lock file,
+pull requests still restore the previous ones, so a `cache_max_mib` of twice
+their total keeps both until the pull requests catch up.
 
 Restoring and saving both explicitly record the last-use time. Eviction removes
 the oldest timestamps first. For equal timestamps, the entry just saved is
@@ -331,7 +351,8 @@ Per job the runner:
    keeps what the job wrote up to then, and removes the sandbox (by its
    `branvil.job` label) and then its `/tmp` volume (which outlives the
    sandbox), warning only about one that exists and could not be removed;
-5. uploads artifacts, saves the cache after a success, reports the
+5. uploads artifacts, saves the cache after a success of a protected
+   branch's run, reports the
    conclusion with the image's configuration digest, and deletes the work
    directory.
 
@@ -419,8 +440,9 @@ reports itself unavailable without it, as without `msb`).
   executor, the runner's CPUs, memory, and time limit, the image's digest on
   the attempt and in the log, a work directory that is a checkout of the
   commit with the tags it reaches and no remote, up to `max_jobs` jobs at
-  once with the limit read before every claim, and a refused token that
-  lets the running jobs end before the runner stops).
+  once with the limit read before every claim, a refused token that
+  lets the running jobs end before the runner stops, and a cache that only
+  a protected branch's run saves).
 - `src/runner/workspace.rs`: the dependency cache (keys, eviction, and
   restores and saves of one entry at once copying whole entries).
 - `src/runner/executor.rs`: `msb` run as a fake script (the user, the mounts

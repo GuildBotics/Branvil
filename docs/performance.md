@@ -471,6 +471,10 @@ branches' entries the cold run saved.
 | dev-script | 332.0 s | 333.9 s | — | — | 599 / 596 MiB |
 | branvil-integration | 168.5 s | 58.7 s | 5.2 s (1228 MB) | 8.8 s | 2196 / 2004 MiB |
 
+These runs predate the rule that only a protected branch's run saves the
+cache (`docs/ci.md`, "Dependency cache"): a pull request's run, like the warm
+one, now restores the cache and saves nothing.
+
 Every job: the source fetched in 16–46 ms (a bundle of 0.9 MB), checked out
 in 76–127 ms, its sandbox started in 252–553 ms and removed in 40–66 ms.
 
@@ -485,3 +489,20 @@ in 76–127 ms, its sandbox started in 252–553 ms and removed in 40–66 ms.
 - A job's peak memory is what the guest touched: about 560 MiB for a VM that
   only boots and runs a shell command, and up to about 3.1 GiB for `test`,
   below the 6 GiB every job gets.
+
+Incremental compilation, on the same conditions on 2026-10-23 (`1c4fc75`):
+each pair is a commit and the next one, a small change of `src/util.rs`
+(a new function), the second restoring the first's cache, with the
+pipeline's `CARGO_INCREMENTAL=0` and without it.
+
+| Job (the second commit) | `CARGO_INCREMENTAL=0` | Incremental | Its cache entry |
+| --- | --- | --- | --- |
+| `test`: Cargo's `Finished … in` | 54.1 s | 42.5 s | 956 → 2218 MiB |
+| `test`: commands | 98 s | 87 s | |
+| `branvil-integration`: commands | 49 s | 44 s | 1172 → 1689 MiB |
+| `clippy`: entry | | | 462 → 644 MiB |
+
+Incremental data saves about 17 s of compiling a commit (`clippy` was not
+compared: the change failed its lint `items_after_test_module`) and more than
+doubles the largest entries, which the cache copies twice per job (2.6 s and
+5.6 s for `test`'s 2218 MiB). The pipeline keeps `CARGO_INCREMENTAL=0`.
