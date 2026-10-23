@@ -1032,7 +1032,7 @@ pre {
 }
 
 .pull-cols {
-  grid-template-columns: 120px 52px minmax(160px, 1fr) 96px 96px 110px 120px 150px;
+  grid-template-columns: minmax(90px, 120px) 44px minmax(160px, 1fr) 80px 72px 100px 100px 140px;
 }
 
 .empty-row {
