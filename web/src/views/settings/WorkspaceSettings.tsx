@@ -133,7 +133,8 @@ type RepoForm = {
   default_branch: string;
   protected_branches: string[];
   required_checks: string[];
-  required_approvals: number;
+  /** `""` while the field is empty, which cannot be saved. */
+  required_approvals: string | number;
   ci_network: boolean;
   labels: string[];
 };
@@ -155,7 +156,8 @@ function RepoEditor({ repo, tab }: { repo: Repository; tab: "basic" | "ci" }) {
   // The form keeps the revision it was filled from, so a stale save is refused (409).
   const [form, setForm] = useState<RepoForm>(() => seed(repo));
   const save = useMutation({
-    mutationFn: () => api.repos.update(repo.path, { ...form, default_branch: form.default_branch.trim() }),
+    mutationFn: () =>
+      api.repos.update(repo.path, { ...form, default_branch: form.default_branch.trim(), required_approvals: Number(form.required_approvals) }),
     onSuccess: (r) => setForm(seed(r)),
     onSettled: () => {
       void client.invalidateQueries({ queryKey: keys.repos() });
@@ -177,7 +179,7 @@ function RepoEditor({ repo, tab }: { repo: Repository; tab: "basic" | "ci" }) {
       )}
       {save.isSuccess && !stale && <Notice>{t("settings.saved")}</Notice>}
       <Group>
-        <Button onClick={() => save.mutate()} disabled={save.isPending}>
+        <Button onClick={() => save.mutate()} disabled={save.isPending || form.required_approvals === ""}>
           {t("common.save")}
         </Button>
       </Group>
@@ -244,7 +246,7 @@ function RepoEditor({ repo, tab }: { repo: Repository; tab: "basic" | "ci" }) {
               label={t("repo.requiredApprovals")}
               description={t(repo.upstream ? "settings.approvalsHelpUpstream" : "settings.approvalsHelp")}
               value={form.required_approvals}
-              onChange={(v) => setForm({ ...form, required_approvals: Number(v) })}
+              onChange={(v) => setForm({ ...form, required_approvals: v })}
               min={0}
               allowNegative={false}
               allowDecimal={false}

@@ -118,8 +118,9 @@ impl ReviewState {
     }
 }
 
-/// Every member's review state, in the order they joined the review: the
-/// one place it is decided. `reviews` are in the order they were submitted
+/// Every member's review state, the one place it is decided: the members
+/// who reviewed, in the order of their first review, then those asked who
+/// have not reviewed. `reviews` are in the order they were submitted
 /// (a thread reply is not a review). The author is not a reviewer: their own
 /// reviews (only comments can be submitted) count for nothing.
 fn review_states(p: &Pull, reviews: &[Review], head: &str) -> Vec<ReviewState> {
@@ -155,8 +156,11 @@ fn review_states(p: &Pull, reviews: &[Review], head: &str) -> Vec<ReviewState> {
 
 /// The review states of `p` with `head` as its current head.
 async fn read_review_states(app: &App, p: &Pull, head: &str) -> AppResult<Vec<ReviewState>> {
-    let q = p.clone();
-    let reviews = app.store.read(move |r| reviews_of(r, &q)).await?;
+    let (repo, number) = (p.repo.clone(), p.number);
+    let reviews = app
+        .store
+        .read(move |r| reviews_of(r, &repo, number))
+        .await?;
     Ok(review_states(p, &reviews, head))
 }
 
@@ -590,8 +594,8 @@ fn inline_view(c: &InlineComment, pull_url: &str) -> ThreadCommentView {
     }
 }
 
-fn reviews_of(r: &impl Rd, p: &Pull) -> AppResult<Vec<Review>> {
-    r.prefix_all(store::REVIEWS, &Key::new().s(&p.repo).u(p.number).bytes())
+fn reviews_of(r: &impl Rd, repo: &str, number: u64) -> AppResult<Vec<Review>> {
+    r.prefix_all(store::REVIEWS, &Key::new().s(repo).u(number).bytes())
 }
 
 fn threads_of(r: &impl Rd, p: &Pull, head_sha: &str, pull_url: &str) -> AppResult<Vec<ThreadView>> {
@@ -625,7 +629,7 @@ fn activity_of(r: &impl Rd, p: &Pull, head_sha: &str, pull_url: &str) -> AppResu
             .iter()
             .map(|c| comment_view(c, pull_url))
             .collect(),
-        reviews: reviews_of(r, p)?
+        reviews: reviews_of(r, &p.repo, p.number)?
             .iter()
             .map(|x| review_view(x, pull_url))
             .collect(),

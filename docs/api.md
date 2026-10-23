@@ -506,8 +506,9 @@ Git at request time (`""` when the branch is gone); a merged pull request's
 `head_sha` is the head it merged (`merge_sha`, or `upstream.pushed` when merged
 on the upstream host). `reviewers` are the pending review
 requests: a member leaves it by submitting a review and is back on a new request.
-`review_states` is where every member who was asked or reviewed stands, in the
-order they joined the review (the reviewer badges of the GUI draw it):
+`review_states` is where every member who was asked or reviewed stands (the
+reviewer badges of the GUI draw it): first the members who reviewed, in the
+order of their first review, then those asked who have not reviewed:
 `requested` is an open request, `verdict` the verdict of their last review
 (`null` before any), and `outdated` whether that review is on a commit other
 than `head_sha`. The author is never in it. `approvals` counts the states not

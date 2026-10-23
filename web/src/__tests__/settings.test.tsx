@@ -151,6 +151,31 @@ describe("settings", () => {
     });
   });
 
+  it("does not save a repository while its required approvals are empty", async () => {
+    const fake = fakeApi({
+      ...SHELL,
+      "GET /api/v1/repos": page([REPO]),
+      "PATCH /api/v1/repos/acme/demo": json(200, { ...REPO, required_approvals: 0, revision: 5 }),
+    });
+    const user = userEvent.setup();
+    renderApp("/-/settings");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("tab", { name: "CI" }));
+    const approvals = screen.getByRole("textbox", { name: "Required approvals" });
+    await user.clear(approvals);
+    const ci = screen.getByRole("tabpanel", { name: "CI" });
+    const save = within(ci).getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    await user.click(save);
+    expect(fake.calls("PATCH", "/api/v1/repos/acme/demo")).toHaveLength(0);
+    // 0, typed, is a number and is saved.
+    await user.type(approvals, "0");
+    expect(save).toBeEnabled();
+    await user.click(save);
+    await waitFor(() => expect(fake.calls("PATCH", "/api/v1/repos/acme/demo")).toHaveLength(1));
+    expect(fake.calls("PATCH", "/api/v1/repos/acme/demo")[0]?.body).toMatchObject({ required_approvals: 0 });
+  });
+
   it("sets an agent's code host account with a token that is sent once and never shown", async () => {
     const aiko = { name: "aiko", display_name: "Aiko", kind: "agent", accounts: [], reviewers: [] };
     const withAccount = { ...aiko, accounts: [{ provider: "github", login: "aiko-bot", kind: "token", set_at: "2026-10-16T00:00:00Z" }] };
