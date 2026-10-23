@@ -3,14 +3,11 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import * as api from "../../api/endpoints";
 import type { Webhook } from "../../api/types";
-import { ErrorMessage, Loading, StateBadge } from "../../components/common";
+import { ErrorMessage, Loading, MASKED_SECRET, StateBadge } from "../../components/common";
 import { PanelHeader } from "../../components/PanelHeader";
 import { useT } from "../../i18n";
 import { useWebhook } from "../../query/hooks";
 import { keys } from "../../query/keys";
-
-/** What a secret field shows while one is saved, as in GuildBotics Desktop. */
-const MASKED_SECRET = "••••••••••••";
 
 /** The webhook told of automatic publishes. Its URL is a secret: entered here, never shown again (only its host). */
 export function NotificationsSettings() {
