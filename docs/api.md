@@ -283,6 +283,7 @@ A workspace holds repositories (`<workspace>/<name>`) and has one board.
   "protected_branches": ["main"],
   "required_checks": ["test"],
   "required_approvals": 1,
+  "auto_land": false,
   "ci_network": false,
   "labels": ["bug", "feature"],
   "upstream": null,
@@ -292,12 +293,14 @@ A workspace holds repositories (`<workspace>/<name>`) and has one board.
 
 `labels` are the labels its tickets may carry. `required_approvals` is how
 many approvals a merge or a publish needs (`0` needs none; a new repository
-needs 1; see "Pull requests"). `upstream` is the repository on
+needs 1; see "Pull requests"). `auto_land` says the repository lands its pull
+requests by itself (`false` for a new repository; see "Landing
+automatically"). `upstream` is the repository on
 a code host it follows and publishes to, or `null` (see "Upstream").
 
 - `GET /api/v1/repos` → items (every repository), by path.
 - `POST /api/v1/repos` (owner) `{"path","default_branch"?,"labels"?}` (default `main`, no labels) → repository. `path` is `<workspace>/<name>` of an existing workspace (`404 not_found` otherwise). An empty bare repository is created.
-- `PATCH /api/v1/repos/{repo}` (owner) `{"revision", "default_branch"?, "required_checks"?, "required_approvals"?, "protected_branches"?, "ci_network"?, "labels"?}` → `409 conflict` when `revision` is stale. Removing a label leaves it on the tickets that carry it. `ci_network` is the network access of CI jobs (`docs/ci.md`; the CI tab of the repository's settings). With an upstream, the default branch follows the upstream's and cannot be changed (`409 conflict`).
+- `PATCH /api/v1/repos/{repo}` (owner) `{"revision", "default_branch"?, "required_checks"?, "required_approvals"?, "auto_land"?, "protected_branches"?, "ci_network"?, "labels"?}` → `409 conflict` when `revision` is stale. Removing a label leaves it on the tickets that carry it. `ci_network` is the network access of CI jobs (`docs/ci.md`; the CI tab of the repository's settings). With an upstream, the default branch follows the upstream's and cannot be changed (`409 conflict`).
 
 ### `GET /api/v1/repos/{repo}/branches/{branch}`
 
@@ -600,9 +603,30 @@ request was published (see "Upstream").
   open pull request has it as its head or base. A pull request merged on the
   upstream host has its head branch deleted in Branvil the same way, and only
   while that branch is still at `upstream.pushed`; the host's branch stays.
+  A repository with `auto_land` merges by itself once these checks pass
+  ("Landing automatically").
 - `POST .../pulls/{number}/close` and `.../reopen` → pull request. Reopening is
   `409 conflict` when another open pull request has the same head and base; a merged
   pull request cannot be closed or reopened.
+
+### Landing automatically
+
+A repository with `auto_land` lands an open pull request that is not a draft
+by itself once the owner's merge or publish of it would succeed (the required
+approvals and checks of its head, the head containing the base): without an
+upstream it is merged, with one it is published as its author. Branvil looks
+again after every change that may make one landable (a pull request opened,
+marked ready, reopened, reviewed, or its reviewers changed; a push or any other
+ref change; a CI attempt's state; the repository's settings or upstream; an
+account set for a member), at start, and every minute. A failure is not
+recorded; the next look tries again. With no required approvals and checks, a
+ready pull request lands as soon as it is opened; a draft is held.
+
+Branvil publishes a pull request by itself once: one that has an `upstream`
+record (published before, by the owner or by Branvil, whatever became of it,
+a refusal by the host included) is left to the owner's publish. An automatic
+publish has `upstream.auto: true`, and the webhook ("Webhook") is told of it
+once its pull request is open on the host.
 
 ### Checks (readiness data)
 
@@ -737,9 +761,11 @@ nothing.
 `GET /api/v1/events` is a Server-Sent Events stream. Each event is
 `event: change` with `data: {"kind": "ticket"|"pull"|"board"|"check"|"upstream"|"repo", "path": "...", "id": "..."}`.
 `path`/`id` by kind: `ticket` repository / key, `pull` repository / number, `board` workspace / —, `check`
-repository / commit sha, `upstream` repository / — (what following its upstream found changed), `repo` repository / —. Events only say what changed; the GUI refetches it. On reconnect (or after a
+repository / commit sha, `upstream` repository / — (what following its upstream found changed), `repo` repository / — (its settings, its upstream, or its refs changed, or a member's account on its upstream host was set). Events only say what changed; the GUI refetches it. On reconnect (or after a
 `event: reset`, sent when the client fell behind) the GUI refetches what it shows.
-The stream ends when the service shuts down.
+The stream ends when the service shuts down. The service subscribes to the
+same changes itself to land pull requests automatically ("Landing
+automatically").
 
 ## Administration (owner)
 
@@ -829,20 +855,47 @@ is polled when, and how conflicts are settled: `docs/architecture.md`,
   Publishing a pull request published to this upstream changes nothing;
   publishing one whose sending stopped replaces what the host has on the
   branch; one published to an earlier upstream is published anew here.
+  A repository with `auto_land` publishes by itself, once ("Landing
+  automatically").
 - The `upstream` of a pull request:
 
   ```json
   {"provider": "github", "repository": "acme/demo",
    "account": "aiko", "number": 42, "url": "https://github.com/acme/demo/pull/42",
    "state": "open", "pushed": "<40 hex>", "published_at": "...",
-   "error": null, "stopped": null}
+   "error": null, "stopped": null, "auto": false, "notified_at": null}
   ```
 
   `provider` and `repository` are where it was published. `state` is the
   host's: `none` (no pull request there yet), `open`, `closed`, or `merged`. `pushed` is what Branvil
   last pushed. `error` is the last failure (retried at the next poll);
   `stopped` says why sending the branch stopped (the host has a commit Branvil
-  did not push, or refused the update).
+  did not push, or refused the update). `auto` says Branvil published it by
+  itself (the owner's publish makes it `false`), and `notified_at` when the
+  webhook was told of that.
+
+### Webhook
+
+The webhook Branvil tells when it publishes a pull request by itself, since
+people merge it on the host. Its URL is a credential of another system: it is
+kept in `<data>/secrets/webhook.url` (`0600`), never returned, and not in
+backups.
+
+- `GET /api/v1/admin/webhook` → `{"set": true, "host": "hooks.slack.com",
+  "problem": null}`: whether one is set, the host of its URL, and why the last
+  send failed (kept in memory; retried at the next look).
+- `PUT /api/v1/admin/webhook` `{"url": "https://..."}` → the same. `400
+  invalid` unless it is an `http` or `https` URL. It replaces the one set.
+- `DELETE /api/v1/admin/webhook` → the same, with `set: false`.
+
+For each automatic publish whose pull request is open on the host and in
+Branvil, Branvil posts once `{"text": "<title> (<repo> !<n>) was published to
+GitHub automatically and awaits a merge there.\n<Branvil pull request
+URL>\n<host pull request URL>"}` (a Slack Incoming Webhook takes it as it
+is). A `2xx` answer sets the pull request's `upstream.notified_at`; anything
+else is retried at the next look. Nothing is sent without a webhook (one set
+later is told of the automatic publishes still open), for a merge, or for the
+owner's publish.
 
 ### CI settings
 

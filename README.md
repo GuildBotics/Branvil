@@ -125,8 +125,10 @@ merge or a publish needs the repository's required checks on the head and its
 required approvals (Settings → Repositories → a repository → CI; 1 unless
 changed, 0 needs none): members other than the author whose last review
 approves the current head and who were not asked to review again since. The
-author can only comment on their own pull request. A runner uses only the
-runner API.
+author can only comment on their own pull request. With **Land automatically**
+on the same tab, the repository merges (or, with an upstream, publishes once)
+by itself an open pull request that is not a draft as soon as it meets them;
+keeping a pull request a draft holds it. A runner uses only the runner API.
 
 Under Settings → Members → a member → Reviewers, the owner chooses who is
 asked to review every pull request that member opens (owners and agents other
@@ -341,6 +343,12 @@ outside see. Branvil never pushes the default branch; it follows it.
    request's checks (`github/<name>`, with their logs), later pushes and edits
    follow, and once a person merges on GitHub, Branvil's default branch follows
    and its pull request and tickets close.
+
+   With **Land automatically** on, Branvil publishes a pull request by itself
+   once it meets the conditions, and tells a webhook once, with links to both
+   pull requests, since a person merges it on GitHub: under Settings →
+   Notifications, the owner enters its URL (a Slack Incoming Webhook takes the
+   message as it is), which is kept like a credential and never shown again.
 
 Branvil polls GitHub with conditional requests (an unchanged answer is a free
 `304`): every 60 s while a published pull request is open, every 15 min

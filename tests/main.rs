@@ -5,6 +5,7 @@
 
 mod common;
 
+mod autoland;
 mod backup;
 mod ci;
 mod ci_settings;

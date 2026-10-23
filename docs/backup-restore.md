@@ -38,7 +38,7 @@ branvil-2026-10-14/          (0700)
                    "bundle": "repos/repo_01K….bundle",
                    "refs": {"refs/heads/main": "<sha>", "refs/branvil/upstream/main": "<sha>"}}],
  "files": [{"path": "branvil.redb", "bytes": 565248, "sha256": "…"}, "…"],
- "excluded": ["secrets/ (…)", "secrets/accounts/ (…)", "hooks/ and git/ (…)", "Git reflogs (…)"],
+ "excluded": ["secrets/ (…)", "secrets/accounts/ (…)", "secrets/webhook.url (…)", "hooks/ and git/ (…)", "Git reflogs (…)"],
  "account_tokens_excluded": [{"member": "aiko", "provider": "github"}]}
 ```
 
@@ -126,6 +126,7 @@ GuildBotics stays valid. Two services on the same base URL cannot both listen.
 | The owner's token (`secrets/owner.token`) | No | The first start of the restored service writes a new one and revokes the old. |
 | GUI sessions | Their records, but they do not survive | The new owner token's start deletes every session. |
 | Members' upstream credentials (`secrets/accounts/`: tokens, GitHub App keys) | **No** | A credential for GitHub is a secret of another system; a backup copied to another disk or machine should not carry it. After a restore the accounts (provider, kind, and login) are there, but polling reports that the credential is not on this machine and nothing is read or sent until it is set again (`PUT …/members/{name}/accounts/{provider}`). `branvil backup` and `branvil restore` list these accounts. |
+| The notification webhook's URL (`secrets/webhook.url`) | **No** | Like an upstream credential, it is a secret of another system. After a restore nothing is told until the owner sets it again (Settings → Notifications, `PUT /api/v1/admin/webhook`); it is then told of the automatic publishes still open. |
 | `secrets/cursor.key` | No | A new key is made at the first start; list cursors handed out before become `invalid_cursor`, which clients recover from by starting the list again. |
 | The hook secret | No | It is made per process. |
 
@@ -187,8 +188,11 @@ new data directory; when the upgrade fails, the restored directory is left
 at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
 it once the cause is fixed).
 
-Version 12 → 13 (`src/upgrade.rs`): a repository names the approvals a merge
-or a publish needs. Every repository needs one. Nothing else changes.
+Version 13 → 14 (`src/upgrade.rs`): a repository says whether it lands its
+pull requests by itself, and a published pull request whether Branvil
+published it and when the webhook was told. Every repository lands none by
+itself, every published pull request was the owner's and told nobody, and a
+pending merge no longer names who merged it. Nothing else changes.
 
 ### The service run by scripts/serve.sh
 
@@ -338,8 +342,8 @@ upgrade` exits 3 until `branvil admin check` passes, then 0), runs
 `branvil admin check`, starts the restored service on the
 original address, and checks the refs (`git ls-remote`), the ticket and its
 lane, the pull request and its ticket link, the review, the comments and
-thread, the ticket's linked pull requests, the board cards, the repository (needing
-one approval, as the upgrade left it), the members and a member's
+thread, the ticket's linked pull requests, the board cards, the repository (landing
+nothing by itself, as the upgrade left it), the members and a member's
 account (its login, while polling reports the credential missing), and that a new push is
 recorded. `tests/ci.rs`
 (`ci_records_logs_and_artifacts_survive_a_backup_and_restore`) backs up a

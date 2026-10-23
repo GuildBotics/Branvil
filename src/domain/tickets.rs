@@ -1480,6 +1480,7 @@ mod tests {
             protected_branches: Vec::new(),
             required_checks: Vec::new(),
             required_approvals: 1,
+            auto_land: false,
             ci_network: false,
             labels: Vec::new(),
             upstream: None,

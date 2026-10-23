@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::sync::Notify;
 
-use crate::app::{App, KeyedLocks, Shared};
+use crate::app::{App, KeyedGuard, KeyedLocks, Shared};
 use crate::config::UpstreamConfig;
 use crate::domain::pulls::{self, load_pull};
 use crate::error::{AppError, AppResult};
@@ -58,7 +58,7 @@ pub struct Upstream {
     pub hosts: Hosts,
     wake: Notify,
     following: Mutex<HashMap<String, Following>>,
-    /// One poll or publish of a pull request at a time.
+    /// One poll or publish of a pull request at a time (`pull_lock`).
     pulls: KeyedLocks,
     /// One poll of a repository at a time (the poller and "Check now").
     repos: KeyedLocks,
@@ -78,6 +78,14 @@ impl Upstream {
 
     pub fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// Held by whatever reads and rewrites a pull request's `Published`
+    /// record (a poll, a publish, the webhook's notice), one at a time.
+    pub async fn pull_lock(&self, repo_id: &str, number: u64) -> KeyedGuard<'_> {
+        self.pulls
+            .lock(&Key::new().s(repo_id).u(number).bytes())
+            .await
     }
 
     /// The display name of a provider, or the provider itself when unknown.
@@ -160,8 +168,7 @@ fn credential_path(app: &App, member: &str, provider: &str) -> PathBuf {
         .join(format!("{}.{provider}.json", fold(member)))
 }
 
-/// Writes a member's credential to its `0600` file: a new file, then renamed
-/// over the old one.
+/// Writes a member's credential to its `0600` file.
 fn write_credential(
     app: &App,
     member: &str,
@@ -171,24 +178,9 @@ fn write_credential(
     let dir = app.layout.accounts();
     std::fs::create_dir_all(&dir).map_err(AppError::internal)?;
     crate::config::restrict(&dir, true).map_err(AppError::internal)?;
-    let path = credential_path(app, member, provider);
-    let tmp = path.with_extension("tmp");
-    let _ = std::fs::remove_file(&tmp);
-    {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut f = options.open(&tmp).map_err(AppError::internal)?;
-        let text = serde_json::to_vec(credential).map_err(AppError::internal)?;
-        f.write_all(&text).map_err(AppError::internal)?;
-        f.sync_all().map_err(AppError::internal)?;
-    }
-    std::fs::rename(&tmp, &path).map_err(AppError::internal)
+    let text = serde_json::to_vec(credential).map_err(AppError::internal)?;
+    crate::config::write_secret(&credential_path(app, member, provider), &text)
+        .map_err(AppError::internal)
 }
 
 fn remove_credential(app: &App, member: &str, provider: &str) {
@@ -506,8 +498,7 @@ pub async fn poll_repo(app: &App, repo: &Repo) -> bool {
     };
     follow(at, reader).await;
     for p in &live {
-        let key = Key::new().s(&repo.id).u(p.number).bytes();
-        let _guard = app.upstream.pulls.lock(&key).await;
+        let _guard = app.upstream.pull_lock(&repo.id, p.number).await;
         if let Err(e) = sync_pull(at, reader, &reader_member, p.number).await {
             tracing::warn!("upstream: {} !{}: {e}", repo.path, p.number);
         }

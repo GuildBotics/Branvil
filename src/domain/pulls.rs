@@ -81,6 +81,10 @@ pub struct PublishedView {
     pub published_at: String,
     pub error: Option<String>,
     pub stopped: Option<String>,
+    /// Published by Branvil itself, the repository landing automatically.
+    pub auto: bool,
+    /// When the webhook was told of that publish.
+    pub notified_at: Option<String>,
 }
 
 fn published_view(x: &Published) -> PublishedView {
@@ -95,6 +99,8 @@ fn published_view(x: &Published) -> PublishedView {
         published_at: x.published_at.clone(),
         error: x.error.clone(),
         stopped: x.stopped.clone(),
+        auto: x.auto,
+        notified_at: x.notified_at.clone(),
     }
 }
 
@@ -1704,6 +1710,17 @@ pub async fn merge(
 ) -> AppResult<PullView> {
     let (repo, _) = visible(app, caller, repo_path, number).await?;
     caller.require_owner()?;
+    merge_pull(app, &repo, number, input).await
+}
+
+/// Merges a pull request of `repo` (the owner's, or the repository landing
+/// automatically: `autoland`).
+pub async fn merge_pull(
+    app: &App,
+    repo: &Repo,
+    number: u64,
+    input: MergeInput,
+) -> AppResult<PullView> {
     let lock = app.repo_lock(&repo.id);
     let _guard = lock.lock().await;
     // Everything below is re-read under the repository lock.
@@ -1729,10 +1746,7 @@ pub async fn merge(
         refname: format!("refs/heads/{}", p.base),
         old: base.clone(),
         new: head.clone(),
-        op: JournalOp::Merge {
-            number,
-            merged_by: caller.name().to_string(),
-        },
+        op: JournalOp::Merge { number },
         created_at: util::now(),
     };
     let e = entry.clone();

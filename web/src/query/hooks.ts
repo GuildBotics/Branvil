@@ -99,6 +99,8 @@ export const useDiagnostics = () =>
   useQuery({ queryKey: keys.diagnostics(), queryFn: () => api.admin.diagnostics(), refetchInterval: 30_000 });
 
 /** The CI settings; polled while an image operation runs (it has no events). */
+export const useWebhook = () => useQuery({ queryKey: keys.webhook(), queryFn: () => api.admin.webhook() });
+
 export const useCiSettings = () =>
   useQuery({
     queryKey: keys.ci(),

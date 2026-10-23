@@ -217,6 +217,7 @@ describe("pull request review", () => {
     protected_branches: ["main"],
     required_checks: ["test"],
     required_approvals: 0,
+    auto_land: false,
     labels: [],
     upstream: {
       provider: "github",
@@ -389,6 +390,8 @@ describe("pull request review", () => {
         published_at: "2026-10-16T00:00:00Z",
         error: null,
         stopped: null,
+        auto: false,
+        notified_at: null,
       },
     });
     const fake = fakeApi(
@@ -446,6 +449,8 @@ describe("pull request review", () => {
               published_at: "2026-10-16T00:00:00Z",
               error: null,
               stopped: "The host refused the branch ticket/3: [rejected] (stale info).",
+              auto: true,
+              notified_at: null,
             },
           }),
         ),
@@ -456,6 +461,36 @@ describe("pull request review", () => {
     renderApp("/acme/demo/-/pulls/3");
     expect(await screen.findByRole("alert")).toHaveTextContent("Sending stopped: The host refused the branch ticket/3");
     expect(screen.getByRole("button", { name: "Publish again to GitHub" })).toBeEnabled();
+    expect(screen.getByText("published automatically")).toBeInTheDocument();
+  });
+
+  it.each([
+    { repository: { ...UPSTREAM_REPOSITORY, auto_land: true }, says: "This repository publishes it to GitHub by itself, once, when the conditions below hold." },
+    { repository: { ...UPSTREAM_REPOSITORY, upstream: null, auto_land: true }, says: "This repository merges it by itself once the conditions below hold." },
+  ])("says that a repository landing automatically acts by itself: $says", async ({ repository, says }) => {
+    fakeApi(
+      pullRoutes({
+        "GET /api/v1/repos/acme/demo": json(200, repository),
+        [`GET ${P}/publish`]: json(200, PREVIEW),
+        [`GET ${P}/checks`]: json(200, CHECKS),
+      }),
+    );
+    renderApp("/acme/demo/-/pulls/3");
+    expect(await screen.findByText(says)).toBeInTheDocument();
+  });
+
+  it("says nothing of landing by itself when the repository does not", async () => {
+    fakeApi(
+      pullRoutes({
+        "GET /api/v1/repos/acme/demo": UPSTREAM_REPO,
+        [`GET ${P}/publish`]: json(200, PREVIEW),
+        [`GET ${P}/checks`]: json(200, CHECKS),
+      }),
+    );
+    renderApp("/acme/demo/-/pulls/3");
+    expect(await screen.findByRole("button", { name: "Publish to GitHub" })).toBeInTheDocument();
+    expect(screen.queryByText(/by itself/)).not.toBeInTheDocument();
+    expect(screen.queryByText("published automatically")).not.toBeInTheDocument();
   });
 
   it("shows a check of the upstream host with its page there and its summary, without a Branvil job", async () => {

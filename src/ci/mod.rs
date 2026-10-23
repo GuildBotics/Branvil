@@ -699,6 +699,7 @@ mod tests {
             protected_branches: vec![],
             required_checks: vec!["test".into()],
             required_approvals: 1,
+            auto_land: false,
             ci_network: false,
             labels: vec![],
             upstream: None,

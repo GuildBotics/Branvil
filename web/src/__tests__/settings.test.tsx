@@ -21,6 +21,7 @@ const REPO = {
   protected_branches: ["main"],
   required_checks: [],
   required_approvals: 1,
+  auto_land: false,
   ci_network: false,
   labels: ["bug"],
   upstream: null,
@@ -146,9 +147,65 @@ describe("settings", () => {
       protected_branches: ["main"],
       required_checks: ["test", "lint"],
       required_approvals: 2,
+      auto_land: false,
       ci_network: true,
       labels: ["bug", "ui"],
     });
+  });
+
+  it.each([
+    { upstream: null, says: /merges an open pull request by itself \(fast-forward\)/ },
+    { upstream: { provider: "github", host: "GitHub", repository: "octo/demo", url: "", reader: { member: "aiko", chosen: false }, following: {} }, says: /publishes an open pull request to GitHub by itself, as its author and once/ },
+  ])("turns automatic landing on from the CI tab and says what it does ($says)", async ({ upstream, says }) => {
+    const repo = { ...REPO, upstream };
+    const fake = fakeApi({
+      ...SHELL,
+      "GET /api/v1/repos": page([repo]),
+      "GET /api/v1/members": page([]),
+      "PATCH /api/v1/repos/acme/demo": json(200, { ...repo, auto_land: true, revision: 5 }),
+    });
+    const user = userEvent.setup();
+    renderApp("/-/settings");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("tab", { name: "CI" }));
+    const ci = screen.getByRole("tabpanel", { name: "CI" });
+    const auto = within(ci).getByRole("switch", { name: /^Land automatically/ });
+    expect(auto).not.toBeChecked();
+    expect(within(ci).getByText(says)).toBeInTheDocument();
+    expect(within(ci).getByText(/keep it a draft to hold it/)).toBeInTheDocument();
+    await user.click(auto);
+    await user.click(within(ci).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fake.calls("PATCH", "/api/v1/repos/acme/demo")).toHaveLength(1));
+    expect(fake.calls("PATCH", "/api/v1/repos/acme/demo")[0]?.body).toMatchObject({ revision: 4, auto_land: true });
+  });
+
+  it("sets the notification webhook, shows only its host, and removes it", async () => {
+    const secret = "https://hooks.example.test/services/T0/hook-71c2";
+    const set = { set: true, host: "hooks.example.test", problem: "the webhook answered 500 Internal Server Error" };
+    const fake = fakeApi({
+      ...SHELL,
+      "GET /api/v1/members": page([]),
+      "GET /api/v1/admin/webhook": json(200, { set: false, host: null, problem: null }),
+      "PUT /api/v1/admin/webhook": json(200, set),
+      "DELETE /api/v1/admin/webhook": json(200, { set: false, host: null, problem: null }),
+    });
+    const user = userEvent.setup();
+    renderApp("/-/settings");
+    await user.click(await screen.findByRole("link", { name: "Notifications" }));
+    expect(await screen.findByText("Not set")).toBeInTheDocument();
+    const form = screen.getByRole("form", { name: "Webhook URL" });
+    await user.type(within(form).getByLabelText("Webhook URL"), secret);
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fake.calls("PUT", "/api/v1/admin/webhook")).toHaveLength(1));
+    expect(fake.calls("PUT", "/api/v1/admin/webhook")[0]?.body).toEqual({ url: secret });
+    expect(await screen.findByText("Set (hooks.example.test)")).toBeInTheDocument();
+    expect(screen.getByText("The last send failed (retried): the webhook answered 500 Internal Server Error")).toBeInTheDocument();
+    // The URL is gone from the page once saved.
+    expect(within(form).getByLabelText("Webhook URL")).toHaveValue("");
+    expect(document.body.innerHTML).not.toContain("hook-71c2");
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    expect(await screen.findByText("Not set")).toBeInTheDocument();
+    expect(fake.calls("DELETE", "/api/v1/admin/webhook")).toHaveLength(1);
   });
 
   it("does not save a repository while its required approvals are empty", async () => {
