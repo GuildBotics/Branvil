@@ -329,6 +329,19 @@ Per job the runner:
    conclusion with the image's configuration digest, and deletes the work
    directory.
 
+The log says how long each step took, so the time of a job can be read off
+it: how long the attempt waited in the queue (`queued for … s`, from its
+registration to the claim), then `source fetched in … ms` (with the bundle's
+size), `checked out in … ms`, `cache restored in … ms` (with the bytes
+copied), `sandbox started in … ms` (the spawn of `msb run` → the script's
+first line), `commands ran for … ms`, `sandbox removed in … ms`,
+`artifacts handled in … ms` (a job that declares artifacts), and `cache saved
+in … ms` (with the bytes saved). `peak memory of msb run and its VM: … MiB` is
+the largest resident memory of `msb run` and every process under it (the VM
+among them), read with `ps` every second while the job runs; the VM's grows
+with the guest memory the job touches and does not shrink, so the last samples
+hold the peak. A host without `ps` gives no such line.
+
 At start it removes every sandbox labelled with its own name and every volume
 named `bv-tmp-<its name>-<attempt id>` (leftovers of a runner that was killed),
 and the old job directories.
