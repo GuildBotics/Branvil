@@ -1,6 +1,7 @@
 """Exercise the development scripts without a build, browser, or network."""
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -719,7 +720,13 @@ class GitServer:
                         headers.append((name, value))
                 self.answer(status, payload, headers)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class Server(ThreadingHTTPServer):
+            def handle_error(self, request, client_address):
+                # Not a fetch that went away with its script at a test's end.
+                if not isinstance(sys.exc_info()[1], ConnectionError):
+                    super().handle_error(request, client_address)
+
+        self.server = Server(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.server.server_port}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
@@ -739,6 +746,9 @@ def gone(pid):
     return False
 
 
+# The tick of scripts/serve.sh in these tests, in seconds: its times (the
+# interval, its waits) are counted in ticks.
+TICK = 0.1
 RUNNING = {"checks": [], "checks_expected": True}
 SUCCESS = {"checks": [{"name": "test", "status": "completed", "conclusion": "success"}],
            "checks_expected": True}
@@ -761,6 +771,7 @@ class ServeScriptTests(ScriptTestCase):
             GIT_COMMITTER_NAME="Test Author",
             GIT_COMMITTER_EMAIL="author@example.invalid",
             DEV_TEST_CONTROL=str(self.root / "control.json"),
+            BRANVIL_SERVE_TICK=str(TICK),
         )
         self.backups = self.root / "home/branvil-backups"
         self.builds = self.repo / "builds"
@@ -1456,7 +1467,7 @@ class ServeScriptTests(ScriptTestCase):
         self.control(**{f"DEV_TEST_HOLD_SERVE_{new}": str(hold)})
         self.server.checks[new] = SUCCESS
         self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
-        time.sleep(65)
+        time.sleep(65 * TICK)  # longer than a minute of scripts/serve.sh
         self.assertNotIn("Update finished", output.read_text(encoding="utf-8"))
         self.assertIsNone(self.attempted())
         hold.unlink()
@@ -1474,7 +1485,7 @@ class ServeScriptTests(ScriptTestCase):
         self.wait_until(lambda: self.service_pid() not in (None, first), proc)
         stubborn = self.service_pid()
         (self.builds / "current").write_text("other\n", encoding="utf-8")
-        self.assert_runs("other", timeout=60)  # after the 30 seconds it gives TERM
+        self.assert_runs("other")  # after the 30 ticks it gives TERM
         self.assertTrue(gone(stubborn))
         self.assertIn("did not stop within 30 seconds of TERM; killing it",
                       output.read_text(encoding="utf-8"))
@@ -1656,6 +1667,60 @@ for _row in OUTCOMES:
                                        "upgraded" if _row[1] else "same_version", _row[2]),
         lambda self, row=_row: self.check_outcome(*row),
     )
+
+
+class Reports(list):
+    """What a test that has run told `result` (its callbacks: startTest,
+    addSuccess, addSubTest, ...), to tell it again. What a test asks of the
+    result (failfast) is the result's own."""
+
+    def __init__(self, test, result):
+        super().__init__()
+        self.failfast = result.failfast
+        test(self)
+
+    def __getattr__(self, name):
+        if not name.startswith(("start", "stop", "add")):
+            raise AttributeError(name)
+        return lambda *args: self.append((name, args))
+
+
+class Concurrently(unittest.TestSuite):
+    """Runs the tests at the same time, as they mostly wait for the scripts,
+    and reports each one whole, in their order."""
+
+    def run(self, result):
+        def tests(suite):
+            for test in suite:
+                yield from tests(test) if isinstance(test, unittest.TestSuite) else [test]
+
+        with ThreadPoolExecutor(os.cpu_count()) as pool:
+            for reports in [pool.submit(Reports, test, result) for test in tests(self)]:
+                for name, args in reports.result():
+                    getattr(result, name)(*args)
+        return result
+
+
+class ConcurrentlyTests(unittest.TestCase):
+    def test_every_subtest_is_reported_unless_the_run_fails_fast(self):
+        class Failing(unittest.TestCase):
+            def test_cases(self):
+                for case in range(2):
+                    with self.subTest(case=case):
+                        self.fail(f"case {case}")
+
+        for failfast, failures in [(False, 2), (True, 1)]:
+            result = unittest.TestResult()
+            result.failfast = failfast
+            Concurrently([Failing("test_cases")]).run(result)
+            self.assertEqual(len(result.failures), failures, f"failfast={failfast}")
+
+
+def load_tests(loader, tests, pattern):
+    # macOS checks each new executable at its first run, one at a time across
+    # the system, and every test makes several: at the same time, the tests
+    # there would mostly wait for each other, past their timeouts.
+    return tests if sys.platform == "darwin" else Concurrently(tests)
 
 
 if __name__ == "__main__":

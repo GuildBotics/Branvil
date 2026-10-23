@@ -95,7 +95,9 @@ EOF
 
   . "$repo_root/scripts/lib.sh"
   local builds="$repo_root/builds" serve_pid= serve_build= update_pid= build status
-  local started=0 quick=0 next_update=$SECONDS slow= message
+  # Its times are counted in ticks of the loop below, a second each
+  # (BRANVIL_SERVE_TICK, in seconds, makes them shorter for the tests).
+  local tick="${BRANVIL_SERVE_TICK:-1}" now=0 started=0 quick=0 next_update=0 slow= message
   # The update being started (builds/update, written by scripts/update.sh):
   # its new build, the build it replaces, and, once it has failed, the step
   # that failed.
@@ -106,14 +108,14 @@ EOF
   }
   # Whether the serve started last has said that it is ready.
   ready() { grep -q '^branvil listening on ' "$builds/serve.out" 2>/dev/null; }
-  # Stops the serve: TERM, and KILL when it has not ended 30 seconds later.
+  # Stops the serve: TERM, and KILL when it has not ended 30 ticks later.
   stopped() {
     local i
     if [[ -z "$serve_pid" ]]; then return; fi
     kill -TERM "$serve_pid" 2>/dev/null || true
-    for (( i = 0; i < 300; i++ )); do
+    for (( i = 0; i < 30; i++ )); do
       if ! kill -0 "$serve_pid" 2>/dev/null; then break; fi
-      sleep 0.1
+      sleep "$tick"
     done
     if kill -0 "$serve_pid" 2>/dev/null; then
       log "branvil serve of $serve_build did not stop within 30 seconds of TERM; killing it"
@@ -197,11 +199,13 @@ EOF
       return
     fi
     if [[ "$1" != "$serve_build" ]]; then quick=0; fi
-    # Its standard output carries the line that says it is ready.
+    # Its standard output carries the line that says it is ready. The last
+    # serve's goes first: the child empties the file only once it runs.
+    rm -f "$builds/serve.out"
     "$builds/$1/branvil" serve --data-dir "$data_dir" >"$builds/serve.out" &
     serve_pid=$!
     serve_build="$1"
-    started=$SECONDS
+    started=$now
     slow=
   }
 
@@ -230,7 +234,7 @@ EOF
       wait "$serve_pid" || status=$?
       serve_pid=
       log "branvil serve of $serve_build exited with status $status"
-      if (( SECONDS - started < 10 )); then quick=$((quick + 1)); else quick=0; fi
+      if (( now - started < 10 )); then quick=$((quick + 1)); else quick=0; fi
       if [[ "$target" == "$serve_build" ]]; then
         failed "$serve_build" "starting the new build"
       elif (( quick >= 3 )); then
@@ -262,7 +266,7 @@ EOF
           if [[ "$build" != "$builds/$target" && "$build" != "$builds/$previous" ]]; then rm -rf -- "$build"; fi
         done
         log "Update finished: $target is ready."
-      elif [[ -z "$slow" ]] && (( SECONDS - started >= 1800 )); then
+      elif [[ -z "$slow" ]] && (( now - started >= 1800 )); then
         slow=1
         message="$target has not said that it is ready 30 minutes after its start; still waiting."
         log "$message"
@@ -279,12 +283,13 @@ EOF
     # An update round at the start and every interval, one at a time, while
     # the service is ready (it takes the backup).
     if [[ -z "$update_pid" && -n "$serve_pid" && ! -e "$builds/update" ]] \
-      && (( SECONDS >= next_update )) && ready; then
-      next_update=$((SECONDS + interval))
+      && (( now >= next_update )) && ready; then
+      next_update=$((now + interval))
       "$BASH" "$repo_root/scripts/update.sh" --data-dir "$data_dir" &
       update_pid=$!
     fi
-    sleep 1
+    sleep "$tick"
+    now=$((now + 1))
   done
 }
 
