@@ -891,11 +891,18 @@ async fn reviewer_states_decide_the_approvals_a_merge_needs() {
         400
     );
     assert_eq!(review(&w, &pull, &w.aiko, "comment", &head).await, 201);
-    // The last review decides, a comment as well.
+    // The last approve or request_changes decides; a comment keeps it, and
+    // stands only for those who only commented.
+    for (token, verdict) in [(&w.ken, "request_changes"), (&w.ken, "comment")] {
+        assert_eq!(review(&w, &pull, token, verdict, &head).await, 201);
+    }
+    assert_eq!(
+        review_states(&w, &pull).await.0[0],
+        json!(["ken", false, "request_changes", false])
+    );
     for (token, verdict) in [
-        (&w.ken, "request_changes"),
         (&w.ken, "approve"),
-        (&w.owner, "approve"),
+        (&w.ken, "comment"),
         (&w.owner, "comment"),
     ] {
         assert_eq!(review(&w, &pull, token, verdict, &head).await, 201);
@@ -942,6 +949,18 @@ async fn reviewer_states_decide_the_approvals_a_merge_needs() {
         .put(&format!("{pull}/reviewers/ken"), &w.owner, json!({}))
         .await;
     assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        review_states(&w, &pull).await,
+        (
+            vec![
+                json!(["ken", true, "approve", true]),
+                json!(["alice", false, "approve", true])
+            ],
+            0
+        )
+    );
+    // A comment on the new head keeps the approval on the old one.
+    assert_eq!(review(&w, &pull, &w.owner, "comment", &head2).await, 201);
     assert_eq!(
         review_states(&w, &pull).await,
         (

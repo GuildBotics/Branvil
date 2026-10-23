@@ -133,7 +133,7 @@ describe("settings", () => {
     await addPills(user, "Required checks", ["test", "lint"]);
     const approvals = screen.getByRole("textbox", { name: "Required approvals" });
     expect(approvals).toHaveValue("1");
-    expect(screen.getByText(/must approve the current head in their last review before a merge; 0 needs none/)).toBeInTheDocument();
+    expect(screen.getByText(/must have approved the current head before a merge \(a later comment keeps an approval\); 0 needs none/)).toBeInTheDocument();
     await user.clear(approvals);
     await user.type(approvals, "2");
     await user.click(screen.getByRole("tab", { name: "Labels" }));
