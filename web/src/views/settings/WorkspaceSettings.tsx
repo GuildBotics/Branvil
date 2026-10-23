@@ -1,4 +1,4 @@
-import { Badge, Button, Card, Group, Modal, Stack, Switch, Tabs, TagsInput, Text, TextInput } from "@mantine/core";
+import { Badge, Button, Card, Group, Modal, NumberInput, Stack, Switch, Tabs, TagsInput, Text, TextInput } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FolderGit2, Plus } from "lucide-react";
 import { useState } from "react";
@@ -133,6 +133,8 @@ type RepoForm = {
   default_branch: string;
   protected_branches: string[];
   required_checks: string[];
+  /** `""` while the field is empty, which cannot be saved. */
+  required_approvals: string | number;
   ci_network: boolean;
   labels: string[];
 };
@@ -142,6 +144,7 @@ const seed = (r: Repository): RepoForm => ({
   default_branch: r.default_branch,
   protected_branches: r.protected_branches,
   required_checks: r.required_checks,
+  required_approvals: r.required_approvals,
   ci_network: r.ci_network,
   labels: r.labels,
 });
@@ -153,7 +156,8 @@ function RepoEditor({ repo, tab }: { repo: Repository; tab: "basic" | "ci" }) {
   // The form keeps the revision it was filled from, so a stale save is refused (409).
   const [form, setForm] = useState<RepoForm>(() => seed(repo));
   const save = useMutation({
-    mutationFn: () => api.repos.update(repo.path, { ...form, default_branch: form.default_branch.trim() }),
+    mutationFn: () =>
+      api.repos.update(repo.path, { ...form, default_branch: form.default_branch.trim(), required_approvals: Number(form.required_approvals) }),
     onSuccess: (r) => setForm(seed(r)),
     onSettled: () => {
       void client.invalidateQueries({ queryKey: keys.repos() });
@@ -175,7 +179,7 @@ function RepoEditor({ repo, tab }: { repo: Repository; tab: "basic" | "ci" }) {
       )}
       {save.isSuccess && !stale && <Notice>{t("settings.saved")}</Notice>}
       <Group>
-        <Button onClick={() => save.mutate()} disabled={save.isPending}>
+        <Button onClick={() => save.mutate()} disabled={save.isPending || form.required_approvals === ""}>
           {t("common.save")}
         </Button>
       </Group>
@@ -237,6 +241,15 @@ function RepoEditor({ repo, tab }: { repo: Repository; tab: "basic" | "ci" }) {
               onChange={(v) => setForm({ ...form, required_checks: v })}
               placeholder={t("settings.addCheck")}
               clearable
+            />
+            <NumberInput
+              label={t("repo.requiredApprovals")}
+              description={t(repo.upstream ? "settings.approvalsHelpUpstream" : "settings.approvalsHelp")}
+              value={form.required_approvals}
+              onChange={(v) => setForm({ ...form, required_approvals: v })}
+              min={0}
+              allowNegative={false}
+              allowDecimal={false}
             />
           </Stack>
           {footer}

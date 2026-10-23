@@ -5,7 +5,7 @@
 import { Avatar, Menu, Text, UnstyledButton } from "@mantine/core";
 import { Check, MessageSquare, UserPlus, X } from "lucide-react";
 import type { ReactNode } from "react";
-import type { MemberKind } from "../api/types";
+import type { MemberKind, ReviewState } from "../api/types";
 import { useT } from "../i18n";
 import { MemberAvatar } from "./common";
 
@@ -91,18 +91,11 @@ const Lead = ({ on, avatar }: { on: boolean; avatar: ReactNode }) => (
   </span>
 );
 
-/** A reviewer's state: an open request, or the last verdict (on the current head or an older one). */
-export interface ReviewState {
-  requested: boolean;
-  verdict: "approve" | "request_changes" | "comment" | null;
-  stale: boolean;
-}
-
 function Mark({ state }: { state: ReviewState }) {
   if (state.requested) return <span className="review-mark pending" />;
   if (!state.verdict) return null;
   const icon = state.verdict === "approve" ? <Check size={9} strokeWidth={3.5} /> : state.verdict === "request_changes" ? <X size={9} strokeWidth={3.5} /> : <MessageSquare size={8} strokeWidth={3.5} />;
-  return <span className={`review-mark ${state.verdict}${state.stale ? " stale" : ""}`}>{icon}</span>;
+  return <span className={`review-mark ${state.verdict}${state.outdated ? " stale" : ""}`}>{icon}</span>;
 }
 
 function stateKey(state: ReviewState): "requested" | "requestedAgain" | "approve" | "request_changes" | "comment" {
@@ -188,9 +181,9 @@ export function PeopleToggle({
 }
 
 /**
- * Reviewers: everyone requested or who reviewed, each avatar marked with their
- * state. The menu requests or withdraws a review (several at once); the author
- * is not offered.
+ * Reviewers: everyone requested or who reviewed, each avatar marked with the
+ * state the server gives. The menu requests or withdraws a review (several at
+ * once); the author is not offered.
  */
 export function ReviewersPicker({
   people,
@@ -200,20 +193,19 @@ export function ReviewersPicker({
   disabled,
 }: {
   people: Person[];
-  states: Map<string, ReviewState>;
+  states: ReviewState[];
   author: string;
   onToggle: (name: string, request: boolean) => void;
   disabled?: boolean;
 }) {
   const t = useT();
-  const text = (s: ReviewState) => t(`people.review.${stateKey(s)}`) + (s.stale && !s.requested ? t("people.review.stale") : "");
-  const involved = [...states.entries()].filter(([, s]) => s.requested || s.verdict);
-  const state = (name: string) => states.get(name);
+  const text = (s: ReviewState) => t(`people.review.${stateKey(s)}`) + (s.outdated && !s.requested ? t("people.review.stale") : "");
+  const state = (name: string) => states.find((s) => s.member === name);
   return (
     <PeopleToggle
       people={people}
       except={author}
-      shown={involved.map(([name]) => name)}
+      shown={states.map((s) => s.member)}
       on={(name) => !!state(name)?.requested}
       mark={(name) => {
         const s = state(name);
@@ -221,10 +213,10 @@ export function ReviewersPicker({
       }}
       note={(name) => {
         const s = state(name);
-        return s && (s.requested || s.verdict) ? text(s) : null;
+        return s ? text(s) : null;
       }}
       label={t("people.reviewersTrigger", {
-        names: involved.map(([n, s]) => `${n} (${text(s)})`).join(", ") || t("people.nobody"),
+        names: states.map((s) => `${s.member} (${text(s)})`).join(", ") || t("people.nobody"),
       })}
       help={t("people.reviewersHelp", { author })}
       onToggle={onToggle}

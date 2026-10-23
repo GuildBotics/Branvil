@@ -698,6 +698,7 @@ mod tests {
             default_branch: "main".into(),
             protected_branches: vec![],
             required_checks: vec!["test".into()],
+            required_approvals: 1,
             ci_network: false,
             labels: vec![],
             upstream: None,

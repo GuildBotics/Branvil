@@ -51,10 +51,10 @@ closure returns `Ok` and aborts otherwise.
 
 ## Schema version
 
-`meta["schema_version"]` is written on creation (currently `12`: members are
+`meta["schema_version"]` is written on creation (currently `13`: members are
 the owner, agents, and runners, whose kind alone decides what they may do, and
 have accounts on upstream hosts, each a token or an app, and the members asked to review the pull requests they open; a ticket has at most one assignee and may name
-an upstream issue, a parent, and tickets it is blocked by; tickets belong to repositories, which hold their labels and
+an upstream issue, a parent, and tickets it is blocked by; tickets belong to repositories, which hold their labels and the approvals a merge needs, and
 may have an upstream; repositories belong to workspaces, each with one board,
 on which every ticket is in a lane;
 a pull request may be published upstream; a CI run holds its commit's own
@@ -78,7 +78,7 @@ not change the stored format of any record or raise the version.
 | `tokens` | `(token id)` | member, label, SHA-256 of the secret, last use | token API | auth (by id, constant-time hash compare) |
 | `sessions` | `(sha256(session id))` | member, CSRF secret, expiry | entry-code exchange (expired rows pruned there); all deleted when the owner's token file is replaced | cookie auth |
 | `workspaces` | `(workspace id)` | name | workspace API | repository creation, cards, closed |
-| `repos` | `(repo id)` | path, workspace id, default branch, protected branches, required checks, `ci_network`, labels, upstream (provider, repository), revision | repo API | everything under a repository |
+| `repos` | `(repo id)` | path, workspace id, default branch, protected branches, required checks, required approvals, `ci_network`, labels, upstream (provider, repository), revision | repo API | everything under a repository |
 | `tickets` | `(repo id, n)` | ticket incl. its workspace id, its one assignee with `assigned_at` (or none), labels, upstream issue (or none), lane/rank on the workspace's board, its parent (or none) and the tickets it is blocked by, as (repo id, n), state, revision | ticket API, merge | `read(tickets)`, candidates |
 | `comments` | `("ticket", repo id, n, seq)` / `("pull", repo id, n, seq)` | comment with its reactions | comment and reaction API | comments, cards, activity |
 | `pulls` | `(repo id, n)` | pull request record (links, reviewers, reviewed_by, draft, state, merge data, and once published: the host's pull request, what was last sent to it, the host's checks of the pushed head) | PR API, merge, publish, the upstream poller, push recording (`updated_at`) | PR reads, patrol, the upstream poller |

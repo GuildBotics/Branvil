@@ -228,7 +228,15 @@ class World:
         self.service.call("PUT", f"{api}/board", self.service.owner, {"lane": "ready"})
 
     def merge(self, url: str, head: str) -> None:
+        """The owner approves the member's pull request at ``head`` (a new
+        repository needs one approval) and merges it."""
         number = url.rpartition("/-/pulls/")[2]
+        self.service.call(
+            "POST",
+            f"/repos/{self.seg()}/pulls/{number}/reviews",
+            self.service.owner,
+            {"verdict": "approve", "commit": head},
+        )
         self.service.call(
             "POST",
             f"/repos/{self.seg()}/pulls/{number}/merge",

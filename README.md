@@ -120,9 +120,14 @@ What a member may do follows from its kind. The owner may do everything. An
 agent reads everything and works in every repository: tickets, comments,
 reviews, pull requests, pushes to unprotected branches. Creating workspaces
 and repositories, settings and upstreams, members and their accounts, backups,
-merging, publishing, and marking a draft pull request ready are the owner's; a merge needs no approval (the owner
-who merges is the only reviewer whose verdict could count), only the
-repository's required checks on the head. A runner uses only the runner API.
+merging, publishing, and marking a draft pull request ready are the owner's. A
+merge or a publish needs the repository's required checks on the head and its
+required approvals (Settings → Repositories → a repository → CI; 1 unless
+changed, 0 needs none): members other than the author whose last approve or
+request changes approves the current head (a comment keeps it) and who were
+not asked to review again since. The
+author can only comment on their own pull request. A runner uses only the
+runner API.
 
 Under Settings → Members → a member → Reviewers, the owner chooses who is
 asked to review every pull request that member opens (owners and agents other

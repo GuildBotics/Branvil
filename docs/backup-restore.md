@@ -187,9 +187,8 @@ new data directory; when the upgrade fails, the restored directory is left
 at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
 it once the cause is fixed).
 
-Version 11 → 12 (`src/upgrade.rs`): a member names the members asked to
-review every pull request it opens. Every member gets none. Nothing else
-changes.
+Version 12 → 13 (`src/upgrade.rs`): a repository names the approvals a merge
+or a publish needs. Every repository needs one. Nothing else changes.
 
 ### The service run by scripts/serve.sh
 
@@ -339,8 +338,8 @@ upgrade` exits 3 until `branvil admin check` passes, then 0), runs
 `branvil admin check`, starts the restored service on the
 original address, and checks the refs (`git ls-remote`), the ticket and its
 lane, the pull request and its ticket link, the review, the comments and
-thread, the ticket's linked pull requests, the board cards, the members (each
-with no reviewers, as the upgrade left them) and a member's
+thread, the ticket's linked pull requests, the board cards, the repository (needing
+one approval, as the upgrade left it), the members and a member's
 account (its login, while polling reports the credential missing), and that a new push is
 recorded. `tests/ci.rs`
 (`ci_records_logs_and_artifacts_survive_a_backup_and_restore`) backs up a

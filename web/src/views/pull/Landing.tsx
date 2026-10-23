@@ -41,10 +41,21 @@ function RequiredChecks({ checks, missing }: { checks: string[]; missing: string
   );
 }
 
+/** The pull request's approvals (the server's count, as check_landable counts them) against those required. */
+function Approvals({ pull, required }: { pull: PullRequest; required: number }) {
+  const t = useT();
+  return (
+    <Text size="sm" c={pull.approvals < required ? "var(--color-warning-text)" : undefined}>
+      {required ? t("merge.approvals", { count: pull.approvals, required }) : t("merge.noRequiredApprovals")}
+    </Text>
+  );
+}
+
 /** A repository without an upstream merges here (fast-forward). */
-export function MergeCard({ pull, requiredChecks }: { pull: PullRequest; requiredChecks: string[] }) {
+export function MergeCard({ pull, requiredChecks, requiredApprovals }: { pull: PullRequest; requiredChecks: string[]; requiredApprovals: number }) {
   const t = useT();
   const missing = useMissingChecks(pull, requiredChecks);
+  const blocked = missing.length > 0 || pull.approvals < requiredApprovals;
   const client = useQueryClient();
   const merge = useMutation({
     mutationFn: () => api.pulls.merge(pull.repository, pull.number, pull.head_sha, pull.base_sha),
@@ -72,8 +83,9 @@ export function MergeCard({ pull, requiredChecks }: { pull: PullRequest; require
           </Text>
         )}
         <RequiredChecks checks={requiredChecks} missing={missing} />
+        <Approvals pull={pull} required={requiredApprovals} />
         <Group justify="flex-end">
-          <Button leftSection={<GitMerge size={16} />} disabled={merge.isPending || pull.draft || !pull.head_sha || !pull.base_sha || missing.length > 0} onClick={() => merge.mutate()}>
+          <Button leftSection={<GitMerge size={16} />} disabled={merge.isPending || pull.draft || !pull.head_sha || !pull.base_sha || blocked} onClick={() => merge.mutate()}>
             {merge.isPending ? t("merge.merging") : t("merge.submit")}
           </Button>
         </Group>
@@ -119,9 +131,20 @@ function PublishedState({ pull }: { pull: PullRequest }) {
  * this says why, shows exactly what publishing posts there and as whom, and
  * publishes.
  */
-export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequest; upstream: Upstream; requiredChecks: string[] }) {
+export function PublishCard({
+  pull,
+  upstream,
+  requiredChecks,
+  requiredApprovals,
+}: {
+  pull: PullRequest;
+  upstream: Upstream;
+  requiredChecks: string[];
+  requiredApprovals: number;
+}) {
   const t = useT();
   const missing = useMissingChecks(pull, requiredChecks);
+  const blocked = missing.length > 0 || pull.approvals < requiredApprovals;
   const client = useQueryClient();
   const host = upstream.host;
   const [editing, setEditing] = useState(false);
@@ -178,7 +201,12 @@ export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequ
             {t("publish.draft")}
           </Text>
         )}
-        {!published && <RequiredChecks checks={requiredChecks} missing={missing} />}
+        {!published && (
+          <>
+            <RequiredChecks checks={requiredChecks} missing={missing} />
+            <Approvals pull={pull} required={requiredApprovals} />
+          </>
+        )}
         {!editing && (
           <Group justify="space-between">
             <Button size="xs" variant="default" leftSection={<Pencil size={14} />} onClick={() => setEditing(true)}>
@@ -187,7 +215,7 @@ export function PublishCard({ pull, upstream, requiredChecks }: { pull: PullRequ
             {!published && (
               <Button
                 leftSection={<CloudUpload size={16} />}
-                disabled={publish.isPending || pull.draft || !pull.head_sha || !pull.base_sha || missing.length > 0 || (p !== undefined && p.login === null)}
+                disabled={publish.isPending || pull.draft || !pull.head_sha || !pull.base_sha || blocked || (p !== undefined && p.login === null)}
                 onClick={() => (!again || window.confirm(t("publish.confirmAgain", { host }))) && publish.mutate()}
               >
                 {publish.isPending ? t("publish.publishing") : t(again ? "publish.again" : "publish.submit", { host })}

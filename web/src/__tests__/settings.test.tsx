@@ -20,6 +20,7 @@ const REPO = {
   url: "",
   protected_branches: ["main"],
   required_checks: [],
+  required_approvals: 1,
   ci_network: false,
   labels: ["bug"],
   upstream: null,
@@ -110,7 +111,7 @@ describe("settings", () => {
     expect(fake.calls("POST", "/api/v1/repos")[0]?.body).toEqual({ path: "acme/demo", default_branch: "main", labels: ["bug", "ui"] });
   });
 
-  it("saves a repository's branches, CI, and labels with the revision the form was filled from", async () => {
+  it("saves a repository's branches, CI and approvals, and labels with the revision the form was filled from", async () => {
     const fake = fakeApi({
       ...SHELL,
       "GET /api/v1/repos": page([REPO]),
@@ -120,7 +121,7 @@ describe("settings", () => {
     renderApp("/-/settings");
     await user.click(await screen.findByRole("button", { name: "Edit" }));
     expect(screen.getByText("http://127.0.0.1:7878/git/acme/demo.git")).toBeInTheDocument();
-    // Required checks live on the CI tab, with the network for jobs.
+    // Required checks and approvals live on the CI tab, with the network for jobs.
     const basics = screen.getByRole("tabpanel", { name: "Basics" });
     expect(within(basics).getByLabelText("Protected branches", { selector: "input:not([type=hidden])" })).toBeInTheDocument();
     expect(within(basics).queryByLabelText("Required checks", { selector: "input:not([type=hidden])" })).not.toBeInTheDocument();
@@ -130,6 +131,11 @@ describe("settings", () => {
     expect(screen.getByText(/public destinations only, never the Branvil machine or private networks/)).toBeInTheDocument();
     await user.click(network);
     await addPills(user, "Required checks", ["test", "lint"]);
+    const approvals = screen.getByRole("textbox", { name: "Required approvals" });
+    expect(approvals).toHaveValue("1");
+    expect(screen.getByText(/must have approved the current head before a merge \(a later comment keeps an approval\); 0 needs none/)).toBeInTheDocument();
+    await user.clear(approvals);
+    await user.type(approvals, "2");
     await user.click(screen.getByRole("tab", { name: "Labels" }));
     await addPills(user, "Ticket labels", ["ui"]);
     await user.click(screen.getAllByRole("button", { name: "Save" })[0] as HTMLElement);
@@ -139,9 +145,35 @@ describe("settings", () => {
       default_branch: "main",
       protected_branches: ["main"],
       required_checks: ["test", "lint"],
+      required_approvals: 2,
       ci_network: true,
       labels: ["bug", "ui"],
     });
+  });
+
+  it("does not save a repository while its required approvals are empty", async () => {
+    const fake = fakeApi({
+      ...SHELL,
+      "GET /api/v1/repos": page([REPO]),
+      "PATCH /api/v1/repos/acme/demo": json(200, { ...REPO, required_approvals: 0, revision: 5 }),
+    });
+    const user = userEvent.setup();
+    renderApp("/-/settings");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("tab", { name: "CI" }));
+    const approvals = screen.getByRole("textbox", { name: "Required approvals" });
+    await user.clear(approvals);
+    const ci = screen.getByRole("tabpanel", { name: "CI" });
+    const save = within(ci).getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    await user.click(save);
+    expect(fake.calls("PATCH", "/api/v1/repos/acme/demo")).toHaveLength(0);
+    // 0, typed, is a number and is saved.
+    await user.type(approvals, "0");
+    expect(save).toBeEnabled();
+    await user.click(save);
+    await waitFor(() => expect(fake.calls("PATCH", "/api/v1/repos/acme/demo")).toHaveLength(1));
+    expect(fake.calls("PATCH", "/api/v1/repos/acme/demo")[0]?.body).toMatchObject({ required_approvals: 0 });
   });
 
   it("sets an agent's code host account with a token that is sent once and never shown", async () => {
