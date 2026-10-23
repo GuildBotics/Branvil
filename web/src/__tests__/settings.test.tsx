@@ -194,17 +194,20 @@ describe("settings", () => {
     await user.click(await screen.findByRole("link", { name: "Notifications" }));
     expect(await screen.findByText("Not set")).toBeInTheDocument();
     const form = screen.getByRole("form", { name: "Webhook URL" });
+    expect(within(form).getByLabelText("Webhook URL")).not.toHaveAttribute("placeholder");
     await user.type(within(form).getByLabelText("Webhook URL"), secret);
     await user.click(within(form).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(fake.calls("PUT", "/api/v1/admin/webhook")).toHaveLength(1));
     expect(fake.calls("PUT", "/api/v1/admin/webhook")[0]?.body).toEqual({ url: secret });
     expect(await screen.findByText("Set (hooks.example.test)")).toBeInTheDocument();
     expect(screen.getByText("The last send failed (retried): the webhook answered 500 Internal Server Error")).toBeInTheDocument();
-    // The URL is gone from the page once saved.
+    // The URL is gone from the page once saved; the field shows that one is saved.
     expect(within(form).getByLabelText("Webhook URL")).toHaveValue("");
+    expect(within(form).getByLabelText("Webhook URL")).toHaveAttribute("placeholder", "••••••••••••");
     expect(document.body.innerHTML).not.toContain("hook-71c2");
     await user.click(screen.getByRole("button", { name: "Remove" }));
     expect(await screen.findByText("Not set")).toBeInTheDocument();
+    expect(within(form).getByLabelText("Webhook URL")).not.toHaveAttribute("placeholder");
     expect(fake.calls("DELETE", "/api/v1/admin/webhook")).toHaveLength(1);
   });
 
@@ -342,11 +345,13 @@ describe("settings", () => {
     // The account's kind is shown and the form starts on it.
     expect(within(row).getAllByText("Token").length).toBeGreaterThan(0);
     expect(within(row).getByRole("radio", { name: "Token" })).toBeChecked();
-    expect(within(row).getByLabelText("Replace the GitHub token")).toBeInTheDocument();
+    // The saved token is never shown; its field says one is saved.
+    expect(within(row).getByLabelText("Replace the GitHub token")).toHaveAttribute("placeholder", "••••••••••••");
 
     // The app form: nothing is sent until every field is filled.
     await user.click(within(row).getByRole("radio", { name: "GitHub App" }));
     expect(within(row).queryByLabelText("Replace the GitHub token")).not.toBeInTheDocument();
+    expect(within(row).getByLabelText("Private key (PEM)")).not.toHaveAttribute("placeholder");
     const save = within(row).getByRole("button", { name: "Save account" });
     await user.type(within(row).getByLabelText("App ID"), " 4242 ");
     await user.type(within(row).getByLabelText("Installation ID"), "777");
@@ -363,10 +368,12 @@ describe("settings", () => {
     // Saved: the login is the app's bot, and the key is gone from the page.
     expect((await within(row).findAllByText("octo-app[bot]")).length).toBeGreaterThan(0);
     expect(within(row).getByLabelText("Private key (PEM)")).toHaveValue("");
+    expect(within(row).getByLabelText("Private key (PEM)")).toHaveAttribute("placeholder", "••••••••••••");
     expect(screen.queryByDisplayValue(pem)).not.toBeInTheDocument();
 
-    // Back to a token: the token form sends only the token.
+    // Back to a token: no token is saved now, and the token form sends only the token.
     await user.click(within(row).getByRole("radio", { name: "Token" }));
+    expect(within(row).getByLabelText("Replace the GitHub token")).not.toHaveAttribute("placeholder");
     await user.type(within(row).getByLabelText("Replace the GitHub token"), "gh-new");
     await user.click(within(row).getByRole("button", { name: "Save account" }));
     await waitFor(() => expect(fake.calls("PUT", "/api/v1/members/aiko/accounts/github")).toHaveLength(2));

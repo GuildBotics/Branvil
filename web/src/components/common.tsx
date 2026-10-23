@@ -10,6 +10,9 @@ import { useI18n, useT } from "../i18n";
 import { useMemberAvatar, useSession } from "../query/hooks";
 import { Markdown } from "./Markdown";
 
+/** What a secret field shows while one is saved (the secret itself is never shown), as in GuildBotics Desktop. */
+export const MASKED_SECRET = "••••••••••••";
+
 export function Loading() {
   const t = useT();
   return (
