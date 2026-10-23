@@ -4,7 +4,7 @@ import { Plus } from "lucide-react";
 import { useState } from "react";
 import * as api from "../../api/endpoints";
 import { PROVIDERS, type AccountCredential, type IssuedToken, type Member, type MemberKind } from "../../api/types";
-import { CopyButton, ErrorMessage, Loading, MemberAvatar, StateBadge, Time } from "../../components/common";
+import { CopyButton, ErrorMessage, Loading, MASKED_SECRET, MemberAvatar, StateBadge, Time } from "../../components/common";
 import { PanelHeader } from "../../components/PanelHeader";
 import { PeopleToggle, type Person } from "../../components/PeoplePicker";
 import { useT } from "../../i18n";
@@ -317,6 +317,7 @@ function AccountRow({ member, provider, label }: { member: Member; provider: str
             <PasswordInput
               label={t(account ? "account.replaceToken" : "account.token", { host: label })}
               autoComplete="off"
+              placeholder={account?.kind === "token" ? MASKED_SECRET : undefined}
               value={form.token}
               onChange={field("token")}
             />
@@ -335,6 +336,7 @@ function AccountRow({ member, provider, label }: { member: Member; provider: str
                 spellCheck={false}
                 rows={4}
                 styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+                placeholder={account?.kind === "app" ? MASKED_SECRET : undefined}
                 value={form.private_key}
                 onChange={field("private_key")}
               />
