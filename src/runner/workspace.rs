@@ -171,22 +171,20 @@ pub fn pack(
 
 // ---------------------------------------------------------------- cache
 
-/// The cache key of a job in a scope: repository, job, the configuration
-/// digest of the image it runs on (a new version of a tag does not reuse
-/// what the previous one built), the user it runs as (the files keep the
-/// owner the VM saw), cached paths, the content of the key files, and the
-/// trust scope.
+/// The cache key of a job: repository, job, the configuration digest of the
+/// image it runs on (a new version of a tag does not reuse what the previous
+/// one built), the user it runs as (the files keep the owner the VM saw),
+/// cached paths, and the content of the key files.
 pub fn cache_key(
     repo: &str,
     job: &JobDef,
     image_digest: &str,
     cache: &CacheDef,
-    scope: &str,
     work: &Path,
 ) -> String {
     let user = super::executor::JOB_USER_ID.to_string();
     let mut h = Vec::new();
-    for part in [repo, &job.name, image_digest, &user, scope] {
+    for part in [repo, &job.name, image_digest, &user] {
         h.extend_from_slice(part.as_bytes());
         h.push(0);
     }
@@ -298,33 +296,25 @@ impl Cache {
         }
     }
 
-    /// Restores the first cache entry found among `keys` into the work
-    /// directory. Returns the key used and the bytes copied.
-    pub fn restore(
-        &self,
-        keys: &[String],
-        cache: &CacheDef,
-        work: &Path,
-    ) -> io::Result<Option<(String, u64)>> {
+    /// Restores the entry of `key` into the work directory. Returns the
+    /// bytes copied, or none when there is no such entry.
+    pub fn restore(&self, key: &str, cache: &CacheDef, work: &Path) -> io::Result<Option<u64>> {
         let _reading = self.lock.read().unwrap_or_else(|e| e.into_inner());
-        for key in keys {
-            let entry = self.root.join(key);
-            if !entry.is_dir() {
-                continue;
-            }
-            let mut total = 0;
-            for p in &cache.paths {
-                let src = entry.join("paths").join(p.trim_end_matches('/'));
-                if fs::symlink_metadata(&src).is_ok() {
-                    let rel = p.trim_end_matches('/');
-                    make_parents(work, rel)?;
-                    total += copy_tree(&src, &work.join(rel))?;
-                }
-            }
-            record_use(&entry, SystemTime::now())?;
-            return Ok(Some((key.clone(), total)));
+        let entry = self.root.join(key);
+        if !entry.is_dir() {
+            return Ok(None);
         }
-        Ok(None)
+        let mut total = 0;
+        for p in &cache.paths {
+            let src = entry.join("paths").join(p.trim_end_matches('/'));
+            if fs::symlink_metadata(&src).is_ok() {
+                let rel = p.trim_end_matches('/');
+                make_parents(work, rel)?;
+                total += copy_tree(&src, &work.join(rel))?;
+            }
+        }
+        record_use(&entry, SystemTime::now())?;
+        Ok(Some(total))
     }
 
     /// Saves the cached paths of a successful job under `key`, then removes
@@ -531,22 +521,10 @@ mod tests {
             paths: vec!["target".into()],
             key_files: vec!["Cargo.lock".into()],
         };
-        let k1 = cache_key("acme/demo", &job, IMAGE, &cache, "protected", &work);
+        let k1 = cache_key("acme/demo", &job, IMAGE, &cache, &work);
         assert_ne!(
             k1,
-            cache_key("acme/demo", &job, IMAGE, &cache, "branch:x", &work),
-            "scope is in the key"
-        );
-        assert_ne!(
-            k1,
-            cache_key(
-                "acme/demo",
-                &job,
-                &IMAGE.replace('1', "2"),
-                &cache,
-                "protected",
-                &work
-            ),
+            cache_key("acme/demo", &job, &IMAGE.replace('1', "2"), &cache, &work),
             "the image's digest is in the key"
         );
         Cache::new(root.clone())
@@ -555,22 +533,19 @@ mod tests {
         let fresh = dir.path().join("fresh");
         fs::create_dir_all(&fresh).unwrap();
         fs::write(fresh.join("Cargo.lock"), "v1").unwrap();
-        assert_eq!(
-            cache_key("acme/demo", &job, IMAGE, &cache, "protected", &fresh),
-            k1
-        );
+        assert_eq!(cache_key("acme/demo", &job, IMAGE, &cache, &fresh), k1);
         assert_eq!(
             Cache::new(root.clone())
-                .restore(std::slice::from_ref(&k1), &cache, &fresh)
+                .restore(&k1, &cache, &fresh)
                 .unwrap(),
-            Some((k1.clone(), 6))
+            Some(6)
         );
         assert_eq!(
             fs::read_to_string(fresh.join("target/a.o")).unwrap(),
             "object"
         );
         fs::write(fresh.join("Cargo.lock"), "v2").unwrap();
-        let k2 = cache_key("acme/demo", &job, IMAGE, &cache, "protected", &fresh);
+        let k2 = cache_key("acme/demo", &job, IMAGE, &cache, &fresh);
         assert_ne!(k1, k2, "key files are in the key");
         // A limit that fits only one entry keeps the newest.
         Cache::new(root.clone())
@@ -617,9 +592,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             Cache::new(root.clone())
-                .restore(&["z-old".into()], &cache, &fresh)
+                .restore("z-old", &cache, &fresh)
                 .unwrap(),
-            Some(("z-old".into(), 6))
+            Some(6)
         );
         // Fix the restored entry's use time so the test never depends on
         // how far the wall clock advances between restore and save.
@@ -713,11 +688,7 @@ mod tests {
                     for i in 0..20 {
                         let fresh = root.join(format!("fresh{n}-{i}"));
                         fs::create_dir_all(&fresh).unwrap();
-                        if cache
-                            .restore(&["k".into()], &def, &fresh)
-                            .unwrap()
-                            .is_none()
-                        {
+                        if cache.restore("k", &def, &fresh).unwrap().is_none() {
                             continue;
                         }
                         let versions: std::collections::BTreeSet<String> =

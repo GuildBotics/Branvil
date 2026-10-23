@@ -60,8 +60,8 @@ pub struct Run {
     pub branches: Vec<String>,
     /// The commit's own pipeline.
     pub pipeline: PipelineState,
-    /// `protected` (a protected branch asked) or `branch:<name>`; selects
-    /// which dependency caches the jobs may read and write.
+    /// `protected` (a protected branch asked) or `branch:<name>`; only the
+    /// jobs of a `protected` run save the dependency cache.
     pub cache_scope: String,
     /// The jobs did not fit into the queue yet; admitted in order when room
     /// frees up.
@@ -237,19 +237,29 @@ pub fn current_attempts(
 }
 
 /// The jobs of `run`'s pipeline that have no current attempt, or whose
-/// current attempt ended because the commit was replaced.
+/// current attempt ended because the commit was replaced, and, once a
+/// protected branch wants the commit, the jobs with a dependency cache whose
+/// current attempt ran for a pull request (a fast-forward merge): only a
+/// protected branch's run saves the cache, so they run again as one.
 fn jobs_to_run(r: &impl Rd, run: &Run) -> AppResult<Vec<JobDef>> {
     let PipelineState::Jobs { jobs } = &run.pipeline else {
         return Ok(Vec::new());
     };
     let current = current_attempts(r, &run.repo, &run.sha, jobs)?;
+    let protected = run.cache_scope == "protected";
     Ok(jobs
         .iter()
         .filter(|j| {
             current
                 .iter()
                 .find(|a| a.job.name == j.name)
-                .is_none_or(|a| a.superseded)
+                .is_none_or(|a| {
+                    a.superseded
+                        || (protected
+                            && j.cache.is_some()
+                            && a.status != "queued"
+                            && a.cache_scope != "protected")
+                })
         })
         .cloned()
         .collect())
@@ -382,6 +392,19 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
     };
     let queued = !run.waiting && {
         let todo = jobs_to_run(w, &run)?;
+        // A pull request's job still running stops: its protected branch's
+        // runs instead.
+        for a in current_attempts(w, &run.repo, &run.sha, &todo)? {
+            if a.status == "in_progress" && !a.superseded && a.cache_scope != "protected" {
+                stop(
+                    w,
+                    &a,
+                    "Stopped: it runs again as a protected branch's job, which saves the cache.",
+                    false,
+                    now,
+                )?;
+            }
+        }
         admit_jobs(w, &mut run, &todo, reg.network, queue_max, now)?
     };
     if old.as_ref() == Some(&run) {
@@ -537,6 +560,12 @@ pub fn claim(w: &Wtx, runner: &str, lease_secs: u64, now: &str) -> AppResult<Opt
         get_attempt(w, &id)?.ok_or_else(|| AppError::internal("pending attempt is missing"))?;
     let lease = format!("bvl_{}", util::random_secret::<24>());
     let mut a = old.clone();
+    // The run's scope as it is now: a commit a protected branch came to want
+    // after its attempts were queued (a pull request merged meanwhile) saves
+    // the cache.
+    if let Some(run) = get_run(w, &a.repo, &a.sha)? {
+        a.cache_scope = run.cache_scope;
+    }
     a.status = "in_progress".into();
     a.lease_hash = Some(lease_hash(&lease));
     a.lease_expires_at = Some(later(now, lease_secs));
@@ -868,6 +897,73 @@ mod tests {
 
     fn latest(s: &Store, sha: &str) -> Vec<Attempt> {
         s.read_sync(|r| latest_attempts(r, "repo_1", sha)).unwrap()
+    }
+
+    /// A fast-forward merge: main comes to want a commit whose jobs ran for
+    /// the pull request. The jobs with a cache run again, once, as main's.
+    #[test]
+    fn a_protected_branch_runs_the_cached_jobs_of_a_pull_requests_commit_again() {
+        let (_d, s) = store();
+        let mut pr = reg("s1", "feature", &["build", "lint"]);
+        let PipelineState::Jobs { jobs } = &mut pr.pipeline else {
+            unreachable!()
+        };
+        jobs[0].cache = Some(crate::ci::pipeline::CacheDef {
+            paths: vec!["target".into()],
+            key_files: vec![],
+        });
+        let pipeline = pr.pipeline.clone();
+        s.write_sync(|w| register(w, pr, 10, T0)).unwrap();
+        for _ in 0..2 {
+            let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+            assert_eq!(c.attempt.cache_scope, "branch:feature");
+            s.write_sync(|w| {
+                finish(
+                    w,
+                    &c.attempt.id,
+                    &c.lease,
+                    "success",
+                    None,
+                    Some(DIGEST.into()),
+                    T1,
+                )
+            })
+            .unwrap();
+        }
+        let merged = || Registration {
+            pipeline: pipeline.clone(),
+            ..reg("s1", "main", &[])
+        };
+        assert!(s.write_sync(|w| register(w, merged(), 10, T2)).unwrap());
+        let c = s.write_sync(|w| claim(w, "r", 60, T2)).unwrap().unwrap();
+        assert_eq!(
+            (c.attempt.job.name.as_str(), c.attempt.number),
+            ("build", 2)
+        );
+        assert_eq!(c.attempt.cache_scope, "protected");
+        assert!(
+            s.write_sync(|w| claim(w, "r", 60, T2)).unwrap().is_none(),
+            "lint has no cache"
+        );
+        // Registered again (the reconciler), nothing more runs.
+        s.write_sync(|w| register(w, merged(), 10, T3)).unwrap();
+        assert!(s.write_sync(|w| claim(w, "r", 60, T3)).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_attempt_takes_the_scope_its_run_has_when_claimed() {
+        let (_d, s) = store();
+        s.write_sync(|w| register(w, reg("s1", "feature", &["test"]), 10, T0))
+            .unwrap();
+        // Merged before a runner claimed it: main now wants the commit.
+        s.write_sync(|w| register(w, reg("s1", "main", &["test"]), 10, T0))
+            .unwrap();
+        let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+        assert_eq!(c.attempt.cache_scope, "protected");
+        s.write_sync(|w| register(w, reg("s2", "feature", &["test"]), 10, T0))
+            .unwrap();
+        let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+        assert_eq!(c.attempt.cache_scope, "branch:feature");
     }
 
     #[test]
