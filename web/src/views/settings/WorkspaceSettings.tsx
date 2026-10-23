@@ -135,6 +135,7 @@ type RepoForm = {
   required_checks: string[];
   /** `""` while the field is empty, which cannot be saved. */
   required_approvals: string | number;
+  auto_land: boolean;
   ci_network: boolean;
   labels: string[];
 };
@@ -145,6 +146,7 @@ const seed = (r: Repository): RepoForm => ({
   protected_branches: r.protected_branches,
   required_checks: r.required_checks,
   required_approvals: r.required_approvals,
+  auto_land: r.auto_land,
   ci_network: r.ci_network,
   labels: r.labels,
 });
@@ -250,6 +252,12 @@ function RepoEditor({ repo, tab }: { repo: Repository; tab: "basic" | "ci" }) {
               min={0}
               allowNegative={false}
               allowDecimal={false}
+            />
+            <Switch
+              label={t("settings.autoLand")}
+              description={repo.upstream ? t("settings.autoLandHelpUpstream", { host: repo.upstream.host }) : t("settings.autoLandHelp")}
+              checked={form.auto_land}
+              onChange={(e) => setForm({ ...form, auto_land: e.currentTarget.checked })}
             />
           </Stack>
           {footer}

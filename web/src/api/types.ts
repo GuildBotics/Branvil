@@ -63,6 +63,8 @@ export interface Repository {
   required_checks: string[];
   /** The approvals a merge or a publish needs; 0 needs none. */
   required_approvals: number;
+  /** Its pull requests land by themselves (merged, or published to the upstream) once they can. */
+  auto_land: boolean;
   /** Whether its CI jobs may reach public network destinations. */
   ci_network: boolean;
   /** The labels its tickets may carry. */
@@ -252,6 +254,18 @@ export interface Published {
   error: string | null;
   /** Why sending the branch stopped; publishing again replaces what the host has. */
   stopped: string | null;
+  /** Published by Branvil itself, the repository landing automatically. */
+  auto: boolean;
+  /** When the webhook was told of that publish. */
+  notified_at: string | null;
+}
+
+/** The webhook told of automatic publishes; its URL is never shown, only its host. */
+export interface Webhook {
+  set: boolean;
+  host: string | null;
+  /** Why the last send failed. */
+  problem: string | null;
 }
 
 /** What publishing would post. */

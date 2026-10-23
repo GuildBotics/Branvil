@@ -9,6 +9,7 @@ export const keys = {
   memberTokens: (name: string) => ["members", name, "tokens"] as const,
   diagnostics: () => ["diagnostics"] as const,
   ci: () => ["ci"] as const,
+  webhook: () => ["webhook"] as const,
 
   repo: (repo: string) => ["repo", repo] as const,
   repoPulls: (repo: string, state: string) => ["repo", repo, "pull-list", state] as const,

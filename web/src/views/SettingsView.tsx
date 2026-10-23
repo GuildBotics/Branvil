@@ -1,5 +1,5 @@
 import { Card, Stack, Text, Title } from "@mantine/core";
-import { Cpu, SquareKanban, Users } from "lucide-react";
+import { Bell, Cpu, SquareKanban, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import { useT } from "../i18n";
 import { useSession } from "../query/hooks";
@@ -7,6 +7,7 @@ import { Link } from "../router/Router";
 import { href } from "../router/routes";
 import { CiSettings } from "./settings/CiSettings";
 import { MembersSettings } from "./settings/MembersSettings";
+import { NotificationsSettings } from "./settings/NotificationsSettings";
 import { WorkspaceSettings } from "./settings/WorkspaceSettings";
 
 function NavItem({ to, active, icon, children }: { to: string; active: boolean; icon: ReactNode; children: ReactNode }) {
@@ -21,13 +22,14 @@ function NavItem({ to, active, icon, children }: { to: string; active: boolean; 
 /**
  * Settings, laid out as GuildBotics' setup: sections on the left, one card on
  * the right. The shown workspace (with its repositories) apart from what
- * belongs to all of Branvil (its members, and CI for the owner). `repo` opens
- * that repository's editor on its CI tab.
+ * belongs to all of Branvil (its members, and CI and notifications for the
+ * owner). `repo` opens that repository's editor on its CI tab.
  */
 export function SettingsView({ section, workspace, repo }: { section: string | null; workspace: string | null; repo: string | null }) {
   const t = useT();
   const owner = useSession().data?.me.kind === "owner";
-  const current = section === "ci" && owner ? "ci" : section === "members" || !workspace ? "members" : "workspace";
+  const current =
+    (section === "ci" || section === "notifications") && owner ? section : section === "members" || !workspace ? "members" : "workspace";
   return (
     <Stack gap="lg">
       <Title order={2}>{t("nav.settings")}</Title>
@@ -52,12 +54,25 @@ export function SettingsView({ section, workspace, repo }: { section: string | n
                   {t("ci.settings.title")}
                 </NavItem>
               )}
+              {owner && (
+                <NavItem to={href.settings("notifications")} active={current === "notifications"} icon={<Bell size={18} />}>
+                  {t("settings.notifications")}
+                </NavItem>
+              )}
             </div>
           </nav>
         </Card>
         <div>
-          {current === "ci" ? <CiSettings /> : current === "workspace" && workspace ? <WorkspaceSettings workspace={workspace} open={repo} /> : <MembersSettings />}
-          {!workspace && current !== "ci" && (
+          {current === "ci" ? (
+            <CiSettings />
+          ) : current === "notifications" ? (
+            <NotificationsSettings />
+          ) : current === "workspace" && workspace ? (
+            <WorkspaceSettings workspace={workspace} open={repo} />
+          ) : (
+            <MembersSettings />
+          )}
+          {!workspace && current === "members" && (
             <Text size="sm" c="dimmed" mt="sm">
               {t("workspace.noneHelp")}
             </Text>

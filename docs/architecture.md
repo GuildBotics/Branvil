@@ -35,9 +35,10 @@ branvil runner ── runner API (HTTP) ─ ci ─ redb queue · ci/ files      
 | `ci/` | CI in the service (see below and `docs/ci.md`): `pipeline` (schema), `queue` (runs, attempts, every state change), `files` (logs, artifacts, retention), `api` (job and runner endpoints), `supervise` (`[ci] runner = "auto"`) |
 | `runner/` | `branvil runner`: the claim/heartbeat/finish loop, `executor` (the `Executor` trait and the microsandbox implementation over the `msb` CLI), `workspace` (source checkout, artifacts without links, dependency cache), `zip` |
 | `upstream/` | the upstream code host: the provider boundary (`host.rs`, `github.rs`), members' accounts, following the default branch, publishing pull requests, carrying changes both ways, the host's check runs (see below) |
+| `autoland.rs` | landing pull requests automatically: the task that sweeps the repositories with `auto_land` after the changes that can make a pull request landable, and the webhook told of automatic publishes (see below) |
 | `backup.rs` | `POST /admin/backup` (online, consistent) and the offline `branvil restore` (`docs/backup-restore.md`) |
 | `tunnel.rs` | `branvil tunnel`: the system `ssh -N -L` forward to the Hub machine, restarted with backoff |
-| `events.rs` | bounded broadcast for SSE |
+| `events.rs` | bounded broadcast for SSE and the landing task |
 | `http.rs` | router, Host/Origin guard, security headers, idempotency middleware, extractors, SSE, GUI files |
 | `rank.rs` | card ranks (fractional indexing) |
 
@@ -93,7 +94,8 @@ are atomic together.
      upstream poller is woken when a published pull request's head moved
      (`Upstream::on_ref_changes`, which writes nothing), and an SSE event is
      published.
-3. **Merges** (`domain::pulls::merge`), under the repository lock:
+3. **Merges** (`domain::pulls::merge_pull`, the owner's or the landing
+   task's), under the repository lock:
    re-read the PR and tips; check expected head/base, fast-forward, required
    checks, and required approvals (`check_landable`, which publishing shares;
    it counts the review states of `review_states`, the one place they are
@@ -375,7 +377,54 @@ on the host is replaced the next time Branvil's changes.
 - **Failures** (network, credential, host errors) are kept on the record and
   shown; the next poll retries. Nothing in Branvil waits for them.
 
-## Backups
+## Landing automatically
+
+A repository with `auto_land` (off unless the owner turns it on) lands its
+pull requests by itself. The conditions are those of the owner's merge and
+publish (`check_landable`): an open pull request that is not a draft, its head
+containing the base, the required checks succeeded and the required approvals
+given on the head. Without an upstream it is merged (`merge_pull`), with one
+published as its author (`publish_pull`).
+
+- **One task** (`autoland::start`, started by `serve` after the poller) does
+  it, so its sweeps never overlap. It subscribes to the events: a `pull`,
+  `check`, `repo`, or `upstream` change marks that repository; it drains what
+  arrived and sweeps the marked repositories once. A `reset` (it fell behind),
+  the start, and every minute mark them all. Every change that can make a pull
+  request landable publishes one of those events at its source (a pull request
+  opened, marked ready, reopened, reviewed, or its reviewers changed; recorded
+  ref changes; CI attempts; repository settings and upstreams; a member's
+  account set on a host, as `repo` of the repositories on it). The stream ends
+  at shutdown, and so does the task.
+- **The sweep reads the repositories once**, so a setting may change while
+  it walks them: `merge_pull` and `publish_pull`, told that the repository
+  acts (`auto`), read it again under its lock and refuse (`not_mergeable`)
+  when it no longer lands by itself; a publish goes to the upstream read
+  there.
+- **A failure is not stored**, so it makes no event and no loop: a pull
+  request not yet landable (`not_mergeable`, `head_moved`, `base_moved`,
+  `no_account`) is logged at debug, anything else as a warning when its
+  message changes, and the next event or minute tries again. Before publishing, the sweep leaves quietly what
+  cannot be published (a base that is not the default branch, an author without
+  an account on the host, a pull request with an `upstream` record).
+- **Once.** Branvil publishes a pull request by itself only while it has no
+  `upstream` record, checked again in `publish_pull` under the pull request's
+  lock: a refusal by the host (`stopped`) is the owner's to settle, whose
+  publish may replace what the host has; Branvil never does. Its record has
+  `auto: true` (the owner's publish sets `false`).
+- **The webhook.** Since people merge it on the host, an automatic publish is
+  told once to the owner's webhook (`<data>/secrets/webhook.url`, `0600`, never
+  returned or backed up): in every sweep, whatever `auto_land`, an open pull
+  request with `auto`, a host pull request, and no `notified_at` is posted
+  `{"text": …}` (a Slack Incoming Webhook takes it) under the upstream lock of
+  that pull request, which the poller holds while it rewrites the record. A
+  `2xx` sets `notified_at` and publishes a `pull` event (at least once: a
+  crash before that write sends it again); a failure is kept in memory
+  (`GET /admin/webhook`'s `problem`, never with the URL) and retried. A
+  repository's notices come after its landing, a send times out after 10
+  seconds, and after one failed send a sweep sends no more, so a webhook that
+  hangs holds a sweep up once, for 10 seconds at most.
+
 ## Backups
 
 `POST /api/v1/admin/backup` takes the repository-creation lock and every
@@ -392,6 +441,8 @@ checksums. `branvil restore` is offline. See `docs/backup-restore.md`.
 repository) from a
 broadcast channel of 256 entries; a subscriber that falls behind receives
 `event: reset` and refetches. Keep-alive comments keep idle connections open.
+The landing task is a subscriber of the same channel inside the service
+("Landing automatically").
 
 ## Entering the GUI
 
@@ -463,7 +514,8 @@ undo; a ticket added from the header, or from a card's menu as its parent,
 child, or next ticket, is scrolled to once shown; `web/src/views/relations/`), a ticket (body and comments, its lane, labels,
 upstream issue, relations to other tickets, and assignee), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
-settings (the shown workspace with its repositories, and Branvil's members).
+settings (the shown workspace with its repositories, and Branvil's members, CI,
+and notifications).
 The pull request's check list marks required checks. Its merge or publish card
 names required checks that have not succeeded on the displayed head and disables
 the action until they do; while checks are loading or cannot be read, required
@@ -472,7 +524,9 @@ results do not block either action. The card also shows the pull request's
 approvals against the repository's required approvals and disables the action
 while they are short; the reviewer badges and that count come from the review
 states the server puts in the pull request. The server rechecks these
-conditions when the action is submitted.
+conditions when the action is submitted. When the repository lands
+automatically, the card says that it acts by itself, and a pull request it
+published says so.
 While a card is dragged, the box under the pointer scrolls when the pointer is
 near its edge, faster the nearer (`web/src/dragScroll.ts`).
 The service's state is not a page: the GUI warns at the top of every page only

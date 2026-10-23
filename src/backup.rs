@@ -83,6 +83,7 @@ pub struct AccountEntry {
 const EXCLUDED: &[&str] = &[
     "secrets/ (cursor signing key and owner token: the first start makes new ones; old list cursors and every GUI session end)",
     "secrets/accounts/ (members' upstream credentials: set them again after a restore)",
+    "secrets/webhook.url (the webhook told of automatic publishes: set it again after a restore)",
     "hooks/ and git/ (written again at every start)",
     "Git reflogs and repository-local Git configuration (Branvil re-applies its own at start)",
 ];

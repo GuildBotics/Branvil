@@ -136,8 +136,8 @@ itself speaks plain HTTP on loopback only).
   repository and writes tickets, comments, reactions, reviews, pull requests,
   CI retries and cancels, and unprotected branches. Owner-only operations
   (creating workspaces and repositories, repository settings, members,
-  diagnostics, upstreams and members' accounts, backup, entry links, allowing
-  local apps, merging,
+  diagnostics, upstreams and members' accounts, the notification webhook,
+  backup, entry links, allowing local apps, merging,
   publishing, marking a pull request ready, the first push of a protected branch, moving or deleting a
   tag) refuse an agent with `403`. A runner gets `403` everywhere outside the
   runner API except `/me`, its own member record, and its own tokens, and
@@ -239,6 +239,7 @@ Other consumers of the API (GuildBotics) must treat bodies as untrusted text.
 | Cursor signing key | `<data>/secrets/cursor.key` | `0600` in `0700` |
 | Hook secret | memory, and the environment of Git children | per process |
 | Members' upstream credentials (a token, or a GitHub App's id, installation id, and private key) | `<data>/secrets/accounts/<member>.<provider>.json` | `0600` in `0700`, written to a new file then renamed |
+| The notification webhook's URL (a credential of the system it posts to, such as Slack) | `<data>/secrets/webhook.url` | `0600` in `0700`, written to a new file then renamed; never returned (`GET /admin/webhook` shows only its host) or logged (a failure is reported without the URL), not in backups [`tests/autoland.rs` `the_webhook_url_is_a_secret_shown_only_by_its_host`, `tests/backup.rs`] |
 | GitHub App installation tokens | memory | made when needed from the app's key, an hour each, made again five minutes before they expire |
 
 On Windows the permission calls are no-ops; the data directory inherits the

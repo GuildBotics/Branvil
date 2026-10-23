@@ -7,7 +7,7 @@ import { CloudUpload, GitMerge, Pencil, Users } from "lucide-react";
 import { useState } from "react";
 import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
-import type { PullRequest, Upstream } from "../../api/types";
+import type { PullRequest, Repository, Upstream } from "../../api/types";
 import { ErrorMessage, Notice, Refusal, Sha, StateBadge } from "../../components/common";
 import { useT, type Translate } from "../../i18n";
 import { useChecks, usePublishPreview } from "../../query/hooks";
@@ -52,8 +52,9 @@ function Approvals({ pull, required }: { pull: PullRequest; required: number }) 
 }
 
 /** A repository without an upstream merges here (fast-forward). */
-export function MergeCard({ pull, requiredChecks, requiredApprovals }: { pull: PullRequest; requiredChecks: string[]; requiredApprovals: number }) {
+export function MergeCard({ pull, repo }: { pull: PullRequest; repo: Repository }) {
   const t = useT();
+  const { required_checks: requiredChecks, required_approvals: requiredApprovals } = repo;
   const missing = useMissingChecks(pull, requiredChecks);
   const blocked = missing.length > 0 || pull.approvals < requiredApprovals;
   const client = useQueryClient();
@@ -77,6 +78,11 @@ export function MergeCard({ pull, requiredChecks, requiredApprovals }: { pull: P
         </Text>
         {merge.isError && <Refusal>{refusalOf(t, merge.error, "merge.notMergeable")}</Refusal>}
         {merge.isSuccess && <Notice>{t("merge.done")}</Notice>}
+        {repo.auto_land && (
+          <Text size="sm" c="dimmed">
+            {t("merge.auto")}
+          </Text>
+        )}
         {pull.draft && (
           <Text size="sm" c="dimmed">
             {t("merge.draft")}
@@ -115,6 +121,11 @@ function PublishedState({ pull }: { pull: PullRequest }) {
         <Text size="xs" c="dimmed">
           {t("publish.as", { account: x.account })}
         </Text>
+        {x.auto && (
+          <Text size="xs" c="dimmed">
+            {t("publish.automatically")}
+          </Text>
+        )}
       </Group>
       {x.stopped && <Refusal>{t("publish.stopped", { reason: x.stopped })}</Refusal>}
       {x.error && (
@@ -131,18 +142,9 @@ function PublishedState({ pull }: { pull: PullRequest }) {
  * this says why, shows exactly what publishing posts there and as whom, and
  * publishes.
  */
-export function PublishCard({
-  pull,
-  upstream,
-  requiredChecks,
-  requiredApprovals,
-}: {
-  pull: PullRequest;
-  upstream: Upstream;
-  requiredChecks: string[];
-  requiredApprovals: number;
-}) {
+export function PublishCard({ pull, repo, upstream }: { pull: PullRequest; repo: Repository; upstream: Upstream }) {
   const t = useT();
+  const { required_checks: requiredChecks, required_approvals: requiredApprovals } = repo;
   const missing = useMissingChecks(pull, requiredChecks);
   const blocked = missing.length > 0 || pull.approvals < requiredApprovals;
   const client = useQueryClient();
@@ -196,6 +198,11 @@ export function PublishCard({
           ) : null)}
         {editing && <TitleBodyEditor pull={pull} host={host} onDone={() => setEditing(false)} />}
         {publish.isError && <Refusal>{refusalOf(t, publish.error, "publish.notReady")}</Refusal>}
+        {!published && repo.auto_land && (
+          <Text size="sm" c="dimmed">
+            {t("publish.auto", { host })}
+          </Text>
+        )}
         {!published && pull.draft && (
           <Text size="sm" c="dimmed">
             {t("publish.draft")}

@@ -3,6 +3,7 @@
 
 mod app;
 mod auth;
+mod autoland;
 mod backup;
 mod ci;
 mod cli;

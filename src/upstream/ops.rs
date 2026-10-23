@@ -14,7 +14,7 @@ use crate::domain::repos::{self, RepoView, repo_view};
 use crate::domain::{member_by_name, repo_by_id};
 use crate::error::{AppError, AppResult};
 use crate::model::{Account, Member, MemberKind, Published, Reader, Repo, Upstream as Setting};
-use crate::store::{self, Key, Rd};
+use crate::store::{self, Rd};
 use crate::util;
 
 /// The member who reads a repository's upstream.
@@ -220,21 +220,32 @@ pub async fn set_account(
         host.name().to_string(),
         credential.kind(),
     );
-    let m = app
+    let (m, repos) = app
         .store
         .write(move |w| {
             let mut m = member_by_name(w, &n)?;
             m.accounts.retain(|a| a.provider != p);
             m.accounts.push(Account {
-                provider: p,
+                provider: p.clone(),
                 login,
                 kind,
                 set_at: util::now(),
             });
             w.put(store::MEMBERS, &Member::key(&m.name), &m)?;
-            Ok(m)
+            // The repositories on that host, whose pull requests by the member
+            // can now be published.
+            let repos: Vec<String> = w
+                .prefix_all::<Repo>(store::REPOS, &[])?
+                .into_iter()
+                .filter(|r| r.upstream.as_ref().is_some_and(|u| u.provider == p))
+                .map(|r| r.path)
+                .collect();
+            Ok((m, repos))
         })
         .await?;
+    for path in repos {
+        app.events.publish("repo", &path, "");
+    }
     app.upstream.wake();
     Ok(member_view(&m))
 }
@@ -351,11 +362,20 @@ pub async fn publish(
 ) -> AppResult<PullView> {
     caller.require_owner()?;
     let repo = repos::visible(app, caller, path).await?;
-    let setting = setting_of(&repo)?;
-    let host = app.upstream.hosts.get(&setting.provider)?;
-    let key = Key::new().s(&repo.id).u(number).bytes();
-    let _guard = app.upstream.pulls.lock(&key).await;
-    let (repo, p, head) = {
+    publish_pull(app, &repo, number, input, false).await
+}
+
+/// `publish` of a pull request of `repo`, by the owner or (`auto`) by the
+/// repository landing automatically (`autoland`).
+pub async fn publish_pull(
+    app: &App,
+    repo: &Repo,
+    number: u64,
+    input: MergeInput,
+    auto: bool,
+) -> AppResult<PullView> {
+    let _guard = app.upstream.pull_lock(&repo.id, number).await;
+    let (repo, setting, p, head) = {
         let lock = app.repo_lock(&repo.id);
         let _guard = lock.lock().await;
         let id = repo.id.clone();
@@ -367,6 +387,7 @@ pub async fn publish(
                 Ok((repo, p))
             })
             .await?;
+        let setting = setting_of(&repo)?;
         if p.base != repo.default_branch {
             return Err(AppError::conflict_code(
                 "not_mergeable",
@@ -376,9 +397,18 @@ pub async fn publish(
                 ),
             ));
         }
-        let (head, _) = check_landable(app, &repo, &p, &input).await?;
-        (repo, p, head)
+        // Branvil publishes a pull request by itself once: what became of
+        // that (a refusal by the host included) is the owner's to settle.
+        if auto && p.upstream.is_some() {
+            return Err(AppError::conflict_code(
+                "not_mergeable",
+                format!("!{number} was published before; only the owner publishes it again."),
+            ));
+        }
+        let (head, _) = check_landable(app, &repo, &p, &input, auto).await?;
+        (repo, setting, p, head)
     };
+    let host = app.upstream.hosts.get(&setting.provider)?;
     // A record of another place (the upstream changed since) is replaced.
     let earlier = p
         .upstream
@@ -419,8 +449,11 @@ pub async fn publish(
         published_at: util::now(),
         error: None,
         stopped: None,
+        auto,
+        notified_at: None,
     });
     x.account = author.name.clone();
+    x.auto = auto;
     x.error = None;
     // Publishing after sending stopped is the owner's decision to replace
     // what the host has on the branch.

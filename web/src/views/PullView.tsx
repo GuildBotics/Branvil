@@ -159,14 +159,9 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
 
       {pr.state === "open" &&
         (repository.data?.upstream ? (
-          <PublishCard
-            pull={pr}
-            upstream={repository.data.upstream}
-            requiredChecks={repository.data.required_checks}
-            requiredApprovals={repository.data.required_approvals}
-          />
+          <PublishCard pull={pr} repo={repository.data} upstream={repository.data.upstream} />
         ) : repository.data ? (
-          <MergeCard pull={pr} requiredChecks={repository.data.required_checks} requiredApprovals={repository.data.required_approvals} />
+          <MergeCard pull={pr} repo={repository.data} />
         ) : null)}
 
       <Group justify="flex-end" gap="xs" component="section" aria-label={t("pull.otherActions")}>
