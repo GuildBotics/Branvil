@@ -412,6 +412,7 @@ export interface CiLimits {
   max_memory_mib: number;
   max_timeout_secs: number;
   cache_max_mib: number;
+  max_jobs: number;
 }
 
 export interface CachedImage {

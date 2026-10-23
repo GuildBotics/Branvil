@@ -2,8 +2,8 @@
 //! runs the runner, the limits the runner puts on every job, and the
 //! runner's image cache. The first two are `branvil.toml` settings: they are
 //! written there (keeping the rest of the file as it is) and applied at once,
-//! without restarting the service; the supervised runner reads the same file
-//! when it starts (`supervise.rs`). The image cache is the one of the
+//! without restarting the service; the supervised runner reads the limits
+//! from the same file before every claim (`supervise.rs`). The image cache is the one of the
 //! supervised runner, on this machine (`[ci.microsandbox] home`); a runner
 //! started by hand elsewhere keeps its own, managed with `branvil runner pull`.
 
@@ -26,6 +26,7 @@ pub struct Limits {
     pub max_memory_mib: u64,
     pub max_timeout_secs: u64,
     pub cache_max_mib: u64,
+    pub max_jobs: u32,
 }
 
 impl Limits {
@@ -35,6 +36,7 @@ impl Limits {
             max_memory_mib: ci.executor.max_memory_mib,
             max_timeout_secs: ci.executor.max_timeout_secs,
             cache_max_mib: ci.executor.cache_max_mib,
+            max_jobs: ci.executor.max_jobs,
         }
     }
 
@@ -56,16 +58,11 @@ impl Limits {
         if self.cache_max_mib > 1 << 20 {
             return out("cache_max_mib", "0–1048576");
         }
+        if !(1..=64).contains(&self.max_jobs) {
+            return out("max_jobs", "1–64");
+        }
         Ok(())
     }
-}
-
-/// What the supervisor runs: the mode, and a generation that changes when
-/// the runner has to start again to read new settings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Desired {
-    pub mode: RunnerMode,
-    pub generation: u64,
 }
 
 /// One pull or load of an image into the cache, the latest kept.
@@ -88,7 +85,8 @@ pub struct Loaded {
 pub struct Control {
     file: PathBuf,
     microsandbox: MicrosandboxConfig,
-    desired: watch::Sender<Desired>,
+    /// The mode the supervisor follows.
+    mode: watch::Sender<RunnerMode>,
     limits: Mutex<Limits>,
     operation: Mutex<Option<Operation>>,
     /// Serializes the writes of the configuration file.
@@ -100,22 +98,19 @@ impl Control {
         Self {
             file,
             microsandbox: ci.microsandbox.clone(),
-            desired: watch::Sender::new(Desired {
-                mode: ci.runner,
-                generation: 0,
-            }),
+            mode: watch::Sender::new(ci.runner),
             limits: Mutex::new(Limits::of(ci)),
             operation: Mutex::new(None),
             writing: tokio::sync::Mutex::new(()),
         }
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<Desired> {
-        self.desired.subscribe()
+    pub fn subscribe(&self) -> watch::Receiver<RunnerMode> {
+        self.mode.subscribe()
     }
 
     pub fn mode(&self) -> RunnerMode {
-        self.desired.borrow().mode
+        *self.mode.borrow()
     }
 
     pub fn limits(&self) -> Limits {
@@ -137,12 +132,12 @@ impl Control {
             set(t, "runner", value);
         })
         .await?;
-        self.desired.send_modify(|d| d.mode = mode);
+        self.mode.send_replace(mode);
         Ok(())
     }
 
-    /// Saves the limits; a running supervised runner starts again with them.
-    /// The limits already in effect change nothing.
+    /// Saves the limits; the runner applies them from its next claim, and
+    /// the jobs it runs keep theirs.
     pub async fn set_limits(&self, limits: Limits) -> AppResult<()> {
         limits.check()?;
         let _w = self.writing.lock().await;
@@ -151,6 +146,7 @@ impl Control {
         }
         self.persist(&["ci", "executor"], |t| {
             set(t, "max_cpus", i64::from(limits.max_cpus));
+            set(t, "max_jobs", i64::from(limits.max_jobs));
             for (key, v) in [
                 ("max_memory_mib", limits.max_memory_mib),
                 ("max_timeout_secs", limits.max_timeout_secs),
@@ -161,7 +157,6 @@ impl Control {
         })
         .await?;
         *self.limits.lock().unwrap() = limits;
-        self.desired.send_modify(|d| d.generation += 1);
         Ok(())
     }
 
@@ -311,6 +306,7 @@ mod tests {
             max_memory_mib: 8192,
             max_timeout_secs: 5400,
             cache_max_mib: 4096,
+            max_jobs: 3,
         }
     }
 
@@ -340,15 +336,19 @@ mod tests {
         assert_eq!(parsed.ci.executor.max_memory_mib, 8192);
         assert_eq!(parsed.ci.executor.max_timeout_secs, 5400);
         assert_eq!(parsed.ci.executor.cache_max_mib, 4096);
+        assert_eq!(parsed.ci.executor.max_jobs, 3);
         assert_eq!(control.limits(), limits());
-        assert!(seen.has_changed().unwrap());
-        assert_eq!(
-            *seen.borrow_and_update(),
-            Desired {
-                mode: RunnerMode::Auto,
-                generation: 1
-            }
-        );
+        assert_eq!(*seen.borrow_and_update(), RunnerMode::Auto);
+        // New limits do not stop the runner: it reads them before its next
+        // claim, and the jobs it runs keep theirs.
+        control
+            .set_limits(Limits {
+                max_jobs: 2,
+                ..limits()
+            })
+            .await
+            .unwrap();
+        assert!(!seen.has_changed().unwrap(), "a running job would stop");
     }
 
     #[tokio::test]
@@ -356,7 +356,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("branvil.toml");
         let control = Control::new(file.clone(), &CiConfig::default());
-        let mut seen = control.subscribe();
+        let seen = control.subscribe();
         control.set_mode(RunnerMode::Off).await.unwrap();
         control
             .set_limits(Limits::of(&CiConfig::default()))
@@ -365,9 +365,9 @@ mod tests {
         assert!(!seen.has_changed().unwrap(), "a running job would stop");
         assert!(!file.exists());
         control.set_limits(limits()).await.unwrap();
-        seen.borrow_and_update();
+        std::fs::remove_file(&file).unwrap();
         control.set_limits(limits()).await.unwrap();
-        assert!(!seen.has_changed().unwrap());
+        assert!(!file.exists(), "the limits in effect are not written again");
     }
 
     #[tokio::test]
