@@ -5,8 +5,8 @@
 import { Avatar, Menu, Text, UnstyledButton } from "@mantine/core";
 import { Check, MessageSquare, UserPlus, X } from "lucide-react";
 import type { ReactNode } from "react";
-import type { MemberKind } from "../api/types";
-import { useT } from "../i18n";
+import type { MemberKind, PullRequest, Review } from "../api/types";
+import { useT, type Translate } from "../i18n";
 import { MemberAvatar } from "./common";
 
 export interface Person {
@@ -98,6 +98,30 @@ export interface ReviewState {
   stale: boolean;
 }
 
+/** Each member's open request and last verdict; replies do not replace verdicts. */
+export function reviewStates(pull: PullRequest, reviews: Review[]): Map<string, ReviewState> {
+  const states = new Map<string, ReviewState>();
+  for (const r of [...reviews].sort((a, b) => (a.submitted_at < b.submitted_at ? -1 : 1))) {
+    if (r.reply_only) continue;
+    states.set(r.author, { requested: false, verdict: r.verdict, stale: r.commit !== pull.head_sha });
+  }
+  for (const name of pull.reviewers) {
+    const s = states.get(name);
+    states.set(name, { requested: true, verdict: s?.verdict ?? null, stale: s?.stale ?? false });
+  }
+  return states;
+}
+
+/** The same avatar and state mark in the picker and the pull request list. */
+export function ReviewAvatar({ name, kind, state, size = 28 }: Person & { state?: ReviewState; size?: number }) {
+  return (
+    <span className="review-mark-anchor">
+      <MemberAvatar name={name} kind={kind} size={size} />
+      {state && <Mark state={state} />}
+    </span>
+  );
+}
+
 function Mark({ state }: { state: ReviewState }) {
   if (state.requested) return <span className="review-mark pending" />;
   if (!state.verdict) return null;
@@ -110,8 +134,12 @@ function stateKey(state: ReviewState): "requested" | "requestedAgain" | "approve
   return state.verdict ?? "requested";
 }
 
+export function reviewStateText(state: ReviewState, t: Translate): string {
+  return t(`people.review.${stateKey(state)}`) + (state.stale && !state.requested ? t("people.review.stale") : "");
+}
+
 /**
- * Several people: the avatars of those `shown` (each with its `mark`) and an
+ * Several people: the avatars of those `shown` (each with its review `state`) and an
  * empty one open the menu, where choosing a person toggles them (the menu
  * stays open). `except` is not offered. The menu opens from the trigger's
  * `position` edge, which stays put as avatars come and go.
@@ -121,7 +149,7 @@ export function PeopleToggle({
   except,
   shown,
   on,
-  mark,
+  state,
   note,
   label,
   help,
@@ -133,7 +161,7 @@ export function PeopleToggle({
   except: string;
   shown: string[];
   on: (name: string) => boolean;
-  mark?: (name: string) => ReactNode;
+  state?: (name: string) => ReviewState | undefined;
   note?: (name: string) => string | null;
   label: string;
   help: string;
@@ -143,10 +171,7 @@ export function PeopleToggle({
 }) {
   const kindOf = (name: string) => people.find((p) => p.name === name)?.kind;
   const avatar = (name: string, size: number) => (
-    <span key={name} className="review-mark-anchor">
-      <MemberAvatar name={name} kind={kindOf(name)} size={size} />
-      {mark?.(name)}
-    </span>
+    <ReviewAvatar key={name} name={name} kind={kindOf(name)} size={size} state={state?.(name)} />
   );
   return (
     <Menu position={position} withinPortal closeOnItemClick={false}>
@@ -206,7 +231,7 @@ export function ReviewersPicker({
   disabled?: boolean;
 }) {
   const t = useT();
-  const text = (s: ReviewState) => t(`people.review.${stateKey(s)}`) + (s.stale && !s.requested ? t("people.review.stale") : "");
+  const text = (s: ReviewState) => reviewStateText(s, t);
   const involved = [...states.entries()].filter(([, s]) => s.requested || s.verdict);
   const state = (name: string) => states.get(name);
   return (
@@ -215,10 +240,7 @@ export function ReviewersPicker({
       except={author}
       shown={involved.map(([name]) => name)}
       on={(name) => !!state(name)?.requested}
-      mark={(name) => {
-        const s = state(name);
-        return s && <Mark state={s} />;
-      }}
+      state={state}
       note={(name) => {
         const s = state(name);
         return s && (s.requested || s.verdict) ? text(s) : null;

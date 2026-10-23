@@ -462,6 +462,14 @@ child, or next ticket, is scrolled to once shown; `web/src/views/relations/`), a
 upstream issue, relations to other tickets, and assignee), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
 settings (the shown workspace with its repositories, and Branvil's members).
+The pull request list shows each PR's reviewers with the same request and
+verdict badges as its detail page, and default-branch CI below the rows in the
+same card. For a selected repository, its tip's jobs are shown directly and open the
+existing job drawer. For all repositories, an initially folded summary counts
+repositories by CI status;
+opening it lists repository links, default branches, status badges and commit
+links. The first 30 repositories are read, with any omission shown. The queries
+stay active while folded and use the same event invalidation as the other pages.
 The pull request's check list marks required checks. Its merge or publish card
 names required checks that have not succeeded on the displayed head and disables
 the action until they do; while checks are loading or cannot be read, required

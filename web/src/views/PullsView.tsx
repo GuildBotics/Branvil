@@ -2,18 +2,18 @@ import { Card, Group, Select, Text, TextInput } from "@mantine/core";
 import { useQueries } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
-import { isApiError } from "../api/client";
 import * as api from "../api/endpoints";
-import type { Check, PullRequest } from "../api/types";
+import type { PullRequest } from "../api/types";
 import { ErrorMessage, Loading, MemberAvatar, StateBadge, Time, type Tone } from "../components/common";
 import { PageHeader } from "../components/PageHeader";
 import { useT } from "../i18n";
-import { useBranch, useChecks, useMemberKinds, useRepo, useRepos } from "../query/hooks";
+import { useChecks, useMemberKinds, useRepos } from "../query/hooks";
 import { keys } from "../query/keys";
 import { Link, navigate } from "../router/Router";
 import { href } from "../router/routes";
 import { rollup, type CiRollup } from "./board/ordering";
-import { CheckDrawer, CommitChecksCard, drawerTarget } from "./pull/Checks";
+import { TipChecks } from "./pulls/TipChecks";
+import { ReviewersCell } from "./pulls/ReviewersCell";
 
 type State = "open" | "closed" | "all";
 const ALL_REPOS = "*";
@@ -28,35 +28,6 @@ function CiCell({ pull, load }: { pull: PullRequest; load: boolean }) {
   const checks = useChecks(pull.repository, pull.number, load);
   if (!checks.data) return null;
   return <StateBadge tone={CI_TONE[rollup(checks.data)]}>{t(`ci.${rollup(checks.data)}`)}</StateBadge>;
-}
-
-/** The checks of the tip of a repository's default branch, which follow the branch as it moves. */
-function TipChecks({ repo }: { repo: string }) {
-  const t = useT();
-  const repository = useRepo(repo);
-  const branch = repository.data?.default_branch ?? "";
-  const tip = useBranch(repo, branch, branch !== "");
-  const [check, setCheck] = useState<{ attemptId: string; hosted: Check | null } | null>(null);
-  // The list of pull requests below says what is wrong with the repository.
-  if (repository.isError) return null;
-  if (tip.isError) {
-    // An empty repository has no branch yet.
-    if (!isApiError(tip.error, undefined, 404)) return <ErrorMessage error={tip.error} />;
-    return (
-      <Card p="lg">
-        <Text size="sm" c="dimmed">
-          {t("repo.noTip", { branch })}
-        </Text>
-      </Card>
-    );
-  }
-  if (!tip.data) return <Loading />;
-  return (
-    <>
-      <CommitChecksCard repo={repo} sha={tip.data.sha} title={t("repo.tipChecks", { branch })} linked onOpen={(c) => setCheck(drawerTarget(c))} />
-      <CheckDrawer repo={repo} check={check} onClose={() => setCheck(null)} />
-    </>
-  );
 }
 
 /**
@@ -97,7 +68,6 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
           </Text>
         }
       />
-      {repo && <TipChecks key={repo} repo={repo} />}
       <Card p="lg">
         <Group gap="sm" mb={14} role="search" aria-label={t("pulls.filters")}>
           <TextInput
@@ -142,6 +112,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
               <span role="columnheader">{t("pulls.state")}</span>
               <span role="columnheader">{t("ci.label")}</span>
               <span role="columnheader">{t("ticket.author")}</span>
+              <span role="columnheader">{t("member.reviewers")}</span>
               <span role="columnheader">{t("pulls.updated")}</span>
             </div>
             {pulls.length === 0 ? (
@@ -169,6 +140,9 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
                         {p.author}
                       </Text>
                     </Group>
+                    <span role="cell">
+                      <ReviewersCell pull={p} />
+                    </span>
                     <Text span size="xs" c="dimmed" role="cell">
                       <Time value={p.updated_at} />
                     </Text>
@@ -183,6 +157,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
             {t("pulls.cut")}
           </Text>
         )}
+        <TipChecks key={repo ?? ALL_REPOS} workspace={workspace} paths={paths} repo={repo} />
       </Card>
     </>
   );

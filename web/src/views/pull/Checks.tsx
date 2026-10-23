@@ -1,7 +1,7 @@
 // The checks of a pull request's head or of a commit: rows on the page, and one
 // check's details, actions, and log in a drawer.
 
-import { Anchor, Button, Card, Drawer, Group, Select, Stack, Text } from "@mantine/core";
+import { Anchor, Box, Button, Card, Drawer, Group, Select, Stack, Text } from "@mantine/core";
 import { useMutation, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { ChevronRight, CircleCheck, CircleDashed, CircleX, ExternalLink } from "lucide-react";
 import { useState } from "react";
@@ -61,9 +61,9 @@ export function ChecksCard({ repo, number, requiredChecks, onOpen }: { repo: str
 }
 
 /** The checks of a commit; a row opens its drawer. `linked` links the commit's page. */
-export function CommitChecksCard({ repo, sha, title, linked, onOpen }: { repo: string; sha: string; title: string; linked?: boolean; onOpen: (check: Check) => void }) {
+export function CommitChecksCard({ repo, sha, title, linked, embedded, onOpen }: { repo: string; sha: string; title: string; linked?: boolean; embedded?: boolean; onOpen: (check: Check) => void }) {
   const checks = useCommitChecks(repo, sha);
-  return <CheckList repo={repo} title={title} query={checks} sha={checks.data?.sha} linked={linked} onOpen={onOpen} />;
+  return <CheckList repo={repo} title={title} query={checks} sha={checks.data?.sha} linked={linked} embedded={embedded} onOpen={onOpen} />;
 }
 
 function CheckList({
@@ -72,6 +72,7 @@ function CheckList({
   query,
   sha,
   linked,
+  embedded,
   requiredChecks = [],
   onOpen,
   children,
@@ -81,16 +82,18 @@ function CheckList({
   query: UseQueryResult<CheckSet>;
   sha: string | undefined;
   linked?: boolean;
+  embedded?: boolean;
   requiredChecks?: string[];
   onOpen: (check: Check) => void;
   children?: React.ReactNode;
 }) {
   const t = useT();
+  const Container = embedded ? Box : Card;
   return (
-    <Card p="lg" component="section" aria-label={title}>
+    <Container p={embedded ? 0 : "lg"} component="section" aria-label={title}>
       <Group gap="xs" mb="xs">
         <Text fw={700}>{title}</Text>
-        {query.data && <StateBadge tone={ROLLUP_TONE[rollup(query.data)]}>{t(`ci.${rollup(query.data)}`)}</StateBadge>}
+        {query.data && !query.isError && <StateBadge tone={ROLLUP_TONE[rollup(query.data)]}>{t(`ci.${rollup(query.data)}`)}</StateBadge>}
         {sha !== undefined && (
           <Text size="xs" c="dimmed" ml="auto">
             {t("pull.checksOn")}{" "}
@@ -126,7 +129,7 @@ function CheckList({
           )}
         </>
       )}
-    </Card>
+    </Container>
   );
 }
 
