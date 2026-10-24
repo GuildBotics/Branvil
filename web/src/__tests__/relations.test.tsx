@@ -96,6 +96,23 @@ describe("relations", () => {
     expect(screen.queryByRole("group", { name: /New tickets/ })).not.toBeInTheDocument();
   });
 
+  it("opens a ticket in a drawer over the figure, at the figure's URL", async () => {
+    fakeApi(
+      routes(undefined, {
+        "GET /api/v1/repos/acme/demo": json(200, { path: "acme/demo", default_branch: "main", clone_url: "", url: "", protected_branches: [], required_checks: [], labels: [], upstream: null, revision: 1 }),
+        "GET /api/v1/repos/acme/demo/tickets/5": json(200, CARDS[4]),
+        "GET /api/v1/repos/acme/demo/tickets/5/comments": json(200, { items: [], next_cursor: null }),
+        "GET /api/v1/repos/acme/demo/tickets/5/pulls": json(200, { items: [], next_cursor: null }),
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp("/acme/-/relations");
+    await user.click(await screen.findByRole("link", { name: "Title of 5" }));
+    const drawer = await screen.findByRole("dialog", { name: "Ticket" });
+    expect(await within(drawer).findByRole("heading", { level: 2 })).toHaveTextContent("#5 Title of 5");
+    expect(window.location.pathname).toBe("/acme/-/relations");
+  });
+
   it("opens a parent into a frame with a toggle that says so, and remembers it", async () => {
     const user = userEvent.setup();
     fakeApi(routes());

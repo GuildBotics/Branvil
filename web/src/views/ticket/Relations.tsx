@@ -8,8 +8,8 @@ import type { Ticket, TicketRef } from "../../api/types";
 import { ErrorMessage, Refusal, StateBadge } from "../../components/common";
 import { type Translate, useT } from "../../i18n";
 import { keys } from "../../query/keys";
-import { Link } from "../../router/Router";
-import { href, routeOfUrl } from "../../router/routes";
+import { routeOfUrl } from "../../router/routes";
+import { TicketLink } from "./TicketLink";
 
 /** A ticket by its repository and number, with the URL the service knows it by. */
 interface Named {
@@ -169,7 +169,7 @@ function RelationList({
       )}
       {refs.map((r) => (
         <Group key={r.url} gap={6} wrap="nowrap" align="flex-start">
-          <Anchor component={Link} to={href.ticket(r.repository, r.key)} size="sm" style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>
+          <Anchor component={TicketLink} repo={r.repository} ticketKey={r.key} size="sm" style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>
             {labelOf(r, ticket)} {r.title}
           </Anchor>
           <StateBadge tone={r.state === "open" ? "success" : "neutral"}>{t(r.state === "open" ? "ticket.open" : "ticket.closed")}</StateBadge>

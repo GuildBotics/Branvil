@@ -5,7 +5,7 @@ import { useState } from "react";
 import { isApiError } from "../api/client";
 import * as api from "../api/endpoints";
 import { LANES, type Lane, type Reaction, type Ticket } from "../api/types";
-import { CommentView, ComposeForm, ErrorMessage, Loading, Post, PostHead, Refusal, StateBadge } from "../components/common";
+import { CommentView, ComposeForm, CopyButton, ErrorMessage, Loading, Post, PostHead, Refusal, StateBadge } from "../components/common";
 import { BodyEditor, EditableTitle, EditPencil } from "../components/Editable";
 import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
@@ -13,11 +13,11 @@ import { AssigneePicker } from "../components/PeoplePicker";
 import { useT } from "../i18n";
 import { useMemberKinds, useRepo, useTicket, useTicketComments, useTicketPulls, usePeople } from "../query/hooks";
 import { keys } from "../query/keys";
-import { Link, ServiceLink } from "../router/Router";
-import { href } from "../router/routes";
+import { ServiceLink } from "../router/Router";
 import { Relations, relationRefusal } from "./ticket/Relations";
 
-export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: string }) {
+/** A ticket: its page, or, in a `drawer` over a page, whose URL it does not take: then it offers its own to copy. */
+export function TicketView({ repo, ticketKey, drawer }: { repo: string; ticketKey: string; drawer?: boolean }) {
   const t = useT();
   const client = useQueryClient();
   const ticket = useTicket(repo, ticketKey);
@@ -68,16 +68,18 @@ export function TicketView({ repo, ticketKey }: { repo: string; ticketKey: strin
   if (ticket.isPending) return <Loading />;
   if (ticket.isError) return <ErrorMessage error={ticket.error} />;
   const tk = ticket.data;
-  // The repository's path starts with its workspace, whose board the ticket is on.
-  const workspace = repo.split("/")[0] as string;
   // The revision read when editing began makes a stale edit fail with 409.
   const save = (patch: api.TicketPatch) => update.mutateAsync({ ...patch, revision: tk.revision });
 
   return (
     <Stack gap="lg">
       <PageHeader
-        back={<Link to={href.workspace(workspace)}>{t("nav.board")}</Link>}
-        title={<EditableTitle prefix={`#${tk.key}`} value={tk.title} pending={update.isPending} onSave={(title) => save({ title })} />}
+        title={
+          <Group gap={4} wrap="nowrap" align="center">
+            <EditableTitle prefix={`#${tk.key}`} value={tk.title} pending={update.isPending} onSave={(title) => save({ title })} />
+            {drawer && <CopyButton value={tk.url} label={t("ticket.copyUrl")} />}
+          </Group>
+        }
         meta={
           <>
             <StateBadge tone={tk.state === "open" ? "success" : "neutral"}>{t(tk.state === "open" ? "ticket.open" : "ticket.closed")}</StateBadge>

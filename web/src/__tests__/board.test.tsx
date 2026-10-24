@@ -1,6 +1,7 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { Card } from "../api/types";
 import { href } from "../router/routes";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { choose, pickFromMenu } from "../test/mantine";
@@ -96,6 +97,59 @@ describe("kanban board", () => {
     expect(first?.search).toContain("state=open");
     expect(first?.search).toContain("comments=none");
     expect(second?.search).toContain("cursor=page2");
+  });
+
+  it("opens a ticket in a drawer over the board at the board's URL, with the ticket's URL to copy; a ticket linked there replaces it", async () => {
+    const ticket = (key: string, extra: Partial<Card> = {}) => ({
+      [`GET /api/v1/repos/acme/demo/tickets/${key}`]: json(200, card(key, "new", extra)),
+      [`GET /api/v1/repos/acme/demo/tickets/${key}/comments`]: json(200, { items: [], next_cursor: null }),
+      [`GET /api/v1/repos/acme/demo/tickets/${key}/pulls`]: json(200, { items: [], next_cursor: null }),
+    });
+    const three = card("3", "in_progress");
+    const blocker = { url: three.url, repository: "acme/demo", key: "3", title: three.title, state: "open" as const, state_reason: null };
+    fakeApi(boardRoutes({ "GET /api/v1/repos/acme/demo": json(200, repo("acme/demo", ["bug"])), ...ticket("1", { blocked_by: [blocker] }), ...ticket("3") }));
+    const user = userEvent.setup();
+    renderApp("/acme");
+
+    // A click with a modifier opens the ticket's page as a link does, not the drawer.
+    fireEvent.click(await screen.findByRole("link", { name: "Title of 1" }), { ctrlKey: true });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("link", { name: "Title of 1" }));
+    const drawer = await screen.findByRole("dialog", { name: "Ticket" });
+    expect(await within(drawer).findByRole("heading", { level: 2 })).toHaveTextContent("#1 Title of 1");
+    expect(window.location.pathname).toBe("/acme");
+    // The ticket's page, not the board, has no link back to the board.
+    expect(within(drawer).queryByRole("link", { name: "Task board" })).not.toBeInTheDocument();
+    await user.click(within(drawer).getByRole("button", { name: "Copy the ticket's URL" }));
+    expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}/acme/demo/-/tickets/1`);
+
+    await user.click(within(drawer).getByRole("link", { name: /Title of 3/ }));
+    expect(await within(drawer).findByRole("heading", { level: 2, name: /#3 Title of 3/ })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/acme");
+    // The link that opened it is gone: the focus stays in the drawer.
+    expect(drawer).toHaveFocus();
+
+    // Escape in a field being typed in is the field's: the title's edit is cancelled, the drawer stays.
+    await user.click(within(drawer).getByRole("heading", { level: 2, name: /#3 Title of 3/ }));
+    await user.keyboard("{Escape}");
+    expect(within(drawer).queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Ticket" })).toBeInTheDocument();
+    // So is Escape in an open dropdown: it closes only the dropdown.
+    await user.click(within(drawer).getByRole("combobox", { name: "Lane" }));
+    expect(await screen.findByRole("listbox")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("listbox")).not.toBeInTheDocument());
+    expect(screen.getByRole("dialog", { name: "Ticket" })).toBeInTheDocument();
+    // Elsewhere it closes the drawer, as its button does: a label's chip is not typed in.
+    act(() => within(drawer).getByRole("checkbox", { name: "bug" }).focus());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    await user.click(screen.getByRole("link", { name: "Title of 1" }));
+    await user.click(await within(await screen.findByRole("dialog", { name: "Ticket" })).findByRole("button", { name: "Close the drawer" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(lane(/New/)).toBeInTheDocument();
   });
 
   it("re-renders no card when a check answers or a drag moves over the board", async () => {

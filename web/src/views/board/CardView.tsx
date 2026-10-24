@@ -9,9 +9,10 @@ import { ErrorMessage, MemberAvatar, StateBadge, type Tone } from "../../compone
 import { CheckSlot, PeopleItems, type Person } from "../../components/PeoplePicker";
 import { type Translate, useT } from "../../i18n";
 import { useChecks } from "../../query/hooks";
-import { Link, ServiceLink } from "../../router/Router";
-import { href, routeOfUrl } from "../../router/routes";
+import { ServiceLink } from "../../router/Router";
+import { routeOfUrl } from "../../router/routes";
 import { relationRefusal } from "../ticket/Relations";
+import { TicketLink } from "../ticket/TicketLink";
 import { rollup, type CiRollup } from "./ordering";
 
 /** The most pull requests whose checks a page of cards loads (one request each). */
@@ -168,9 +169,9 @@ export function CardView({
     <article className={["card", busy && "busy", className].filter(Boolean).join(" ")} aria-busy={busy} aria-label={`${ref} ${card.title}`}>
       <div className="card-row">
         {lead}
-        <Link to={href.ticket(card.repository, card.key)} className="key">
+        <TicketLink repo={card.repository} ticketKey={card.key} className="key">
           {ref}
-        </Link>
+        </TicketLink>
         {lane}
         {card.state === "closed" && <StateBadge>{t("ticket.closed")}</StateBadge>}
         {card.state === "open" && card.blocked_by.some((b) => b.state === "open") && <StateBadge tone="warning">{t("board.blocked")}</StateBadge>}
@@ -186,7 +187,9 @@ export function CardView({
         )}
       </div>
       <p className="title">
-        <Link to={href.ticket(card.repository, card.key)}>{card.title}</Link>
+        <TicketLink repo={card.repository} ticketKey={card.key}>
+          {card.title}
+        </TicketLink>
       </p>
       <div className="card-row">
         {card.labels.length > 0 && (

@@ -33,15 +33,15 @@ export function usePathname(): string {
   return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
-type LinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; children: ReactNode };
+type LinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; children: ReactNode; go?: () => void };
 
-/** An in-app link: plain left clicks navigate without reloading the page. */
-export function Link({ to, children, onClick, ...rest }: LinkProps) {
+/** An in-app link: plain left clicks navigate without reloading the page (or `go` instead), others open `to` as a link does. */
+export function Link({ to, children, onClick, go = () => navigate(to), ...rest }: LinkProps) {
   const handle = (e: MouseEvent<HTMLAnchorElement>) => {
     onClick?.(e);
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
-    navigate(to);
+    go();
   };
   return (
     <a href={to} onClick={handle} {...rest}>
