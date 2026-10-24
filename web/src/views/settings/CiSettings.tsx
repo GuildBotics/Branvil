@@ -13,7 +13,7 @@ import { keys } from "../../query/keys";
 import { Link } from "../../router/Router";
 import { href } from "../../router/routes";
 
-const RUNNER_TONE: Record<Settings["runner"]["state"], Tone> = { ready: "success", no_runner: "warning", executor_unavailable: "danger" };
+const RUNNER_TONE: Record<Settings["runner"]["state"], Tone> = { ready: "success", no_runner: "warning", executor_unavailable: "danger", stopping: "warning" };
 
 /** An image's size as people read it (the cache holds images of hundreds of MiB to GiB). */
 function size(bytes: number): string {

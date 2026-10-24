@@ -254,7 +254,7 @@ async fn run(cli: Cli) -> anyhow::Result<u8> {
                 listen.as_deref(),
                 base_url.as_deref(),
             )?;
-            cli::serve(config).await.map(|_| 0)
+            cli::serve(config).await
         }
         Command::Open {
             print,

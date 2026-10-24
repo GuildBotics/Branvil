@@ -109,26 +109,40 @@ EOF
   # Whether the serve started last has said that it is ready.
   ready() { grep -q '^branvil listening on ' "$builds/serve.out" 2>/dev/null; }
   # Stops the serve: TERM, and KILL when it has not ended 30 ticks later.
+  # A serve that says it waits for its running CI jobs (ci.stop_wait_secs at
+  # most) is waited for until it ends; one that had to interrupt jobs then
+  # (exit status 3) is told.
   stopped() {
-    local i
+    local i=0 status=0
     if [[ -z "$serve_pid" ]]; then return; fi
     kill -TERM "$serve_pid" 2>/dev/null || true
-    for (( i = 0; i < 30; i++ )); do
-      if ! kill -0 "$serve_pid" 2>/dev/null; then break; fi
+    while kill -0 "$serve_pid" 2>/dev/null; do
+      if (( i == 30 )) && ! grep -q '^branvil stopping: ' "$builds/serve.out" 2>/dev/null; then
+        log "branvil serve of $serve_build did not stop within 30 seconds of TERM; killing it"
+        kill -KILL "$serve_pid" 2>/dev/null || true
+        break
+      fi
       sleep "$tick"
+      i=$((i + 1))
     done
-    if kill -0 "$serve_pid" 2>/dev/null; then
-      log "branvil serve of $serve_build did not stop within 30 seconds of TERM; killing it"
-      kill -KILL "$serve_pid" 2>/dev/null || true
+    wait "$serve_pid" || status=$?
+    if grep -q '^branvil stopping: ' "$builds/serve.out" 2>/dev/null; then
+      log "branvil serve of $serve_build stopped $i seconds after TERM; it waited for its running CI jobs"
     fi
-    wait "$serve_pid" || true
+    if (( status == 3 )); then
+      message="branvil serve of $serve_build stopped while CI jobs still ran, ci.stop_wait_secs after TERM: they were interrupted, and queued again in their place unless interrupted before."
+      log "$message"
+      notify "$message"
+    fi
     serve_pid=
   }
-  # TERM (launchctl bootout) stops the service and an update; set before
-  # anything starts.
+  # TERM (launchctl bootout) stops an update and the service, the service at
+  # once (INT: TERM would wait for its running CI jobs); set before anything
+  # starts.
   stop() {
     local pid
-    for pid in $serve_pid $update_pid; do kill -TERM "$pid" 2>/dev/null || true; done
+    if [[ -n "$serve_pid" ]]; then kill -INT "$serve_pid" 2>/dev/null || true; fi
+    if [[ -n "$update_pid" ]]; then kill -TERM "$update_pid" 2>/dev/null || true; fi
     for pid in $serve_pid $update_pid; do wait "$pid" 2>/dev/null || true; done
     exit 143
   }

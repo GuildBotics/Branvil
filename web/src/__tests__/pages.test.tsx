@@ -279,6 +279,20 @@ describe("pages", () => {
     expect(within(warnings).getByText(/cannot be followed/)).toBeInTheDocument();
   });
 
+  it("warns while Branvil waits for the running CI jobs to stop, also when CI runs on another machine", async () => {
+    fakeApi({
+      ...SHELL,
+      "GET /api/v1/members": page([]),
+      "GET /api/v1/admin/diagnostics": json(200, {
+        runner: { state: "stopping", detail: "Branvil is stopping.", mode: "off" },
+        upstream: { state: "following", problems: [] },
+      }),
+    });
+    renderApp("/-/settings/members");
+    const warnings = await screen.findByRole("region", { name: "Warnings" });
+    expect(await within(warnings).findByText(/Branvil is stopping for an update or a restart once the running CI jobs finish/)).toBeInTheDocument();
+  });
+
   it("does not warn about the runner when CI is turned off", async () => {
     fakeApi({
       ...SHELL,

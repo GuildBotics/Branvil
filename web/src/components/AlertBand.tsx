@@ -1,6 +1,7 @@
 // Warnings at the top of every page, as GuildBotics' system alerts: only when
 // something needs the owner (the page lost its connection to the service; CI
-// cannot run; an upstream cannot be followed). A dismissed warning stays away
+// cannot run, or waits for the service to stop, also when it runs on another
+// machine; an upstream cannot be followed). A dismissed warning stays away
 // until what it says changes; the lost connection cannot be dismissed, as it
 // goes away by itself once the page is up to date again.
 
@@ -27,9 +28,13 @@ export function AlertBand({ streamLost }: { streamLost: boolean }) {
   const warnings: Warning[] = [];
   if (streamLost) warnings.push({ id: "stream", text: t("alert.streamLost"), dismissible: false });
   const runner = d?.runner;
-  if (runner && runner.mode !== "off" && runner.state !== "ready") {
+  if (runner && (runner.state === "stopping" || (runner.mode !== "off" && runner.state !== "ready"))) {
     const text =
-      runner.state === "no_runner" ? t("alert.noRunner") : t("alert.executorUnavailable", { detail: runner.detail });
+      runner.state === "stopping"
+        ? t("alert.stopping")
+        : runner.state === "no_runner"
+          ? t("alert.noRunner")
+          : t("alert.executorUnavailable", { detail: runner.detail });
     warnings.push({ id: `runner:${runner.state}:${runner.detail}`, text, dismissible: true });
   }
   for (const p of d?.upstream?.problems ?? []) {

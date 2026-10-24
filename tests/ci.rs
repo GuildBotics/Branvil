@@ -207,7 +207,7 @@ where
 }
 
 /// Sets `[ci]` values in the service's configuration (restart to apply).
-fn set_ci_config(w: &World, values: &[(&str, i64)]) {
+fn set_ci_config(w: &World, values: &[(&str, toml::Value)]) {
     let path = w.server.data.join("branvil.toml");
     let mut doc: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
     let ci = doc
@@ -216,7 +216,7 @@ fn set_ci_config(w: &World, values: &[(&str, i64)]) {
         .as_table_mut()
         .unwrap();
     for (k, v) in values {
-        ci.insert(k.to_string(), toml::Value::Integer(*v));
+        ci.insert(k.to_string(), v.clone());
     }
     std::fs::write(path, toml::to_string(&doc).unwrap()).unwrap();
 }
@@ -858,7 +858,7 @@ async fn a_commit_shows_its_checks_with_or_without_a_pull_request() {
 #[tokio::test]
 async fn no_runner_means_startup_failure_not_waiting_forever() {
     let mut w = World::new().await;
-    set_ci_config(&w, &[("runner_absent_secs", 2)]);
+    set_ci_config(&w, &[("runner_absent_secs", 2.into())]);
     w.restart(&[]);
     land(
         &w,
@@ -888,7 +888,10 @@ async fn no_runner_means_startup_failure_not_waiting_forever() {
 #[tokio::test]
 async fn an_expired_lease_requeues_once_and_a_restart_handles_orphans() {
     let mut w = World::new().await;
-    set_ci_config(&w, &[("lease_secs", 2), ("runner_absent_secs", 600)]);
+    set_ci_config(
+        &w,
+        &[("lease_secs", 2.into()), ("runner_absent_secs", 600.into())],
+    );
     w.restart(&[]);
     let runner = Runner::new(&w, "runner1").await;
     land(
@@ -966,6 +969,202 @@ async fn an_expired_lease_requeues_once_and_a_restart_handles_orphans() {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+/// A pull request whose `test` is claimed and whose `lint` is queued after
+/// it; returns the claimed attempt.
+async fn running_test_and_queued_lint(w: &World, runner: &Runner) -> Value {
+    land(
+        w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test", "lint"]))],
+        None,
+    )
+    .await;
+    runner.drain("success").await;
+    sync_main(w);
+    w.push_change("feature", "f.txt", "1\n");
+    w.open_pull("feature", json!([])).await;
+    let running = runner.claim().await.unwrap();
+    assert_eq!(running["job"]["name"], "test");
+    running
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stopping_service_gives_out_no_job_and_waits_for_the_running_ones() {
+    let mut w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    let running = running_test_and_queued_lint(&w, &runner).await;
+    w.server.signal("TERM");
+    eventually("stopping", || {
+        let w = &w;
+        async move {
+            w.server.ok("/admin/diagnostics", &w.owner).await["runner"]["state"] == "stopping"
+        }
+    })
+    .await;
+    // The queued job waits; the running one reports and finishes as usual.
+    assert!(runner.claim().await.is_none());
+    assert_eq!(runner.heartbeat(&running).await.0, 200);
+    assert_eq!(runner.finish(&running, "success").await.0, 200);
+    let status = w
+        .server
+        .exit_within(std::time::Duration::from_secs(10))
+        .expect("still running after its last job finished");
+    assert!(status.success(), "{status}");
+    // The queued job runs after the next start.
+    w.restart(&[]);
+    let runner = Runner {
+        url: w.server.url.clone(),
+        token: runner.token.clone(),
+        http: reqwest::Client::new(),
+    };
+    assert_eq!(runner.claim().await.unwrap()["job"]["name"], "lint");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_job_still_running_when_the_stop_wait_ends_is_queued_again_in_its_place() {
+    let mut w = World::new().await;
+    set_ci_config(&w, &[("stop_wait_secs", 1.into())]);
+    w.restart(&[]);
+    let runner = Runner::new(&w, "runner1").await;
+    let running = running_test_and_queued_lint(&w, &runner).await;
+    w.server.signal("TERM");
+    let status = w
+        .server
+        .exit_within(std::time::Duration::from_secs(10))
+        .expect("still running after the stop wait");
+    // It says that it cut a job off.
+    assert_eq!(status.code(), Some(3), "{status}");
+    w.restart(&[]);
+    let runner = Runner {
+        url: w.server.url.clone(),
+        token: runner.token.clone(),
+        http: reqwest::Client::new(),
+    };
+    let again = runner.claim().await.unwrap();
+    assert_eq!(
+        (again["job"]["name"].as_str(), again["attempt"].as_u64()),
+        (Some("test"), Some(2))
+    );
+    let old = w
+        .server
+        .ok(
+            &format!(
+                "{}/jobs/{}",
+                w.repo_path(),
+                running["attempt_id"].as_str().unwrap()
+            ),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(old["conclusion"], "cancelled");
+    let details = old["details"].as_str().unwrap();
+    assert!(
+        details.contains("Branvil stopped") && details.contains("in its place"),
+        "{old}"
+    );
+    assert_eq!(runner.finish(&running, "success").await.0, 409);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigint_stops_a_service_that_waits_for_its_running_jobs_at_once() {
+    let mut w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    running_test_and_queued_lint(&w, &runner).await;
+    w.server.signal("TERM");
+    eventually("stopping", || {
+        let w = &w;
+        async move {
+            w.server.ok("/admin/diagnostics", &w.owner).await["runner"]["state"] == "stopping"
+        }
+    })
+    .await;
+    w.server.signal("INT");
+    let status = w
+        .server
+        .exit_within(std::time::Duration::from_secs(10))
+        .expect("still waiting after SIGINT");
+    assert!(status.success(), "{status}");
+}
+
+#[tokio::test]
+async fn the_automatic_runner_starting_again_queues_the_jobs_its_predecessor_held_in_their_place() {
+    let mut w = World::new().await;
+    // Long leases: what follows is not their expiry.
+    set_ci_config(&w, &[("lease_secs", 600.into())]);
+    w.restart(&[]);
+    // As the automatic runner, which dies with its service.
+    let runner = Runner::new(&w, "branvil-runner").await;
+    let held = running_test_and_queued_lint(&w, &runner).await;
+    set_ci_config(&w, &[("runner", "auto".into())]);
+    // A home of its own: no msb, so the new automatic runner concludes what
+    // it claims as startup failures.
+    let home = w.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    w.restart(&[("HOME", home.to_str().unwrap())]);
+    let url = format!(
+        "{}/jobs/{}",
+        w.repo_path(),
+        held["attempt_id"].as_str().unwrap()
+    );
+    eventually("interrupted at the start", || {
+        let (w, url) = (&w, &url);
+        async move { w.server.ok(url, &w.aiko).await["conclusion"] == "cancelled" }
+    })
+    .await;
+    let old = w.server.ok(&url, &w.aiko).await;
+    let details = old["details"].as_str().unwrap();
+    assert!(
+        details.contains("automatic runner stopped") && details.contains("in its place"),
+        "{old}"
+    );
+    // Its next attempt was taken before lint, queued after it.
+    let sha = held["sha"].as_str().unwrap().to_string();
+    let checks_url = format!("{}/commits/{sha}/checks", w.repo_path());
+    eventually("both taken", || {
+        let (w, url) = (&w, &checks_url);
+        async move {
+            w.server.ok(url, &w.aiko).await["checks"]
+                .as_array()
+                .is_some_and(|c| c.iter().all(|c| c["status"] == "completed"))
+        }
+    })
+    .await;
+    let list = w.server.ok(&checks_url, &w.aiko).await;
+    let started = |name: &str| {
+        let c = list["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap()
+            .clone();
+        (
+            c["attempt"].clone(),
+            c["attempt_id"].as_str().unwrap().to_string(),
+        )
+    };
+    let ((test_attempt, test_id), (_, lint_id)) = (started("test"), started("lint"));
+    assert_eq!(test_attempt, 2);
+    let at = |id: String| {
+        let w = &w;
+        async move {
+            w.server
+                .ok(&format!("{}/jobs/{id}", w.repo_path()), &w.aiko)
+                .await["started_at"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    let (test_at, lint_at) = (at(test_id).await, at(lint_id).await);
+    assert!(test_at <= lint_at, "test {test_at}, lint {lint_at}");
+    #[cfg(unix)]
+    w.server.terminate(std::time::Duration::from_secs(10));
 }
 
 #[tokio::test]

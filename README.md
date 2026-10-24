@@ -53,8 +53,9 @@ web pages with a "GUI is not built" notice.
 # who uses Branvil. The owner's token goes to ./data/secrets/owner.token.
 branvil init --data-dir ./data --owner alice
 
-# Start the service. Ctrl-C or SIGTERM stops it: open GUI event streams end at
-# once, and other requests get 5 seconds to finish.
+# Start the service. Ctrl-C stops it: open GUI event streams end at once, and
+# other requests get 5 seconds to finish. SIGTERM does the same once the
+# running CI jobs have finished (docs/ci.md, "Stopping the service").
 branvil serve --data-dir ./data
 
 # Open the GUI in the browser; there is no sign-in screen.
@@ -544,7 +545,8 @@ require every job that must keep a commit out of the service, here `fmt`,
 `clippy`, `test`, `web`, and `dev-script`):
 it backs the service up, builds the new commit and rehearses its upgrade on a
 copy of the backup while the old build serves, and stops the service only to
-switch builds. A failed commit is not tried again until `main` moves on.
+switch builds, once its running CI jobs have finished. A failed commit is not
+tried again until `main` moves on.
 Failures are written to the log and shown once as a macOS notification
 (`osascript`, which macOS lists as Script Editor under System Settings →
 Notifications; allow it once, for instance after

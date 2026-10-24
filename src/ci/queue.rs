@@ -7,8 +7,9 @@
 //!
 //! ```text
 //! queued ──claim──▶ in_progress ──finish──▶ completed(conclusion)
-//!   │                   │  └─lease expires─▶ completed(cancelled, "interrupted")
-//!   │                   │                     └─(first interruption) new attempt queued
+//!   │                   │  └─lease expires,─▶ completed(cancelled, "interrupted")
+//!   │                   │    service stops     └─(first interruption) new attempt
+//!   │                   │                        queued in the old one's place
 //!   └─cancel/supersede─▶ completed(cancelled)     (in_progress: cancel_requested,
 //!   └─no runner───────▶ completed(startup_failure)  the runner stops and finishes)
 //! ```
@@ -740,46 +741,85 @@ pub fn retry(w: &Wtx, id: &str, queue_max: usize, now: &str) -> AppResult<Attemp
 }
 
 /// Handles every in-progress attempt whose lease expired before `now` (the
-/// runner died, lost the service, or the service was down): the attempt is
-/// concluded `cancelled` as interrupted, and the first interruption of a job
-/// that was not cancelled or superseded is re-queued as a new attempt.
+/// runner died, lost the service, or the service was down) as interrupted
+/// (`interrupt`).
 pub fn expire(w: &Wtx, now: &str) -> AppResult<Vec<(String, String)>> {
     let mut changed = Vec::new();
-    for (k, _) in w.prefix_raw(store::IX_CI_ACTIVE, &[], None, usize::MAX)? {
-        let Some(parts) = store::decode_key(&k, "s") else {
-            continue;
-        };
-        let Some(old) = get_attempt(w, parts[0].s())? else {
-            continue;
-        };
+    for old in active(w)? {
         if old.lease_expires_at.as_deref().unwrap_or("") >= now {
             continue;
         }
-        let mut a = old.clone();
-        let requeue = !old.cancel_requested && !old.superseded && !old.after_interrupt;
-        let details = if old.cancel_requested {
-            format!(
-                "{} The runner stopped renewing its lease before it finished.",
-                old.details.clone().unwrap_or_else(|| "Cancelled.".into())
-            )
-        } else if requeue {
-            "Interrupted: the runner stopped renewing its lease (runner lost or Branvil restarted); queued again as a new attempt.".to_string()
-        } else {
-            "Interrupted twice: the runner stopped renewing its lease again; retry the job."
-                .to_string()
-        };
-        conclude(&mut a, "cancelled", Some(details), now);
-        put_attempt(w, Some(&old), &a)?;
-        // Its definition is the run's: an unfinished attempt of another one
-        // was asked to stop when the run took its pipeline (`take_pipeline`).
-        if requeue && let Some(run) = get_run(w, &old.repo, &old.sha)? {
-            let mut next = new_attempt(w, &run, &old.job, old.network, now)?;
-            next.after_interrupt = true;
-            put_attempt(w, None, &next)?;
-        }
+        interrupt(
+            w,
+            &old,
+            "the runner stopped renewing its lease (runner lost or Branvil restarted)",
+            now,
+        )?;
         changed.push((old.repo_path.clone(), old.sha.clone()));
     }
     Ok(changed)
+}
+
+/// Handles every in-progress attempt (of `runner` only, when given) as
+/// interrupted (`why`): the service stopped before it finished, or the
+/// runner did.
+pub fn interrupt_running(
+    w: &Wtx,
+    runner: Option<&str>,
+    why: &str,
+    now: &str,
+) -> AppResult<Vec<(String, String)>> {
+    let mut changed = Vec::new();
+    for old in active(w)? {
+        if runner.is_some_and(|r| old.runner.as_deref().map(util::fold) != Some(util::fold(r))) {
+            continue;
+        }
+        interrupt(w, &old, why, now)?;
+        changed.push((old.repo_path.clone(), old.sha.clone()));
+    }
+    Ok(changed)
+}
+
+fn active(r: &impl Rd) -> AppResult<Vec<Attempt>> {
+    let mut out = Vec::new();
+    for (k, _) in r.prefix_raw(store::IX_CI_ACTIVE, &[], None, usize::MAX)? {
+        if let Some(parts) = store::decode_key(&k, "s")
+            && let Some(a) = get_attempt(r, parts[0].s())?
+        {
+            out.push(a);
+        }
+    }
+    Ok(out)
+}
+
+/// Concludes the in-progress attempt `old` `cancelled` as interrupted
+/// (`why`); the first interruption of a job that was not cancelled or
+/// superseded is queued again as a new attempt in the place `old` had in the
+/// queue, ahead of what was queued after it.
+fn interrupt(w: &Wtx, old: &Attempt, why: &str, now: &str) -> AppResult<()> {
+    let mut a = old.clone();
+    let requeue = !old.cancel_requested && !old.superseded && !old.after_interrupt;
+    let details = if old.cancel_requested {
+        format!(
+            "{} It ended unfinished: {why}.",
+            old.details.clone().unwrap_or_else(|| "Cancelled.".into())
+        )
+    } else if requeue {
+        format!("Interrupted: {why}; queued again in its place.")
+    } else {
+        format!("Interrupted twice: {why}; retry the job.")
+    };
+    conclude(&mut a, "cancelled", Some(details), now);
+    put_attempt(w, Some(old), &a)?;
+    // Its definition is the run's: an unfinished attempt of another one
+    // was asked to stop when the run took its pipeline (`take_pipeline`).
+    if requeue && let Some(run) = get_run(w, &old.repo, &old.sha)? {
+        let mut next = new_attempt(w, &run, &old.job, old.network, now)?;
+        next.seq = old.seq;
+        next.after_interrupt = true;
+        put_attempt(w, None, &next)?;
+    }
+    Ok(())
 }
 
 /// Concludes `startup_failure` for every queued attempt created before
@@ -1049,6 +1089,51 @@ mod tests {
         assert_eq!(l[0].number, 2);
         assert_eq!(l[0].conclusion.as_deref(), Some("cancelled"));
         assert!(l[0].details.as_deref().unwrap().contains("twice"));
+        assert!(
+            s.read_sync(crate::model::index_problems)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_interrupted_job_is_queued_again_ahead_of_what_was_queued_after_it() {
+        let (_d, s) = store();
+        s.write_sync(|w| register(w, reg("s1", "feature", &["test"]), 10, T0))
+            .unwrap();
+        let c1 = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
+        s.write_sync(|w| register(w, reg("s2", "other", &["test"]), 10, T0))
+            .unwrap();
+        s.write_sync(|w| expire(w, T2)).unwrap();
+        let again = s.write_sync(|w| claim(w, "r", 60, T2)).unwrap().unwrap();
+        assert_eq!(
+            (again.attempt.sha.as_str(), again.attempt.number),
+            ("s1", 2)
+        );
+        // Stopped by the service, it keeps its place too.
+        // Only the given runner's.
+        let changed = s.write_sync(|w| interrupt_running(w, Some("other"), "-", T2));
+        assert!(changed.unwrap().is_empty());
+        s.write_sync(|w| interrupt_running(w, Some("R"), "Branvil stopped", T2))
+            .unwrap();
+        let old = s
+            .read_sync(|r| get_attempt(r, &again.attempt.id))
+            .unwrap()
+            .unwrap();
+        assert!(old.details.unwrap().contains("Branvil stopped; retry"));
+        assert_eq!(
+            s.write_sync(|w| claim(w, "r", 60, T2))
+                .unwrap()
+                .unwrap()
+                .attempt
+                .sha,
+            "s2"
+        );
+        let first = s
+            .read_sync(|r| get_attempt(r, &c1.attempt.id))
+            .unwrap()
+            .unwrap();
+        assert!(first.details.unwrap().contains("queued again in its place"));
         assert!(
             s.read_sync(crate::model::index_problems)
                 .unwrap()

@@ -147,14 +147,21 @@ if tool == "branvil":
             print("branvil: it was upgraded and has not passed `branvil admin check` since", file=sys.stderr)
             sys.exit(1)
 
-        def stop(*_):
+        def stop(signum=None, _=None):
+            # TERM: like the real one, it says that it waits for its running
+            # CI jobs, and waits (while the DEV_TEST_HOLD_STOP file exists).
+            if signum == signal.SIGTERM and setting("DEV_TEST_HOLD_STOP"):
+                print("branvil stopping: waiting for 1 running CI job(s) to finish, at most 3600 s", flush=True)
+                hold("STOP")
             serving.unlink(missing_ok=True)
             if pids.exists() and pids.read_text(encoding="utf-8") == f"{os.getpid()}\n":
                 pids.unlink()
-            record({"tool": "branvil", "args": ["stopped"], "pid": os.getpid(), "binary": binary})
-            sys.exit(0)
+            record({"tool": "branvil", "args": ["stopped"], "pid": os.getpid(), "binary": binary,
+                    "signal": signal.Signals(signum).name if signum else None})
+            sys.exit(int(setting("DEV_TEST_SERVE_STOP_EXIT") or "0"))
 
         signal.signal(signal.SIGTERM, signal.SIG_IGN if setting("DEV_TEST_SERVE_IGNORE_TERM") else stop)
+        signal.signal(signal.SIGINT, stop)
         hold("SERVE")
         serving.write_text(str(os.getpid()), encoding="utf-8")
         # Its pid, for the tests.
@@ -1027,6 +1034,72 @@ class ServeScriptTests(ScriptTestCase):
         self.assert_runs("other")
         self.assertTrue(gone(first))
         self.assertEqual(self.admins("upgrade")[-1], self.binary("other"))
+        # With TERM, which lets its running CI jobs finish.
+        self.assertEqual(self.stops(), [(first, "SIGTERM")])
+
+    def stops(self):
+        return [(e["pid"], e["signal"]) for e in self.events("branvil") if e["args"] == ["stopped"]]
+
+    def restarted_with(self, **settings):
+        """Kills the running fake serve, which scripts/serve.sh starts again
+        with these settings; returns its pid."""
+        first = self.service_pid()
+        self.control(**settings)
+        os.kill(first, signal.SIGKILL)
+        self.wait_until(lambda: self.service_pid() not in (None, first), self.runs_watcher)
+        return self.service_pid()
+
+    def test_a_serve_waiting_for_its_ci_jobs_is_waited_for(self):
+        proc, output = self.watch("--interval", "3600")
+        shutil.copytree(self.builds / self.base, self.builds / "other")
+        hold = self.root / "hold"
+        hold.touch()
+        waiting = self.restarted_with(**{f"DEV_TEST_HOLD_STOP_{self.base}": str(hold)})
+        (self.builds / "current").write_text("other\n", encoding="utf-8")
+        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
+        time.sleep(40 * TICK)  # past the 30 ticks after which a TERM is given up on
+        self.assertFalse(gone(waiting))
+        hold.unlink()
+        self.assert_runs("other")
+        log = output.read_text(encoding="utf-8")
+        self.assertIn(f"branvil serve of {self.base} stopped", log)
+        self.assertIn("it waited for its running CI jobs", log)
+        self.assertNotIn("killing it", log)
+        self.assertEqual(self.notifications(), [])
+
+    def test_a_serve_that_interrupted_ci_jobs_when_stopped_is_told(self):
+        self.watch("--interval", "3600")
+        shutil.copytree(self.builds / self.base, self.builds / "other")
+        self.restarted_with(**{f"DEV_TEST_SERVE_STOP_EXIT_{self.base}": "3"})
+        (self.builds / "current").write_text("other\n", encoding="utf-8")
+        self.assert_runs("other")
+        self.wait_until(lambda: self.notifications())
+        self.assertEqual(
+            self.notifications(),
+            [f"branvil serve of {self.base} stopped while CI jobs still ran, ci.stop_wait_secs after TERM: "
+             "they were interrupted, and queued again in their place unless interrupted before."],
+        )
+
+    def test_another_failure_when_stopped_is_not_told_as_interrupted_jobs(self):
+        self.watch("--interval", "3600")
+        shutil.copytree(self.builds / self.base, self.builds / "other")
+        self.restarted_with(**{f"DEV_TEST_SERVE_STOP_EXIT_{self.base}": "1"})
+        (self.builds / "current").write_text("other\n", encoding="utf-8")
+        self.assert_runs("other")
+        self.assertEqual(self.notifications(), [])
+
+    def test_term_while_the_serve_waits_for_its_ci_jobs_stops_it_at_once(self):
+        proc, _ = self.watch("--interval", "3600")
+        shutil.copytree(self.builds / self.base, self.builds / "other")
+        hold = self.root / "hold"
+        hold.touch()
+        waiting = self.restarted_with(**{f"DEV_TEST_HOLD_STOP_{self.base}": str(hold)})
+        (self.builds / "current").write_text("other\n", encoding="utf-8")
+        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
+        proc.terminate()
+        self.assertEqual(proc.wait(timeout=10), 143)
+        # An INT ended it during its TERM's wait.
+        self.assertEqual(self.stops(), [(waiting, "SIGINT")])
 
     def test_update_sh_is_not_for_hand_use(self):
         for args in [[], ["--now"], ["--data-dir"]]:
@@ -1477,13 +1550,8 @@ class ServeScriptTests(ScriptTestCase):
 
     def test_a_serve_that_ignores_term_is_killed(self):
         proc, output = self.watch("--interval", "3600")
-        first = self.service_pid()
         shutil.copytree(self.builds / self.base, self.builds / "other")
-        self.control(**{f"DEV_TEST_SERVE_IGNORE_TERM_{self.base}": "1"})
-        # Started again with the setting.
-        os.kill(first, signal.SIGKILL)
-        self.wait_until(lambda: self.service_pid() not in (None, first), proc)
-        stubborn = self.service_pid()
+        stubborn = self.restarted_with(**{f"DEV_TEST_SERVE_IGNORE_TERM_{self.base}": "1"})
         (self.builds / "current").write_text("other\n", encoding="utf-8")
         self.assert_runs("other")  # after the 30 ticks it gives TERM
         self.assertTrue(gone(stubborn))
@@ -1523,6 +1591,8 @@ class ServeScriptTests(ScriptTestCase):
         self.assertIsNone(self.attempted(), "Tried again at the next start")
         self.assertEqual(self.notifications(), [])
         self.assertIn("stopped while installing", output.read_text(encoding="utf-8"))
+        # The service stopped at once (INT), not after its running CI jobs.
+        self.assertEqual(self.stops(), [(pid, "SIGINT")])
 
     def test_only_the_newest_three_of_its_own_backups_are_kept(self):
         def made(name, complete=True):

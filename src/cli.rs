@@ -173,7 +173,9 @@ pub fn init(
     Ok(())
 }
 
-pub async fn serve(config: Config) -> anyhow::Result<()> {
+/// Runs the service until a signal stops it; the exit status is 3 when the
+/// stop interrupted running CI jobs (`Ci::stop`).
+pub async fn serve(config: Config) -> anyhow::Result<u8> {
     let layout = config.layout();
     layout.create()?;
     let store = Store::open(
@@ -235,51 +237,67 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let router = crate::http::router(app.clone());
     println!("branvil listening on http://{bound} (base URL {base_url})");
     std::io::stdout().flush()?;
-    // On a signal, the event streams end and the server stops accepting;
-    // requests in flight get `SHUTDOWN_GRACE` to finish, then the process
-    // exits anyway (redb commits are atomic, and the ref journal recovers an
-    // interrupted ref change at the next start).
-    let (stopping, mut stopped) = tokio::sync::watch::channel(false);
+    // SIGTERM stops CI first (`Ci::stop`: no new jobs, the running ones
+    // finish) while the server keeps serving the runners and everyone else;
+    // SIGINT (Ctrl-C), also during that wait, stops at once. Then the event
+    // streams end and the server stops accepting; requests in flight get
+    // `SHUTDOWN_GRACE` to finish, then the process exits anyway (redb commits
+    // are atomic, and the ref journal recovers an interrupted ref change at
+    // the next start). It exits with 3 when the stop interrupted jobs.
+    let (stopping, mut stopped) = tokio::sync::watch::channel(None);
     let events = app.events.clone();
+    let ci = app.ci.clone();
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        let interrupt = tokio::signal::ctrl_c();
+        tokio::pin!(interrupt);
+        let mut cut = 0;
+        tokio::select! {
+            _ = &mut interrupt => {},
+            _ = terminate() => {
+                tracing::info!("stopping: no new CI jobs; waiting for the running ones (SIGINT stops at once)");
+                tokio::select! {
+                    _ = &mut interrupt => {},
+                    stopped = ci.stop() => match stopped {
+                        Ok(n) => cut = n,
+                        Err(e) => tracing::warn!("stopping: cannot wait for the running CI jobs: {e}"),
+                    },
+                }
+            },
+        }
+        tracing::info!("shutting down");
         events.close();
-        stopping.send_replace(true);
+        stopping.send_replace(Some(cut));
     });
     tokio::select! {
         served = server => served?,
         _ = async {
-            let _ = stopped.wait_for(|s| *s).await;
+            let _ = stopped.wait_for(Option::is_some).await;
             tokio::time::sleep(SHUTDOWN_GRACE).await;
         } => tracing::warn!(
             "requests still open {} s after the shutdown signal; exiting",
             SHUTDOWN_GRACE.as_secs()
         ),
     }
-    Ok(())
+    let cut = stopped.borrow().unwrap_or(0);
+    if cut > 0 {
+        tracing::warn!(
+            "stopped with {cut} CI job(s) still running after ci.stop_wait_secs: they were interrupted, and queued again in their place unless interrupted before"
+        );
+        return Ok(3);
+    }
+    Ok(0)
 }
 
 /// How long requests in flight may take after a shutdown signal.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+async fn terminate() {
     #[cfg(unix)]
-    let term = async {
-        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
-            s.recv().await;
-        }
-    };
-    #[cfg(not(unix))]
-    let term = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = term => {},
+    if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        s.recv().await;
+        return;
     }
-    tracing::info!("shutting down");
+    std::future::pending::<()>().await
 }
 
 pub async fn admin(command: AdminCommand, config: &Config) -> anyhow::Result<u8> {

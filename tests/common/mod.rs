@@ -117,16 +117,31 @@ impl Server {
         &mut self,
         limit: std::time::Duration,
     ) -> Option<(std::process::ExitStatus, std::time::Duration)> {
-        let mut c = self.child.take().expect("running");
         let sent = std::time::Instant::now();
+        self.signal("TERM");
+        self.exit_within(limit)
+            .map(|status| (status, sent.elapsed()))
+    }
+
+    /// Sends `signal` (`TERM`, `INT`) and returns at once.
+    #[cfg(unix)]
+    pub fn signal(&self, signal: &str) {
+        let pid = self.child.as_ref().expect("running").id();
         let kill = Command::new("kill")
-            .args(["-TERM", &c.id().to_string()])
+            .args([format!("-{signal}"), pid.to_string()])
             .status()
             .unwrap();
         assert!(kill.success());
-        while sent.elapsed() < limit {
+    }
+
+    /// Waits up to `limit` for the process to exit; `None` (after killing
+    /// it) when it was still running at `limit`.
+    pub fn exit_within(&mut self, limit: std::time::Duration) -> Option<std::process::ExitStatus> {
+        let mut c = self.child.take().expect("running");
+        let start = std::time::Instant::now();
+        while start.elapsed() < limit {
             if let Some(status) = c.try_wait().unwrap() {
-                return Some((status, sent.elapsed()));
+                return Some(status);
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
