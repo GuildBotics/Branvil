@@ -465,7 +465,9 @@ reports itself unavailable without it, as without `msb`).
   the attempt and in the log, a work directory that is a checkout of the
   commit with the tags it reaches and no remote, up to `max_jobs` jobs at
   once with the limit read before every claim, a refused token that
-  lets the running jobs end before the runner stops, and a cache that only
+  lets the running jobs end before the runner stops (synchronized on the
+  executor's `wait`, separately from held source requests that return 401
+  and clean up without starting the executor), and a cache that only
   a protected branch's run saves).
 - `src/runner/workspace.rs`: the dependency cache (keys, eviction, and
   restores and saves of one entry at once copying whole entries).

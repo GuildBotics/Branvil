@@ -1065,6 +1065,8 @@ mod tests {
         hold_images: AtomicBool,
         /// What every run got: (image, cpus, memory MiB, timeout s).
         ran: std::sync::Mutex<Vec<(String, u32, u64, u64)>>,
+        /// Jobs that reached `wait`, after source fetching and checkout.
+        waiting: std::sync::atomic::AtomicUsize,
         /// `wait`s that saw the stop (an aborted run never does).
         stopped: std::sync::atomic::AtomicUsize,
     }
@@ -1075,6 +1077,7 @@ mod tests {
                 ready: AtomicBool::new(true),
                 hold_images: AtomicBool::new(false),
                 ran: Default::default(),
+                waiting: Default::default(),
                 stopped: Default::default(),
             }
         }
@@ -1136,12 +1139,15 @@ mod tests {
                         let _ = log.send(git(job.work, args).into_bytes()).await;
                     }
                     ["exit", code] => return Outcome::Exited(code.parse().unwrap()),
-                    ["wait"] => loop {
-                        if cancel.changed().await.is_err() || *cancel.borrow() {
-                            self.stopped.fetch_add(1, Ordering::SeqCst);
-                            return Outcome::Cancelled;
+                    ["wait"] => {
+                        self.waiting.fetch_add(1, Ordering::SeqCst);
+                        loop {
+                            if cancel.changed().await.is_err() || *cancel.borrow() {
+                                self.stopped.fetch_add(1, Ordering::SeqCst);
+                                return Outcome::Cancelled;
+                            }
                         }
-                    },
+                    }
                     _ => return Outcome::Exited(127),
                 }
             }
@@ -1194,7 +1200,48 @@ mod tests {
         bare: PathBuf,
     }
 
+    impl Service {
+        async fn revoke_runner_token(&self) {
+            let tokens: serde_json::Value = self
+                .http
+                .get(format!("{}/api/v1/members/runner1/tokens", self.url))
+                .bearer_auth(&self.owner)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            for t in tokens["items"].as_array().unwrap() {
+                let resp = self
+                    .http
+                    .delete(format!(
+                        "{}/api/v1/members/runner1/tokens/{}",
+                        self.url,
+                        t["id"].as_str().unwrap()
+                    ))
+                    .bearer_auth(&self.owner)
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(resp.status().is_success(), "{}", resp.status());
+            }
+        }
+    }
+
+    /// Hold source requests before authentication, so revocation reliably
+    /// makes them fail with 401 rather than depending on checkout speed.
+    struct SourceGate {
+        requested: mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
+        refused: Arc<tokio::sync::Notify>,
+        source_refusals: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
     async fn service(pipeline: &str) -> Service {
+        service_with_source_gate(pipeline, None).await
+    }
+
+    async fn service_with_source_gate(pipeline: &str, gate: Option<SourceGate>) -> Service {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
@@ -1237,7 +1284,36 @@ mod tests {
             key,
             url.clone(),
         ));
-        tokio::spawn(axum::serve(listener, crate::http::router(app.clone())).into_future());
+        let mut router = crate::http::router(app.clone());
+        if let Some(gate) = gate {
+            router = router.layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let (requested, refused) = (gate.requested.clone(), gate.refused.clone());
+                    let source_refusals = gate.source_refusals.clone();
+                    async move {
+                        let path = request.uri().path();
+                        let source = path.ends_with("/source");
+                        let claim = path.ends_with("/runner/claim");
+                        if source {
+                            let (resume, held) = tokio::sync::oneshot::channel();
+                            requested.send(resume).await.unwrap();
+                            held.await.unwrap();
+                        }
+                        let response = next.run(request).await;
+                        if response.status() == axum::http::StatusCode::UNAUTHORIZED {
+                            if claim {
+                                refused.notify_one();
+                            }
+                            if source {
+                                source_refusals.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                        response
+                    }
+                },
+            ));
+        }
+        tokio::spawn(axum::serve(listener, router).into_future());
         let http = reqwest::Client::new();
         for (path, body) in [
             ("workspaces", serde_json::json!({"name": "acme"})),
@@ -1500,19 +1576,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_refused_token_lets_the_running_jobs_end_first() {
         let pipeline = "[[jobs]]\nname = \"a\"\nimage = \"alpine\"\ncommands = [\"wait\"]\n\n[[jobs]]\nname = \"b\"\nimage = \"alpine\"\ncommands = [\"wait\"]\n";
-        let Service {
-            dir,
-            app,
-            url,
-            owner,
-            runner_token,
-            http,
-            repo,
-            bare,
-        } = service(pipeline).await;
+        let s = service(pipeline).await;
         let runner = Runner::new(
-            Api::new(&url, &runner_token),
-            dir.path().join("runner"),
+            Api::new(&s.url, &s.runner_token),
+            s.dir.path().join("runner"),
             None,
             ExecutorConfig {
                 max_jobs: 2,
@@ -1521,35 +1588,15 @@ mod tests {
         );
         let fake = Arc::new(Fake::new());
         let serving = tokio::spawn(Arc::new(runner).serve(fake.clone()));
-        let sha = app.git.branch_tips(&bare).await.unwrap()["main"].clone();
-        for _ in 0..100 {
-            let checks = app.ci.head_checks(&repo, &sha).await.unwrap().checks;
-            if checks.iter().all(|c| c.status == "in_progress") {
-                break;
+        // `in_progress` means claimed, not that the executor has started.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while fake.waiting.load(Ordering::SeqCst) != 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let tokens: serde_json::Value = http
-            .get(format!("{url}/api/v1/members/runner1/tokens"))
-            .bearer_auth(&owner)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        for t in tokens["items"].as_array().unwrap() {
-            let resp = http
-                .delete(format!(
-                    "{url}/api/v1/members/runner1/tokens/{}",
-                    t["id"].as_str().unwrap()
-                ))
-                .bearer_auth(&owner)
-                .send()
-                .await
-                .unwrap();
-            assert!(resp.status().is_success(), "{}", resp.status());
-        }
+        })
+        .await
+        .expect("both jobs reached the executor's wait");
+        s.revoke_runner_token().await;
         let stopped = tokio::time::timeout(Duration::from_secs(30), serving)
             .await
             .expect("the runner stops")
@@ -1559,6 +1606,98 @@ mod tests {
             fake.stopped.load(Ordering::SeqCst),
             2,
             "both jobs ended on their own"
+        );
+    }
+
+    /// Source fetching is part of the attempt's lifetime too: even after a
+    /// claim is refused, each held request must return and clean up its job
+    /// directory, without ever starting the executor on a failed fetch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refused_token_lets_source_fetches_end_first() {
+        let pipeline: String = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                format!(
+                    "[[jobs]]\nname = \"{name}\"\nimage = \"alpine\"\ncommands = [\"wait\"]\n\n"
+                )
+            })
+            .collect();
+        let (requested, mut requests) = mpsc::channel(2);
+        let refused = Arc::new(tokio::sync::Notify::new());
+        let source_refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let s = service_with_source_gate(
+            &pipeline,
+            Some(SourceGate {
+                requested,
+                refused: refused.clone(),
+                source_refusals: source_refusals.clone(),
+            }),
+        )
+        .await;
+        let runner = Arc::new(Runner::new(
+            Api::new(&s.url, &s.runner_token),
+            s.dir.path().join("runner"),
+            None,
+            ExecutorConfig {
+                // Leave capacity for another claim to observe the refusal
+                // while all three source requests remain held.
+                max_jobs: 4,
+                ..ExecutorConfig::default()
+            },
+        ));
+        let fake = Arc::new(Fake::new());
+        let serving = tokio::spawn(runner.clone().serve(fake.clone()));
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            held.push(
+                tokio::time::timeout(Duration::from_secs(10), requests.recv())
+                    .await
+                    .expect("the source request arrives")
+                    .unwrap(),
+            );
+        }
+        s.revoke_runner_token().await;
+        tokio::time::timeout(Duration::from_secs(10), refused.notified())
+            .await
+            .expect("a claim observes the refused token");
+        // One source fetch returns 401 and cleans up; the runner must still
+        // let the other two finish instead of dropping their tasks.
+        held.pop().unwrap().send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while std::fs::read_dir(runner.work_dir.join("jobs"))
+                .unwrap()
+                .count()
+                != held.len()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first source fetch ended and removed its directory");
+        assert!(!serving.is_finished(), "source requests are still held");
+        assert!(fake.ran.lock().unwrap().is_empty());
+        for resume in held {
+            resume.send(()).unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(10), serving)
+            .await
+            .expect("the runner stops after all source fetches end")
+            .unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("token is not valid")
+        );
+        assert!(fake.ran.lock().unwrap().is_empty(), "no executor started");
+        assert_eq!(source_refusals.load(Ordering::SeqCst), 3);
+        assert_eq!(fake.stopped.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            std::fs::read_dir(runner.work_dir.join("jobs"))
+                .unwrap()
+                .count(),
+            0,
+            "every attempt removed its directory before the runner returned"
         );
     }
 
