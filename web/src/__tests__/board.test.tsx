@@ -218,6 +218,30 @@ describe("kanban board", () => {
 
     await user.click(within(menu).getByRole("menuitem", { name: "Copy URL" }));
     expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}/acme/demo/-/tickets/1`);
+    // The item says it copied and stays. It does not close on the click.
+    expect(await within(menu).findByRole("menuitem", { name: "Copied" })).toBeInTheDocument();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+  });
+
+  it("leaves the copy item unchanged when the clipboard refuses", async () => {
+    fakeApi(boardRoutes());
+    const user = userEvent.setup();
+    renderApp("/acme");
+    await screen.findByText("Title of 1");
+    vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("denied"));
+
+    await user.click(screen.getByRole("button", { name: "Actions of acme/demo#1" }));
+    const menu = await screen.findByRole("menu");
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy URL" }));
+
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(within(menu).getByRole("menuitem", { name: "Copy URL" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Copied" })).not.toBeInTheDocument();
+    // Longer than the success label stays up: a refusal must not close the menu later.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_700)));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Copied" })).not.toBeInTheDocument();
   });
 
   it("moves a card to another lane from its menu (no drag needed)", async () => {

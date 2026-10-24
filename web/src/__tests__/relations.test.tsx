@@ -162,6 +162,9 @@ describe("relations", () => {
     ]);
     await user.click(within(menu).getByRole("menuitem", { name: "Copy URL" }));
     expect(await navigator.clipboard.readText()).toBe(url("4"));
+    expect(await within(menu).findByRole("menuitem", { name: "Copied" })).toBeInTheDocument();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
   });
 
   it("makes a dropped card a child and the new tickets it relates ready, and undoes it", async () => {
