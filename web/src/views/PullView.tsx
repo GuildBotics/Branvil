@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FileDiff } from "lucide-react";
 import { useState } from "react";
 import * as api from "../api/endpoints";
-import { ticketRef, type Check } from "../api/types";
+import type { Check } from "../api/types";
 import { ErrorMessage, Loading, Post, PostHead, StateBadge } from "../components/common";
 import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
@@ -11,18 +11,13 @@ import { ReviewersPicker } from "../components/PeoplePicker";
 import { useT } from "../i18n";
 import { useMemberKinds, usePull, usePullActivity, usePullFiles, usePullThreads, useRepo, usePeople } from "../query/hooks";
 import { keys } from "../query/keys";
-import { Link, navigate, ServiceLink } from "../router/Router";
-import { href, routeOfUrl } from "../router/routes";
+import { Link, navigate } from "../router/Router";
+import { href } from "../router/routes";
 import { CheckDrawer, ChecksCard, drawerTarget } from "./pull/Checks";
 import { Conversation } from "./pull/Conversation";
 import { FilesDrawer } from "./pull/FilesDrawer";
 import { MergeCard, PublishCard } from "./pull/Landing";
-
-/** The reference of a ticket of this Branvil (`acme/demo#1`); the URL itself for a foreign reference. */
-function ticketLabel(url: string): string {
-  const route = routeOfUrl(url);
-  return route?.name === "ticket" ? ticketRef({ repository: route.repo, key: route.key }) : url;
-}
+import { Tickets } from "./pull/Tickets";
 
 export function PullView({ repo, number, openJob }: { repo: string; number: number; openJob?: string }) {
   const t = useT();
@@ -125,25 +120,7 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
             </Text>
           )}
         </section>
-        {pr.tickets.length > 0 && (
-          <Text size="sm" mt="md" component="div" aria-label={t("pull.tickets")}>
-            <Text span c="dimmed">
-              {t("pull.tickets")}:
-            </Text>{" "}
-            {pr.tickets.map((tk, i) => (
-              <span key={tk.url}>
-                {i > 0 && ", "}
-                <ServiceLink url={tk.url}>{ticketLabel(tk.url)}</ServiceLink>
-                {tk.closes && (
-                  <Text span c="dimmed">
-                    {" "}
-                    {t("pull.closesTicket")}
-                  </Text>
-                )}
-              </span>
-            ))}
-          </Text>
-        )}
+        <Tickets key={pr.url} pull={pr} />
       </Post>
 
       <Conversation
