@@ -493,6 +493,17 @@ comment with `meta.routing == "suppress"` as a status notice.
 
 - `GET .../tickets/{number}/comments` → items, oldest first.
 - `POST .../tickets/{number}/comments` `{"body", "meta"?}` → `201` comment.
+- `PATCH .../tickets/{number}/comments/{id}` `{"body"}` → the updated comment.
+  Only its author or the owner may edit it (`403 forbidden` otherwise).
+  The body must be nonempty, as when posting. Metadata, author, creation time,
+  position, id, URL, and reactions stay unchanged; no edit history or edit time
+  is stored.
+- `DELETE .../tickets/{number}/comments/{id}` → `204`. Only its author or the
+  owner may delete it. The comment, its reactions, and its id index are removed
+  permanently; subsequent requests for that id return `404 not_found`.
+  Both operations require a comment of this ticket (`404` for another ticket,
+  a pull request, or a missing id), update the ticket's `updated_at`, and emit
+  a `ticket` change event. These operations apply to ticket comments only.
 - `POST .../tickets/{number}/reactions` `{"target_id", "reaction"}` where
   `reaction` is `ack`, `agree`, `celebrate`, or `support` → `{"id","reaction"}`.
   The target must be a comment of this ticket. `DELETE` with the same body

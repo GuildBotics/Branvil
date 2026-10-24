@@ -466,6 +466,32 @@ async fn ticket_comment(
     ))
 }
 
+async fn ticket_comment_patch(
+    State(app): State<Shared>,
+    c: Caller,
+    P((repo, key, id)): P<(String, String, String)>,
+    J(input): J<tickets::CommentPatch>,
+) -> R {
+    Ok(ok(tickets::change_comment(
+        &app,
+        &c,
+        &repo,
+        &key,
+        &id,
+        Some(input.body),
+    )
+    .await?))
+}
+
+async fn ticket_comment_delete(
+    State(app): State<Shared>,
+    c: Caller,
+    P((repo, key, id)): P<(String, String, String)>,
+) -> R {
+    tickets::change_comment(&app, &c, &repo, &key, &id, None).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 async fn ticket_react(
     State(app): State<Shared>,
     c: Caller,
@@ -1245,6 +1271,10 @@ pub fn router(app: Shared) -> Router {
         .route(
             "/repos/{repo}/tickets/{number}/comments",
             get(ticket_comments).post(ticket_comment),
+        )
+        .route(
+            "/repos/{repo}/tickets/{number}/comments/{id}",
+            axum::routing::patch(ticket_comment_patch).delete(ticket_comment_delete),
         )
         .route(
             "/repos/{repo}/tickets/{number}/reactions",

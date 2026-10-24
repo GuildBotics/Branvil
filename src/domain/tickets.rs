@@ -1030,11 +1030,15 @@ pub struct NewComment {
 }
 
 pub fn check_comment(input: &NewComment) -> AppResult<()> {
-    if input.body.trim().is_empty() {
+    check_comment_body(&input.body)?;
+    domain::check_meta(&input.meta)
+}
+
+fn check_comment_body(body: &str) -> AppResult<()> {
+    if body.trim().is_empty() {
         return Err(AppError::invalid("body must not be empty."));
     }
-    domain::check_text("body", &input.body, domain::MAX_TEXT)?;
-    domain::check_meta(&input.meta)
+    domain::check_text("body", body, domain::MAX_TEXT)
 }
 
 pub async fn list_comments(
@@ -1086,6 +1090,65 @@ pub async fn add_comment(
         .await?;
     app.events.publish("ticket", &path, k);
     Ok(view)
+}
+
+/// Edits the body, or deletes the comment and its entry index. The stored
+/// shape, metadata, creation time and order of the remaining comments stay.
+pub async fn change_comment(
+    app: &App,
+    caller: &Caller,
+    repo_path: &str,
+    key: &str,
+    id: &str,
+    body: Option<String>,
+) -> AppResult<Option<CommentView>> {
+    if let Some(body) = &body {
+        check_comment_body(body)?;
+    }
+    let repo = repos::visible(app, caller, repo_path).await?;
+    let caller = caller.clone();
+    let key = key.to_string();
+    let id = id.to_string();
+    let base_url = app.base_url.clone();
+    let (view, path, key) = app
+        .store
+        .write(move |w| {
+            let old = ticket_by_key(w, &repo, &key)?;
+            let target = ticket_target(&old);
+            let not_found = || AppError::not_found(format!("Comment {id} was not found on {key}."));
+            let entry = domain::entry(w, &id, &target.owner())?
+                .filter(|e| e.kind == "comment")
+                .ok_or_else(not_found)?;
+            let ck = domain::entry_key(&entry)?;
+            let mut c: Comment = w.get(store::COMMENTS, &ck)?.ok_or_else(not_found)?;
+            caller.require_self_or_owner(&c.author)?;
+            let view = if let Some(body) = body {
+                c.body = body;
+                w.put(store::COMMENTS, &ck, &c)?;
+                Some(comment_view(&c, &ticket_url(&base_url, &repo, old.number)))
+            } else {
+                w.del(store::COMMENTS, &ck)?;
+                model::reindex(
+                    w,
+                    model::entry_index(&c.id, "comment", &target.owner(), &ck),
+                    Vec::new(),
+                )?;
+                None
+            };
+            let mut t = old.clone();
+            t.updated_at = util::now();
+            write_ticket(w, Some(&old), &t)?;
+            Ok((view, repo.path, key))
+        })
+        .await?;
+    app.events.publish("ticket", &path, key);
+    Ok(view)
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct CommentPatch {
+    pub body: String,
 }
 
 #[derive(Deserialize, Debug)]

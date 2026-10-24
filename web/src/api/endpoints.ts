@@ -141,6 +141,10 @@ export const tickets = {
   comments: (repo: string, key: string) => getAll<Comment>(`${ticketPath(repo, key)}/comments`),
   addComment: (repo: string, key: string, body: string) =>
     create<Comment>(`${ticketPath(repo, key)}/comments`, { body }),
+  editComment: (repo: string, key: string, id: string, body: string) =>
+    request<Comment>("PATCH", `${ticketPath(repo, key)}/comments/${enc(id)}`, { body: { body } }),
+  deleteComment: (repo: string, key: string, id: string) =>
+    request<void>("DELETE", `${ticketPath(repo, key)}/comments/${enc(id)}`),
   react: (repo: string, key: string, targetId: string, reaction: Reaction, on: boolean) =>
     request<unknown>(on ? "POST" : "DELETE", `${ticketPath(repo, key)}/reactions`, {
       body: { target_id: targetId, reaction },

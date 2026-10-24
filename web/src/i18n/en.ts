@@ -108,6 +108,10 @@ export const en = {
   "comment.new": "New comment",
   "comment.submit": "Comment",
   "comment.notice": "Status notice",
+  "comment.edit": "Edit comment",
+  "comment.delete": "Delete comment",
+  "comment.body": "Comment body",
+  "comment.confirmDelete": "Delete this comment? This cannot be undone.",
 
   "reaction.group": "Reactions",
   "reaction.add": "Add a reaction",

@@ -11,6 +11,140 @@ fn tickets_path() -> String {
 }
 
 #[tokio::test]
+async fn comment_edit_and_delete_preserve_identity_and_enforce_permissions() {
+    let mut w = World::new().await;
+    let s = &w.server;
+    w.ticket("Comment changes").await;
+    w.ticket("Another ticket").await;
+    let one = format!("{}/1", tickets_path());
+    let two = format!("{}/2", tickets_path());
+    let (status, original) = s
+        .post(
+            &format!("{one}/comments"),
+            &w.aiko,
+            json!({"body": "Original", "meta": {"routing": "suppress", "kind": "test"}}),
+        )
+        .await;
+    assert_eq!(status, 201);
+    let id = original["id"].as_str().unwrap();
+    let path = format!("{one}/comments/{id}");
+    let (_, next) = s
+        .post(&format!("{one}/comments"), &w.ken, json!({"body": "Next"}))
+        .await;
+    s.post(
+        &format!("{one}/reactions"),
+        &w.ken,
+        json!({"target_id": id, "reaction": "ack"}),
+    )
+    .await;
+    let runner = s.member(&w.owner, "comment-runner", "runner").await;
+    for (token, expected) in [
+        (&w.ken, 403),
+        (&runner, 403),
+        (&String::from("invalid"), 401),
+    ] {
+        let (status, _) = s.patch(&path, token, json!({"body": "Forbidden"})).await;
+        assert_eq!(status, expected);
+        let (status, _) = s.delete(&path, token).await;
+        assert_eq!(status, expected);
+    }
+    for bad in [
+        format!("{two}/comments/{id}"),
+        format!("{one}/comments/missing"),
+    ] {
+        assert_eq!(
+            s.patch(&bad, &w.owner, json!({"body": "Wrong target"}))
+                .await
+                .0,
+            404
+        );
+        assert_eq!(s.delete(&bad, &w.owner).await.0, 404);
+    }
+    for body in [
+        json!({"body": "  "}),
+        json!({"body": ""}),
+        json!({"body": "ok", "meta": {}}),
+        json!({}),
+    ] {
+        assert_eq!(s.patch(&path, &w.aiko, body).await.0, 400);
+    }
+    for (token, body) in [(&w.aiko, "By author"), (&w.owner, "By owner")] {
+        let (status, edited) = s.patch(&path, token, json!({"body": body})).await;
+        assert_eq!(status, 200, "{edited}");
+        assert_eq!(edited["body"], body);
+        for field in ["id", "url", "author", "created_at", "meta"] {
+            assert_eq!(edited[field], original[field]);
+        }
+        assert_eq!(
+            edited["reactions"],
+            json!([{"author": "ken", "reaction": "ack"}])
+        );
+        let comments = s.ok(&format!("{one}/comments"), &w.aiko).await;
+        assert_eq!(comments["items"], json!([edited, next]));
+        let cards = s
+            .ok(&format!("/workspaces/{WS}/board/cards"), &w.aiko)
+            .await;
+        let card = cards["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["key"] == "1")
+            .unwrap();
+        assert_eq!(card["comments"][0]["body"], body);
+    }
+    // A closed ticket's comments can still be corrected or removed.
+    assert_eq!(
+        s.patch(
+            &one,
+            &w.owner,
+            json!({"state": "closed", "state_reason": "completed"})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        s.patch(&path, &w.aiko, json!({"body": "Closed"})).await.0,
+        200
+    );
+    assert_eq!(s.delete(&path, &w.owner).await.0, 204);
+    assert_eq!(
+        s.patch(&path, &w.aiko, json!({"body": "Gone"})).await.0,
+        404
+    );
+    assert_eq!(s.delete(&path, &w.owner).await.0, 404);
+    assert_eq!(
+        s.post(
+            &format!("{one}/reactions"),
+            &w.ken,
+            json!({"target_id": id, "reaction": "ack"})
+        )
+        .await
+        .0,
+        404
+    );
+    let comments = s.ok(&format!("{one}/comments"), &w.aiko).await;
+    assert_eq!(comments["items"], json!([next.clone()]));
+    // The author can delete too; all entry indexes must remain consistent.
+    assert_eq!(
+        s.delete(
+            &format!("{one}/comments/{}", next["id"].as_str().unwrap()),
+            &w.ken
+        )
+        .await
+        .0,
+        204
+    );
+    w.server.stop();
+    let checked = w.server.cli(&w.owner, &["admin", "check"]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+#[tokio::test]
 async fn ticket_lifecycle_and_board() {
     let w = World::new().await;
     let s = &w.server;

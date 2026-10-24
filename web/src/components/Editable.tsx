@@ -88,11 +88,15 @@ export function BodyEditor({
   onSave,
   onCancel,
   pending,
+  label,
+  required = false,
 }: {
   value: string;
   onSave: (body: string) => void;
   onCancel: () => void;
   pending: boolean;
+  label?: string;
+  required?: boolean;
 }) {
   const t = useT();
   const [body, setBody] = useState(value);
@@ -100,16 +104,16 @@ export function BodyEditor({
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        onSave(body);
+        if (!pending && (!required || body.trim())) onSave(body);
       }}
     >
       <Stack gap="xs">
-        <Textarea aria-label={t("ticket.body")} value={body} onChange={(e) => setBody(e.currentTarget.value)} rows={8} autoFocus />
+        <Textarea aria-label={label ?? t("ticket.body")} value={body} onChange={(e) => setBody(e.currentTarget.value)} rows={8} required={required} autoFocus />
         <Group justify="flex-end" gap="xs">
-          <Button variant="default" onClick={onCancel}>
+          <Button variant="default" onClick={onCancel} disabled={pending}>
             {t("common.cancel")}
           </Button>
-          <Button type="submit" disabled={pending}>
+          <Button type="submit" disabled={pending || (required && !body.trim())}>
             {t("common.save")}
           </Button>
         </Group>

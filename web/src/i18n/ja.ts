@@ -110,6 +110,10 @@ export const ja: Record<MessageKey, string> = {
   "comment.new": "新しいコメント",
   "comment.submit": "コメントする",
   "comment.notice": "状態通知",
+  "comment.edit": "コメントを編集",
+  "comment.delete": "コメントを削除",
+  "comment.body": "コメント本文",
+  "comment.confirmDelete": "このコメントを削除しますか？ 元に戻すことはできません。",
 
   "reaction.group": "リアクション",
   "reaction.add": "リアクションを付ける",
