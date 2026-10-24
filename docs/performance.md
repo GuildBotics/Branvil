@@ -610,7 +610,9 @@ RTL's existing `asyncWrapper`, using a real clock captured before fake
 timers, and records callsites to separate `waitFor`/`findBy*` from user-event
 actions. The measured boundary includes RTL's final event-loop drain, so
 it is a conservative envelope around the actual query wait. The 1 s
-`asyncUtilTimeout` is retained during that measurement. The normal-pipeline verification is the `web` job
+`asyncUtilTimeout` was used for the first measurement, which reproduced
+query timeouts. A second measurement temporarily allows 5 s per query and
+30 s per test to observe successful waits without censoring at 1 s. The normal-pipeline verification is the `web` job
 of [PR !38](http://127.0.0.1:7878/GuildBotics/Branvil/-/pulls/38), whose
 `web-tests` artifact records the same measurements for the current head.
 The historical failures in #78 reached 5.58–6.48 s per test and missed
