@@ -506,12 +506,17 @@ the task flow (the board's cards laid out left to right by their blockers, a
 column's tickets in progress first, then ready, new, and done, each lane in the
 board's order,
 children inside their parent once it is opened, lines drawn in SVG over a CSS
-layout, the tickets without relations folded below in a column per lane as on
-the board; dragging a card onto another makes it a child, near the top or
-bottom of a card of its own lane puts it there on the board, and a line drawn
-from a card's handle makes the other card wait for it, each relation with an
-undo; a ticket added from the header, or from a card's menu as its parent,
-child, or next ticket, is scrolled to once shown; `web/src/views/relations/`), a ticket (body and comments, its lane, labels,
+layout, the new tickets without relations in one frame that looks like an open
+parent's, its header in another colour, laid out where a new ticket would be;
+only a ticket without relations is new: dragging a card onto another makes it
+a child and a line drawn from a card's handle makes the other card wait for it,
+and either makes the new tickets it relates ready, each with an undo that also
+puts them back; a new ticket dropped on the background (out of the frame) is
+made ready, and one without relations dropped onto the frame new; near the top or
+bottom of a card of its own lane a card is put there on the board; a ticket
+added from the header is new, one added from a card's menu as its parent, child,
+or next ticket ready, and either is scrolled to once shown;
+`web/src/views/relations/`), a ticket (body and comments, its lane, labels,
 upstream issue, relations to other tickets, and assignee), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
 settings (the shown workspace with its repositories, and Branvil's members, CI,

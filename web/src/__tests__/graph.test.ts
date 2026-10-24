@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Card, TicketRef } from "../api/types";
-import { buildGraph, type Graph, type Level } from "../views/relations/graph";
+import { buildGraph, type Graph, type GraphNode, type Level } from "../views/relations/graph";
 import { card } from "./fixtures";
 
 interface Spec {
@@ -29,9 +29,14 @@ const graph = (specs: Record<string, Spec>, open: string[] = [], includeClosed =
 
 const short = (ref: string) => ref.replace("acme/demo#", "");
 
-/** Columns separated by `|`, an open parent's level in brackets. */
+/** Columns separated by `|`, an open parent's level in brackets, the frame of new tickets in braces. */
 const layout = (level: Level): string =>
-  level.map((col) => col.map((n) => short(n.ref) + (n.inner ? `[${layout(n.inner)}]` : "")).join(" ")).join(" | ");
+  level
+    .map((col) => col.map((n) => ("fresh" in n ? `{${n.fresh.map((c) => c.key).join(" ")}}` : short(n.ref) + (n.inner ? `[${layout(n.inner)}]` : ""))).join(" "))
+    .join(" | ");
+
+/** The node of a ticket at a column and row. */
+const at = (level: Level, column: number, row: number) => level[column]![row] as GraphNode;
 
 /** `a>b` for a solid line, `a..>b` for a dashed one. */
 const lines = (g: Graph) => g.edges.map((e) => `${short(e.from)}${e.dashed ? "..>" : ">"}${short(e.to)}`);
@@ -45,11 +50,11 @@ describe("relations graph", () => {
       A: {},
       E: {},
     });
-    expect(layout(g.level)).toBe("D A | B | C");
+    expect(layout(g.level)).toBe("D A {E} | B | C");
     expect(lines(g)).toEqual(["A>C", "B>C", "D>C", "A>B"]);
     const solid = g.edges[0]!;
     expect([solid.blocker?.key, solid.blocked?.key]).toEqual(["A", "C"]);
-    expect(g.unrelated.map((c) => c.key)).toEqual(["E"]);
+    expect([...g.related].map(short).sort()).toEqual(["A", "B", "C", "D"]);
   });
 
   it("puts the lanes that matter most first in a column, keeping the board's order within a lane", () => {
@@ -59,11 +64,22 @@ describe("relations graph", () => {
     expect(layout(g.level)).toBe("E B F A C D | Z");
   });
 
-  it("leaves out tickets with no relation, counting relations to tickets not loaded as none", () => {
+  it("gathers the new tickets with no relation into one frame, counting relations to tickets not loaded as none", () => {
     const g = graph({ B: { blockedBy: ["Z"] }, A: { parent: "Y" }, C: {} });
-    expect(g.level).toEqual([]);
+    expect(layout(g.level)).toBe("{B A C}");
     expect(g.edges).toEqual([]);
-    expect(g.unrelated.map((c) => c.key)).toEqual(["B", "A", "C"]);
+    expect(g.related.size).toBe(0);
+  });
+
+  it("lays out the other tickets with no relation, and the frame where its first ticket would be, by lane", () => {
+    // R, N, M and its child K are related; the others are not. On the board N comes before
+    // the new ones without relations, and M between them: the frame is where A would be.
+    const lanes: Record<string, Card["lane"]> = { A: "new", N: "new", M: "new", K: "ready", B: "ready", C: "new", D: "done", E: "in_progress", R: "ready" };
+    const cards = board({ N: { blockedBy: ["R"] }, A: {}, M: {}, K: { parent: "M" }, B: {}, C: {}, D: {}, E: {}, R: {} }).map((c) => ({ ...c, lane: lanes[c.key]! }));
+    const g = buildGraph(cards, { includeClosed: false, open: new Set() });
+    expect(layout(g.level)).toBe("E B R {A C} M D | N");
+    // A ticket without children has nothing to open.
+    expect(at(g.level, 0, 0)).toMatchObject({ hasChildren: false, inner: null });
   });
 
   it("hides closed tickets and their lines unless asked, but keeps closed ancestors of open tickets", () => {
@@ -77,14 +93,12 @@ describe("relations graph", () => {
       R: { parent: "Q", closed: true },
     };
     const hidden = graph(specs, ["G", "P"]);
-    expect(layout(hidden.level)).toBe("G[P[C]]");
+    expect(layout(hidden.level)).toBe("{A} G[P[C]]");
     expect(lines(hidden)).toEqual([]);
-    expect(hidden.unrelated.map((c) => c.key)).toEqual(["A"]);
 
     const all = graph(specs, ["G", "P"], true);
     expect(layout(all.level)).toBe("X G[P[C]] Q | A");
     expect(lines(all)).toEqual(["X>A"]);
-    expect(all.unrelated).toEqual([]);
   });
 
   it("gathers a closed parent's descendants' dependencies into one dashed line, solid winning over dashed", () => {
@@ -132,7 +146,7 @@ describe("relations graph", () => {
     };
     const outer = graph(specs, ["P"]);
     expect(layout(outer.level)).toBe("P[Q] | X");
-    expect(outer.level[0]![0]!.inner![0]![0]).toMatchObject({ hasChildren: true, inner: null });
+    expect(at(at(outer.level, 0, 0).inner!, 0, 0)).toMatchObject({ hasChildren: true, inner: null });
     expect(lines(outer)).toEqual(["Q..>X"]);
 
     expect(lines(graph(specs))).toEqual(["P..>X"]);

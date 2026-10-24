@@ -1,12 +1,12 @@
 // The relations figure: the levels of cards and frames laid out by CSS, the
 // lines between them drawn over it in SVG, and the drags that relate and order tickets.
 
-import { Badge } from "@mantine/core";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent, type RefObject } from "react";
 import { ticketRef, type Card, type Lane } from "../../api/types";
 import type { Person } from "../../components/PeoplePicker";
 import { useT } from "../../i18n";
-import { groupByLane, matchesFilter, type CardFilter } from "../board/ordering";
+import { ChildrenToggle } from "../board/CardView";
+import { matchesFilter, type CardFilter } from "../board/ordering";
 import { linkEdit, parentEdit, unlinkEdit, type Edit } from "./edits";
 import type { Graph, GraphEdge, Level } from "./graph";
 import { RelationCard, type Addition } from "./RelationCard";
@@ -17,6 +17,9 @@ const REFUSAL_MS = 4000;
 /** The drop target meaning "the figure's background": out of every parent. */
 const BACKGROUND = "\u0000background";
 
+/** The anchor of the frame of new tickets, a drop target as a card's. */
+const FRESH = "\u0000fresh";
+
 /** Where in its lane a card is put: just before or after another ticket. */
 type Place = { before: string } | { after: string };
 
@@ -24,8 +27,8 @@ type Place = { before: string } | { after: string };
 interface Aim {
   ref: string;
   side?: "before" | "after";
-  /** What the drop does; null beside a card where it cannot go (only among tickets of its own lane). */
-  drop: Edit | Place | null;
+  /** What the drop does (a lane: the card moved to its end); null beside a card where it cannot go (only among tickets of its own lane). */
+  drop: Edit | Place | { lane: Lane } | null;
   /** Beside a card where it cannot go: the lanes of the tickets around that gap, the only ones that can go there. */
   refused?: Lane[];
 }
@@ -52,13 +55,13 @@ interface Props {
   /** A ticket to bring into view once the figure shows it (a new one); `onRevealed` is called then. */
   reveal: string | null;
   onRevealed: () => void;
-  unrelatedOpen: boolean;
-  onUnrelatedOpen: (open: boolean) => void;
+  freshOpen: boolean;
+  onFreshOpen: (open: boolean) => void;
 }
 
 const edgeKey = (e: GraphEdge) => `${e.from}>${e.to}`;
 
-export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, moving, editable, onToggle, onLane, onPlace, onEdit, onAdd, reveal, onRevealed, unrelatedOpen, onUnrelatedOpen }: Props) {
+export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, moving, editable, onToggle, onLane, onPlace, onEdit, onAdd, reveal, onRevealed, freshOpen, onFreshOpen }: Props) {
   const t = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -71,9 +74,10 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
   const byRef = useMemo(() => new Map(cards.map((c) => [ticketRef(c), c])), [cards]);
 
   // A ticket asked for is scrolled to once the figure shows it, and its card glows for a moment;
-  // the other tickets are opened when it is among them.
+  // the frame of new tickets is opened when it is among them.
   useEffect(() => {
-    if (reveal && !unrelatedOpen && graph.unrelated.some((c) => ticketRef(c) === reveal)) return onUnrelatedOpen(true);
+    const inFresh = graph.level[0]?.some((n) => "fresh" in n && n.fresh.some((c) => ticketRef(c) === reveal));
+    if (reveal && !freshOpen && inFresh) return onFreshOpen(true);
     const el = reveal && [...(contentRef.current?.querySelectorAll("[data-ticket]") ?? [])].find((e) => e.getAttribute("data-ticket") === reveal);
     if (!el) return;
     el.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
@@ -82,7 +86,7 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
       { duration: 2000, easing: "ease-out" },
     );
     onRevealed();
-  }, [reveal, graph, unrelatedOpen, onRevealed, onUnrelatedOpen]);
+  }, [reveal, graph, freshOpen, onRevealed, onFreshOpen]);
 
   // A gap the card could not go into stays marked for a while after the drag.
   useEffect(() => {
@@ -116,8 +120,6 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
         remove?.setAttribute("x", String(x2 - 38));
         remove?.setAttribute("y", String(y2 - 12));
       }
-      // The tickets without relations stay in view as the figure scrolls sideways.
-      content.style.setProperty("--view-width", `${scroll.clientWidth}px`);
     };
     draw();
     const observer = new ResizeObserver(draw);
@@ -125,18 +127,20 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
     observer.observe(content);
     for (const el of content.querySelectorAll("[data-ticket]")) observer.observe(el);
     return () => observer.disconnect();
-  }, [graph, unrelatedOpen]);
+  }, [graph, freshOpen]);
 
   // Near the top or bottom of a sibling, a drop puts the card into that gap:
   // the board's order is the order the figure shows, so only a gap next to a
   // ticket of its own lane takes it. Elsewhere a drop target is a card or
   // frame (`data-ticket`) or, inside the figure, its background. A drop is
-  // offered only where it changes something.
+  // offered only where it changes something. Only a ticket without relations
+  // is new: a new one dropped on the background (out of the frame of new
+  // tickets) is ready, and one without relations dropped onto the frame new.
   const aimFor = (dragged: Card, e: DragEvent): Aim | null => {
     const el = e.target instanceof Element ? e.target.closest("[data-ticket]") : null;
     const from = draggedRef.current;
     const refOf = (n: Element | null) => n?.getAttribute("data-ticket") ?? "";
-    if (el && from && el !== from && el.parentElement === from.parentElement) {
+    if (el && from && el !== from && el.parentElement === from.parentElement && refOf(el) !== FRESH) {
       const box = el.getBoundingClientRect();
       const band = (el.querySelector(":scope > .rel-card") ?? el).getBoundingClientRect().height / 4;
       const side = e.clientY < box.top + band ? "before" : e.clientY > box.bottom - band ? "after" : null;
@@ -151,9 +155,10 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
     }
     const ref = el ? refOf(el) : e.target instanceof Node && canvasRef.current?.contains(e.target) ? BACKGROUND : null;
     if (ref === null) return null;
+    if (ref === FRESH) return !graph.related.has(ticketRef(dragged)) && dragged.lane !== "new" ? { ref, drop: { lane: "new" } } : null;
     const over = ref === BACKGROUND ? null : byRef.get(ref);
     if (over === undefined) return null;
-    const drop = parentEdit(dragged, over);
+    const drop = parentEdit(dragged, over) ?? (!over && dragged.lane === "new" ? { lane: "ready" as const } : null);
     return drop && { ref, drop };
   };
   const dragProps = (card: Card) => ({
@@ -187,7 +192,8 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
     setDragging(null);
     setTarget(null);
     if (!drop) return;
-    if ("change" in drop) onEdit(drop);
+    if ("changes" in drop) onEdit(drop);
+    else if ("lane" in drop) onLane(dragging, drop.lane);
     else onPlace(dragging, drop);
   };
 
@@ -234,11 +240,28 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
       </div>
     );
   };
+  // The new tickets without relations: a frame as an open parent's, its header saying what it holds.
+  const freshFrame = (fresh: Card[]) => {
+    const label = t("relations.fresh", { count: fresh.length });
+    return (
+      <div key={FRESH} className={anchorClass(freshOpen ? "rel-frame" : "rel-node", FRESH)} data-ticket={FRESH} role="group" aria-label={label}>
+        <div className="rel-card">
+          <div className="card fresh">
+            <div className="card-row">
+              <ChildrenToggle open={freshOpen} onToggle={() => onFreshOpen(!freshOpen)} />
+              <span className="title">{label}</span>
+            </div>
+          </div>
+        </div>
+        {freshOpen && level([fresh.map((card) => ({ card, ref: ticketRef(card), hasChildren: false, inner: null }))])}
+      </div>
+    );
+  };
   const level = (l: Level) => (
     <div className="rel-level">
       {l.map((column, i) => (
         <div className="rel-column" key={i}>
-          {column.map((n) => anchor(n.card, n.inner, n.hasChildren ? open.has(n.ref) : undefined))}
+          {column.map((n) => ("fresh" in n ? freshFrame(n.fresh) : anchor(n.card, n.inner, n.hasChildren ? open.has(n.ref) : undefined)))}
         </div>
       ))}
     </div>
@@ -255,28 +278,6 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
         <div ref={canvasRef} className={`relations-canvas${target?.ref === BACKGROUND ? " drop-target" : ""}`}>
           {graph.level.length === 0 ? <p className="relations-empty">{t("relations.empty")}</p> : level(graph.level)}
         </div>
-        {graph.unrelated.length > 0 && (
-          <section className="relations-unrelated" aria-label={t("relations.unrelated", { count: graph.unrelated.length })}>
-            <button type="button" className="card-control" aria-expanded={unrelatedOpen} onClick={() => onUnrelatedOpen(!unrelatedOpen)}>
-              {unrelatedOpen ? "▾" : "▸"} {t("relations.unrelated", { count: graph.unrelated.length })}
-            </button>
-            {unrelatedOpen && (
-              <div className="relations-lanes">
-                {[...groupByLane(graph.unrelated, lanes)].map(([lane, inLane]) => (
-                  <div className="relations-lane" key={lane}>
-                    <h3 className="relations-lane-head">
-                      {t(`lane.${lane}`)}{" "}
-                      <Badge color="neutral" variant="light" size="sm">
-                        {inLane.length}
-                      </Badge>
-                    </h3>
-                    <div className="rel-column">{inLane.map((c) => anchor(c, null, undefined))}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-        )}
         <Lines edges={graph.edges} editable={editable} onEdit={onEdit} />
         <LinkDraft contentRef={contentRef} startRef={startLinkRef} linkingRef={linkingRef} byRef={byRef} editable={editable} onEdit={onEdit} />
       </div>

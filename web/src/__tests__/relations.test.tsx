@@ -91,10 +91,9 @@ describe("relations", () => {
     expect(within(edge("4", "1") as unknown as HTMLElement).queryByRole("button")).not.toBeInTheDocument();
     expect(fake.calls("GET", "/api/v1/workspaces/acme/board/cards").every((r) => r.search.includes("state=open") && r.search.includes("comments=none"))).toBe(true);
 
-    // #5 has no relation: folded below the figure.
-    expect(screen.queryByRole("article", { name: /^acme\/demo#5 / })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Other tickets \(1\)/ }));
+    // #5 has no relation but is not new: a card of its own in the figure. #1 and #4 are related, so not among the new tickets.
     expect(article("5")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /New tickets/ })).not.toBeInTheDocument();
   });
 
   it("opens a parent into a frame with a toggle that says so, and remembers it", async () => {
@@ -132,8 +131,14 @@ describe("relations", () => {
     expect(JSON.parse(window.localStorage.getItem("branvil.relations.open.acme") ?? "[]")).toEqual(["acme/demo#1"]);
   });
 
-  it("makes a dropped card a child, and undoes it", async () => {
-    const fake = fakeApi(routes(undefined, { "PATCH /api/v1/repos/acme/demo/tickets/4": json(200, CARDS[1]) }));
+  it("makes a dropped card a child and the new tickets it relates ready, and undoes it", async () => {
+    const fake = fakeApi(
+      routes(undefined, {
+        "PATCH /api/v1/repos/acme/demo/tickets/4": json(200, CARDS[1]),
+        "PUT /api/v1/repos/acme/demo/tickets/4/board": json(200, CARDS[1]),
+        "PUT /api/v1/repos/acme/demo/tickets/1/board": json(200, CARDS[0]),
+      }),
+    );
     await shown();
     fireEvent.dragStart(draggable("4"), { dataTransfer: dataTransfer() });
     fireEvent.dragOver(article("1"));
@@ -141,10 +146,19 @@ describe("relations", () => {
     fireEvent.drop(article("1"));
 
     expect(await screen.findByText("Made acme/demo#4 a child of acme/demo#1.")).toBeInTheDocument();
-    expect(fake.calls("PATCH", "/api/v1/repos/acme/demo/tickets/4")[0]?.body).toEqual({ parent: url("1") });
+    const writes = () => fake.requests.filter((r) => r.method !== "GET").map((r) => [r.method, r.path.replace("/api/v1/repos/acme/demo/tickets/", ""), r.body]);
+    expect(writes()).toEqual([
+      ["PATCH", "4", { parent: url("1") }],
+      ["PUT", "4/board", { lane: "ready" }],
+      ["PUT", "1/board", { lane: "ready" }],
+    ]);
     await userEvent.setup().click(screen.getByRole("button", { name: "Undo" }));
     expect(await screen.findByText("Undone.")).toBeInTheDocument();
-    expect(fake.calls("PATCH", "/api/v1/repos/acme/demo/tickets/4")[1]?.body).toEqual({ parent: null });
+    expect(writes().slice(3)).toEqual([
+      ["PATCH", "4", { parent: null }],
+      ["PUT", "4/board", { lane: "new" }],
+      ["PUT", "1/board", { lane: "new" }],
+    ]);
     expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
   });
 
@@ -164,6 +178,15 @@ describe("relations", () => {
     expect(fake.requests.some((r) => r.method === "PATCH")).toBe(false);
   });
 
+  it("makes a related new ticket dropped on the background ready: only one without relations is new", async () => {
+    const fake = fakeApi(routes(undefined, { "PUT /api/v1/repos/acme/demo/tickets/4/board": json(200, CARDS[1]) }));
+    await shown();
+    fireEvent.dragStart(draggable("4"), { dataTransfer: dataTransfer() });
+    fireEvent.drop(document.querySelector(".relations-canvas") as HTMLElement);
+    expect(await screen.findByText("acme/demo#4 moved to Ready.")).toBeInTheDocument();
+    expect(fake.calls("PUT", "/api/v1/repos/acme/demo/tickets/4/board").map((r) => r.body)).toEqual([{ lane: "ready" }]);
+  });
+
   it("takes a child out of its parent when it is dropped on the background", async () => {
     const user = userEvent.setup();
     const fake = fakeApi(routes(undefined, { "PATCH /api/v1/repos/acme/demo/tickets/2": json(200, CARDS[2]) }));
@@ -178,8 +201,14 @@ describe("relations", () => {
     expect(fake.calls("PATCH", "/api/v1/repos/acme/demo/tickets/2")[0]?.body).toEqual({ parent: null });
   });
 
-  it("draws a dependency from a card's handle: the card it is dropped on waits for it", async () => {
-    const fake = fakeApi(routes(undefined, { "PATCH /api/v1/repos/acme/demo/tickets/1": json(200, CARDS[0]) }));
+  it("draws a dependency from a card's handle: the card it is dropped on waits for it, and the new ones are ready", async () => {
+    const fake = fakeApi(
+      routes(undefined, {
+        "PATCH /api/v1/repos/acme/demo/tickets/1": json(200, CARDS[0]),
+        "PUT /api/v1/repos/acme/demo/tickets/4/board": json(200, CARDS[1]),
+        "PUT /api/v1/repos/acme/demo/tickets/1/board": json(200, CARDS[0]),
+      }),
+    );
     await shown();
     fireEvent.pointerDown(within(article("4")).getByTitle("Drag to another card: it waits for acme/demo#4"), { button: 0 });
     fireEvent.pointerMove(article("1"));
@@ -188,6 +217,8 @@ describe("relations", () => {
 
     expect(await screen.findByText("acme/demo#1 now waits for acme/demo#4.")).toBeInTheDocument();
     expect(fake.calls("PATCH", "/api/v1/repos/acme/demo/tickets/1")[0]?.body).toEqual({ add_blocked_by: [url("4")] });
+    expect(fake.calls("PUT", "/api/v1/repos/acme/demo/tickets/4/board")[0]?.body).toEqual({ lane: "ready" });
+    expect(fake.calls("PUT", "/api/v1/repos/acme/demo/tickets/1/board")[0]?.body).toEqual({ lane: "ready" });
     expect(screen.queryByText("acme/demo#1 waits for acme/demo#4")).not.toBeInTheDocument();
   });
 
@@ -328,7 +359,7 @@ describe("relations", () => {
     );
     renderApp("/acme/-/relations");
     // Meanwhile the open tickets are shown (#8 without its parent, so without relations), and nothing can be dragged.
-    await user.click(await screen.findByRole("button", { name: /Other tickets \(1\)/ }));
+    await screen.findByRole("article", { name: /^acme\/demo#8 / });
     expect(draggable("8")).toHaveAttribute("draggable", "false");
     // After the query's own retries, the failure is shown with a retry, and nothing is still "refreshing".
     expect(await screen.findByRole("alert", {}, { timeout: 10_000 })).toHaveTextContent("The board could not be read.");
@@ -367,7 +398,7 @@ describe("relations", () => {
 });
 
 describe("relations: order and new tickets", () => {
-  // #6 and #8 are new, #7 ready: none related, so among the other tickets with #5 (done).
+  // #6 and #8 are new and not related, so in the frame of new tickets; #7 (ready) is not related either.
   const OTHERS: Card[] = [...CARDS, card("6", "new"), card("8", "new"), card("7", "ready")];
   const REPO = { path: "acme/demo", default_branch: "main", clone_url: "", url: "", protected_branches: [], required_checks: [], labels: [], upstream: null, revision: 1 };
   const withRepo = (extra: Routes = {}) => routes({ open: OTHERS }, { "GET /api/v1/repos": json(200, { items: [REPO], next_cursor: null }), ...extra });
@@ -381,25 +412,67 @@ describe("relations: order and new tickets", () => {
   /** A drag event at a height (jsdom's events built by fireEvent.dragOver carry no coordinates). */
   const dragAt = (type: "dragover" | "drop", el: HTMLElement, clientY: number) => fireEvent(el, new MouseEvent(type, { bubbles: true, cancelable: true, clientY }));
 
+  const freshFrame = () => screen.getByRole("group", { name: /^New tickets/ });
+
+  /** Opens the frame of new tickets, showing #6 and #8. */
   async function others(user: ReturnType<typeof userEvent.setup>) {
     await shown();
-    await user.click(screen.getByRole("button", { name: /Other tickets \(4\)/ }));
+    await user.click(within(freshFrame()).getByRole("button", { name: "Open child tickets" }));
   }
 
-  it("shows the other tickets in a column per lane, in the board's order", async () => {
+  it("keeps the new tickets without relations in a frame laid out as a new ticket, the others on their own", async () => {
     const user = userEvent.setup();
     fakeApi(withRepo());
+    await shown();
+    const frame = freshFrame();
+    expect(frame).toHaveAccessibleName("New tickets (2)");
+    // Where a new ticket goes in its column: after the ready ones, before the done ones, in the board's order.
+    const column = [...(frame.parentElement?.children ?? [])].map((e) => e.getAttribute("data-ticket")?.replace("acme/demo#", ""));
+    expect(column).toEqual(["7", "4", "\u0000fresh", "5"]);
+    // A parent's header, in a colour of its own; closed at first.
+    expect(frame.querySelector(":scope > .rel-card > .card")).toHaveClass("fresh");
+    expect(within(frame).queryByRole("article")).not.toBeInTheDocument();
+
     await others(user);
-    const columns = [...document.querySelectorAll(".relations-lane")].map((lane) => [
-      lane.querySelector("h3")?.textContent,
-      [...lane.querySelectorAll("[data-ticket]")].map((e) => e.getAttribute("data-ticket")?.replace("acme/demo#", "")),
-    ]);
-    expect(columns).toEqual([
-      ["New 2", ["6", "8"]],
-      ["Ready 1", ["7"]],
-      ["In progress 0", []],
-      ["Done 1", ["5"]],
-    ]);
+    expect(frame).toHaveClass("rel-frame");
+    expect(within(frame).getAllByRole("article").map((a) => a.getAttribute("aria-label")?.split(" ")[0])).toEqual(["acme/demo#6", "acme/demo#8"]);
+    expect(within(frame).getByRole("button", { name: "Close child tickets" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("makes a new ticket dragged out of its frame onto the background ready, and offers no drop on the frame itself", async () => {
+    const user = userEvent.setup();
+    const fake = fakeApi(withRepo({ "PUT /api/v1/repos/acme/demo/tickets/6/board": json(200, {}) }));
+    await others(user);
+    fireEvent.dragStart(draggable("6"), { dataTransfer: dataTransfer() });
+    fireEvent.dragOver(freshFrame());
+    expect(freshFrame()).not.toHaveClass("drop-target");
+    const background = document.querySelector(".relations-canvas") as HTMLElement;
+    fireEvent.dragOver(background);
+    expect(background).toHaveClass("drop-target");
+    fireEvent.drop(background);
+    expect(await screen.findByText("acme/demo#6 moved to Ready.")).toBeInTheDocument();
+    expect(fake.calls("PUT", "/api/v1/repos/acme/demo/tickets/6/board").map((r) => r.body)).toEqual([{ lane: "ready" }]);
+  });
+
+  it("makes a ticket without relations dropped onto the frame new, but takes no ticket with relations", async () => {
+    const user = userEvent.setup();
+    const fake = fakeApi(withRepo({ "PUT /api/v1/repos/acme/demo/tickets/7/board": json(200, {}) }));
+    await shown();
+    await openParent(user);
+    // #4 (new) and #2 (ready) are related.
+    for (const key of ["4", "2"]) {
+      fireEvent.dragStart(draggable(key), { dataTransfer: dataTransfer() });
+      fireEvent.dragOver(freshFrame());
+      expect(freshFrame()).not.toHaveClass("drop-target");
+      fireEvent.dragEnd(draggable(key));
+    }
+
+    fireEvent.dragStart(draggable("7"), { dataTransfer: dataTransfer() });
+    fireEvent.dragOver(freshFrame());
+    expect(freshFrame()).toHaveClass("drop-target");
+    fireEvent.drop(freshFrame());
+    expect(await screen.findByText("acme/demo#7 moved to New.")).toBeInTheDocument();
+    expect(fake.calls("PUT", "/api/v1/repos/acme/demo/tickets/7/board").map((r) => r.body)).toEqual([{ lane: "new" }]);
   });
 
   it("puts a card dropped near the edge of another of its lane beside it, on the board", async () => {
@@ -425,10 +498,9 @@ describe("relations: order and new tickets", () => {
     await others(user);
     layOut("6", "8");
     // #7 is ready; #6 and #8 new, so is the gap between them.
-    const ready = within(document.querySelectorAll(".relations-lane")[1] as HTMLElement).getByRole("article").closest(".rel-card") as HTMLElement;
-    const rel = ready.closest("[data-ticket]") as HTMLElement;
-    // Siblings only: move #7 into the new lane's column for the test.
-    anchor("6").parentElement?.append(rel);
+    const ready = draggable("7");
+    // Siblings only: move #7 into the frame of new tickets for the test.
+    anchor("6").parentElement?.append(anchor("7"));
     fireEvent.dragStart(ready, { dataTransfer: dataTransfer() });
     const over = dragAt("dragover", article("8"), 10);
     expect(over).toBe(true); // not prevented: no drop here
@@ -439,7 +511,7 @@ describe("relations: order and new tickets", () => {
     expect(fake.requests.some((r) => r.method === "PUT")).toBe(false);
   });
 
-  it("adds a ticket from the header and opens the other tickets, where it is", async () => {
+  it("adds a ticket from the header and opens the frame of new tickets, where it is", async () => {
     const user = userEvent.setup();
     let created = false;
     const fake = fakeApi(
@@ -456,14 +528,14 @@ describe("relations: order and new tickets", () => {
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "A new one");
     await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /Other tickets/ })).toHaveAttribute("aria-expanded", "true"));
+    await waitFor(() => expect(freshFrame()).toHaveClass("rel-frame"));
     expect(fake.calls("POST", "/api/v1/repos/acme/demo/tickets")[0]?.body).toEqual({ title: "A new one", body: "", labels: [], lane: "new" });
-    expect(article("9")).toBeInTheDocument();
+    expect(within(freshFrame()).getByRole("article", { name: /^acme\/demo#9 / })).toBeInTheDocument();
   });
 
   it("brings a new child into view only once the cards are read with its parent, opening the parent", async () => {
     const user = userEvent.setup();
-    const made = card("9", "new");
+    const made = card("9", "ready");
     let stage: "before" | "created" | "related" = "before";
     const cardsNow = () =>
       stage === "before"
@@ -483,12 +555,13 @@ describe("relations: order and new tickets", () => {
           stage = "created";
           return json(201, made);
         },
-        // The cards read after the creation, with #9 among the other tickets, are shown before the relation is written.
+        // The cards read after the creation, with #9 on its own, are shown before the relation is written.
         "PATCH /api/v1/repos/acme/demo/tickets/9": async () => {
           await waitFor(() => expect(document.querySelector('[data-ticket="acme/demo#9"]')).not.toBeNull());
           stage = "related";
           return json(200, {});
         },
+        "PUT /api/v1/repos/acme/demo/tickets/1/board": json(200, {}),
       }),
     );
     await others(user);
@@ -501,11 +574,11 @@ describe("relations: order and new tickets", () => {
     expect(anchor("9").parentElement?.closest("[data-ticket]")).toBe(anchor("1"));
   });
 
-  it("shows a new ticket among the other tickets when its relation is refused", async () => {
+  it("shows a new ticket on its own when its relation is refused", async () => {
     const user = userEvent.setup();
-    const made = card("9", "new");
+    const made = card("9", "ready");
     let created = false;
-    fakeApi(
+    const fake = fakeApi(
       withRepo({
         "GET /api/v1/workspaces/acme/board/cards": () => json(200, { items: created ? [...OTHERS, made] : OTHERS, next_cursor: null }),
         "POST /api/v1/repos/acme/demo/tickets": () => {
@@ -520,10 +593,14 @@ describe("relations: order and new tickets", () => {
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Related");
     await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /Other tickets/ })).toHaveAttribute("aria-expanded", "true"));
-    expect(article("9")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Refused.");
+    expect(await screen.findByRole("article", { name: /^acme\/demo#9 / })).toBeInTheDocument();
+    // Nothing is moved after the refused relation.
+    expect(fake.requests.some((r) => r.method === "PUT")).toBe(false);
   });
 
+  // #2 is ready, #4 new: related, it is made ready after the relation.
+  const READY_4 = ["PUT", "4/board", { lane: "ready" }];
   it.each([
     {
       item: "Add parent ticket",
@@ -531,27 +608,40 @@ describe("relations: order and new tickets", () => {
       note: "Made as the parent of acme/demo#2, between it and its parent acme/demo#1.",
       done: "Created acme/demo#9 as the parent of acme/demo#2.",
       writes: [
-        ["9", { parent: url("1") }],
-        ["2", { parent: url("9") }],
+        ["PATCH", "9", { parent: url("1") }],
+        ["PATCH", "2", { parent: url("9") }],
       ],
     },
-    { item: "Add parent ticket", on: "4", note: "Made as the parent of acme/demo#4.", done: "Created acme/demo#9 as the parent of acme/demo#4.", writes: [["4", { parent: url("9") }]] },
-    { item: "Add child ticket", on: "4", note: "Made as a child of acme/demo#4.", done: "Created acme/demo#9 as a child of acme/demo#4.", writes: [["9", { parent: url("4") }]] },
+    {
+      item: "Add parent ticket",
+      on: "4",
+      note: "Made as the parent of acme/demo#4.",
+      done: "Created acme/demo#9 as the parent of acme/demo#4.",
+      writes: [["PATCH", "4", { parent: url("9") }], READY_4],
+    },
+    {
+      item: "Add child ticket",
+      on: "4",
+      note: "Made as a child of acme/demo#4.",
+      done: "Created acme/demo#9 as a child of acme/demo#4.",
+      writes: [["PATCH", "9", { parent: url("4") }], READY_4],
+    },
     {
       item: "Add next ticket",
       on: "4",
       note: "Made as the next ticket after acme/demo#4: it waits for acme/demo#4.",
       done: "Created acme/demo#9, which waits for acme/demo#4.",
-      writes: [["9", { add_blocked_by: [url("4")] }]],
+      writes: [["PATCH", "9", { add_blocked_by: [url("4")] }], READY_4],
     },
-  ])("$item on #$on makes the new ticket related to it, in order", async ({ item, on, note, done, writes }) => {
+  ])("$item on #$on makes the new ticket ready and related to it, in order", async ({ item, on, note, done, writes }) => {
     const user = userEvent.setup();
     const fake = fakeApi(
       withRepo({
-        "POST /api/v1/repos/acme/demo/tickets": json(201, card("9", "new")),
+        "POST /api/v1/repos/acme/demo/tickets": json(201, card("9", "ready")),
         "PATCH /api/v1/repos/acme/demo/tickets/9": json(200, {}),
         "PATCH /api/v1/repos/acme/demo/tickets/2": json(200, {}),
         "PATCH /api/v1/repos/acme/demo/tickets/4": json(200, {}),
+        "PUT /api/v1/repos/acme/demo/tickets/4/board": json(200, {}),
       }),
     );
     await shown();
@@ -562,7 +652,8 @@ describe("relations: order and new tickets", () => {
     await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Related");
     await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
     expect(await screen.findByText(done)).toBeInTheDocument();
-    const patches = fake.requests.filter((r) => r.method === "PATCH").map((r) => [r.path.split("/").pop(), r.body]);
-    expect(patches).toEqual(writes);
+    expect(fake.calls("POST", "/api/v1/repos/acme/demo/tickets")[0]?.body).toMatchObject({ lane: "ready" });
+    const sent = fake.requests.filter((r) => r.method === "PATCH" || r.method === "PUT").map((r) => [r.method, r.path.replace("/api/v1/repos/acme/demo/tickets/", ""), r.body]);
+    expect(sent).toEqual(writes);
   });
 });

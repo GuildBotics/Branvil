@@ -751,6 +751,12 @@ pre {
   background: var(--color-brand-bg-subtle);
 }
 
+/* The header of the frame of new tickets: a parent's, in another colour, and not dragged. */
+.card.fresh {
+  background: var(--color-info-bg);
+  cursor: default;
+}
+
 .rel-frame > .rel-card > .card {
   border: 0;
   border-bottom: 1px solid var(--color-brand-border-subtle);
@@ -842,42 +848,6 @@ pre {
 
 .card:hover > .rel-handle {
   visibility: visible;
-}
-
-.relations-unrelated {
-  border-top: 1px solid var(--color-border-subtle);
-  box-sizing: border-box;
-  display: grid;
-  gap: 12px;
-  justify-items: start;
-  left: 0;
-  padding: 12px 20px 20px;
-  position: sticky;
-  width: var(--view-width, 100%);
-  z-index: 1;
-}
-
-/* Like the board: a column per lane, its tickets in the board's order. */
-.relations-lanes {
-  align-items: start;
-  display: grid;
-  gap: 16px;
-  grid-auto-columns: 260px;
-  grid-auto-flow: column;
-}
-
-.relations-lane {
-  display: grid;
-  gap: 8px;
-}
-
-.relations-lane-head {
-  align-items: center;
-  display: flex;
-  font-size: 13px;
-  font-weight: 700;
-  gap: 8px;
-  margin: 0;
 }
 
 .rel-lines,
