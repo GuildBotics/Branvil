@@ -620,7 +620,10 @@ fn reuse_candidate(r: &impl Rd, a: &Attempt) -> AppResult<Option<Reuse>> {
             .get(store::CI_RUNS, &key)?
             .ok_or_else(|| AppError::internal("tree index run is missing"))?;
         for source in attempts_of(r, &a.repo, &run.sha)? {
-            if can_reuse(r, a, &source)?
+            // Once offered, a source may expire before finish. Retention
+            // disqualifies new offers, not a runner's already claimed work.
+            if !source.files_pruned
+                && can_reuse(r, a, &source)?
                 && newest.as_ref().is_none_or(|old| {
                     (&source.finished_at, source.seq) > (&old.finished_at, old.seq)
                 })
@@ -1113,6 +1116,7 @@ mod tests {
             "reused",
             "missing_tree",
             "missing_digest",
+            "pruned",
         ] {
             let (_d, s) = store();
             let source = execute(&s, "s1", T0);
@@ -1127,6 +1131,7 @@ mod tests {
                     }
                     "reused" => changed.reused_from = Some("another".into()),
                     "missing_digest" => changed.image_digest = None,
+                    "pruned" => changed.files_pruned = true,
                     _ => {}
                 }
                 put_attempt(w, Some(&source), &changed)?;
@@ -1205,6 +1210,38 @@ mod tests {
                 reuse_candidate(w, &next.attempt)?.unwrap().attempt_id,
                 first.id
             );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_source_pruned_after_claim_still_finishes_but_is_never_offered_again() {
+        let (_d, s) = store();
+        let source = execute(&s, "s1", T0);
+        s.write_sync(|w| {
+            register(w, same_tree("s2"), 10, T1)?;
+            let c = claim(w, "r", 60, T1)?.unwrap();
+            assert_eq!(c.reuse.unwrap().attempt_id, source.id);
+            let mut pruned = source.clone();
+            pruned.files_pruned = true;
+            put_attempt(w, Some(&source), &pruned)?;
+            let done = finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "success",
+                None,
+                ResultInfo {
+                    image_digest: Some(DIGEST.into()),
+                    reused_from: Some(source.id.clone()),
+                    cache_key: None,
+                },
+                T1,
+            )?;
+            assert_eq!(done.reused_from.as_deref(), Some(source.id.as_str()));
+            register(w, same_tree("s3"), 10, T2)?;
+            assert!(claim(w, "r", 60, T2)?.unwrap().reuse.is_none());
             Ok(())
         })
         .unwrap();

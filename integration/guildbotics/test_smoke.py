@@ -524,8 +524,7 @@ def test_a_reused_result_is_ready_through_the_provider(world: World) -> None:
         world.service.call(
             "POST", f"/runner/attempts/{attempt['attempt_id']}/finish", world.runner,
             {"lease": attempt["lease"], "conclusion": "success", "image_digest": DIGEST,
-             "reused_from": source["attempt_id"],
-             "details": f"Reused the result of {source['attempt_id']} ({world.main}, the same tree)."},
+             "reused_from": source["attempt_id"]},
         )
         ready = await code.readiness(created.target.url)
         assert (ready.head_sha, ready.rollup, ready.readiness) == (head, "success", "ready")

@@ -799,18 +799,10 @@ impl Runner {
                 .await;
                 say("job ended: success (reused)".into()).await;
                 info.reused_from = Some(source.attempt_id.clone());
-                return (
-                    "success",
-                    Some(format!(
-                        "Reused the result of {} ({}, the same tree).",
-                        source.attempt_id, source.sha
-                    )),
-                    info,
-                );
+                return ("success", None, info);
             }
         } else {
-            say("reuse unavailable: no matching successful execution; executing the job".into())
-                .await;
+            say("reuse unavailable: no reuse offered; executing the job".into()).await;
         }
         // The job's own steps; a `return` in the block ends them.
         let (conclusion, details) = async {
@@ -1496,18 +1488,10 @@ mod tests {
             !log.contains("source fetched") && !log.contains("sandbox started"),
             "{log}"
         );
-        assert_eq!(
-            reused.details.as_deref(),
-            Some(
-                format!(
-                    "Reused the result of {} ({first_sha}, the same tree).",
-                    first.id
-                )
-                .as_str()
-            )
-        );
+        assert!(reused.details.is_none());
         let checks = s.app.ci.head_checks(&s.repo, &sha).await.unwrap().checks;
         assert!(checks[0].succeeded());
+        assert!(checks[0].details.is_none());
         assert_eq!(checks[0].artifact_names, vec!["report"]);
         assert_eq!(checks[0].reused_from.as_ref().unwrap().attempt_id, first.id);
         let response = s
@@ -1544,18 +1528,59 @@ mod tests {
             format!("{}/acme/demo/-/jobs/{}", s.url, first.id)
         );
         assert_eq!(view["artifact_names"], serde_json::json!(["report"]));
+        assert!(view["details"].is_null());
+
+        fake.changed_image.store(true, Ordering::SeqCst);
+        let changed_sha = empty_main(&s, "new digest").await;
+        runner.once(&fake).await.unwrap();
+        let changed = result_of(&s, &changed_sha).await;
+        assert!(changed.reused_from.is_none());
+        assert_eq!(fake.ran.lock().unwrap().len(), 2);
+        let log = s.app.ci.log_tail(&changed.id, 1 << 20).await.unwrap().0;
+        assert!(
+            log.contains("image digest differs") && log.contains("source fetched"),
+            "{log}"
+        );
+        let next_sha = empty_main(&s, "reuse new digest").await;
+        runner.once(&fake).await.unwrap();
+        let next = result_of(&s, &next_sha).await;
+        assert_eq!(next.reused_from.as_deref(), Some(changed.id.as_str()));
+        let id = next.id.clone();
+        s.app
+            .store
+            .write(move |w| crate::ci::queue::retry(w, &id, 10, &crate::util::now()))
+            .await
+            .unwrap();
+        runner.once(&fake).await.unwrap();
+        let retried = result_of(&s, &next_sha).await;
+        assert!(retried.reused_from.is_none());
+        let retry_log = s.app.ci.log_tail(&retried.id, 1 << 20).await.unwrap().0;
+        assert!(
+            retry_log.contains("reuse unavailable: no reuse offered"),
+            "{retry_log}"
+        );
+        assert!(
+            !retry_log.contains("no matching successful execution"),
+            "{retry_log}"
+        );
+        assert_eq!(fake.ran.lock().unwrap().len(), 3);
 
         // Reusing the result never extends the original files' retention.
-        let mut expired = first.clone();
-        expired.finished_at = Some(crate::ci::queue::earlier(&crate::util::now(), 31 * 86_400));
+        // Prune every actual source, so an old tree cannot reuse another one.
+        let sources = [first.clone(), changed, retried];
         s.app
             .store
             .write(move |w| {
-                w.put(
-                    crate::store::CI_ATTEMPTS,
-                    &crate::ci::queue::Attempt::key(&expired.id),
-                    &expired,
-                )
+                for mut expired in sources {
+                    expired.finished_at =
+                        Some(crate::ci::queue::earlier(&crate::util::now(), 31 * 86_400));
+                    w.put(
+                        crate::store::CI_ATTEMPTS,
+                        &crate::ci::queue::Attempt::key(&expired.id),
+                        &expired,
+                    )?;
+                }
+                Ok(())
             })
             .await
             .unwrap();
@@ -1590,31 +1615,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 404);
-
-        fake.changed_image.store(true, Ordering::SeqCst);
-        let changed_sha = empty_main(&s, "new digest").await;
+        let sha = empty_main(&s, "same tree after retention").await;
         runner.once(&fake).await.unwrap();
-        let changed = result_of(&s, &changed_sha).await;
-        assert!(changed.reused_from.is_none());
-        assert_eq!(fake.ran.lock().unwrap().len(), 2);
-        let log = s.app.ci.log_tail(&changed.id, 1 << 20).await.unwrap().0;
-        assert!(
-            log.contains("image digest differs") && log.contains("source fetched"),
-            "{log}"
+        let fresh = result_of(&s, &sha).await;
+        assert!(fresh.reused_from.is_none());
+        assert_eq!(fake.ran.lock().unwrap().len(), 4);
+        assert_eq!(
+            s.app.ci.head_checks(&s.repo, &sha).await.unwrap().checks[0].artifact_names,
+            vec!["report"]
         );
-        let next_sha = empty_main(&s, "reuse new digest").await;
-        runner.once(&fake).await.unwrap();
-        let next = result_of(&s, &next_sha).await;
-        assert_eq!(next.reused_from.as_deref(), Some(changed.id.as_str()));
-        let id = next.id.clone();
-        s.app
-            .store
-            .write(move |w| crate::ci::queue::retry(w, &id, 10, &crate::util::now()))
-            .await
-            .unwrap();
-        runner.once(&fake).await.unwrap();
-        assert!(result_of(&s, &next_sha).await.reused_from.is_none());
-        assert_eq!(fake.ran.lock().unwrap().len(), 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

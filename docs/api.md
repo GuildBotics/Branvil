@@ -821,7 +821,8 @@ kind `runner` (created by `branvil runner register`); any other member gets
   (`docs/ci.md`). `queued_secs` is how long the attempt
   waited in the queue (from its registration to this claim).
   `reuse` is `null` or `{"attempt_id","sha","image_digest","cache_key"}`
-  of the latest finished actual successful execution with the same repository,
+  of the latest finished actual successful execution whose files have not
+  been pruned, with the same repository,
   tree, job definition, and network. `cache_key` may be `null`. Manual retries
   receive no source. The runner compares the resolved image digest before
   fetching source. If it matches, jobs without a cache or outside protected
@@ -845,8 +846,8 @@ kind `runner` (created by `branvil runner register`); any other member gets
   job ran on (`sha256:<64 hex>`, `400 invalid` otherwise), recorded on the
   attempt. An actual execution of a cached job reports its computed
   `cache_key` (64 hex characters); other jobs leave it `null`. A reused success
-  reports the source attempt ID as `reused_from`, leaves `cache_key` null, and
-  uses details `Reused the result of <attempt ID> (<commit>, the same tree).`.
+  reports the source attempt ID as `reused_from` and leaves `cache_key` and
+  `details` null; the source is already identified by `reused_from` and the log.
   The service validates that the source is an actual successful execution of
   the same repository, tree, job, network, and image and that reuse is allowed;
   an invalid reuse report is `400 invalid`. When a cancellation was requested

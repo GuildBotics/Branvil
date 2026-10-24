@@ -118,10 +118,12 @@ pull-request attempt is stopped). A squash merge gets its own run. Both kinds
 of new attempts may reuse an earlier successful execution of the same tree.
 
 When a runner claims an attempt, the service offers the most recently finished
-successful execution in the same repository with the same Git tree, parsed
-job definition, and network setting. Reused attempts cannot themselves be a
-source. After resolving the image and before fetching source, the runner
-checks that the image's configuration digest matches. A job without a cache,
+successful execution whose files have not been pruned, in the same repository
+with the same Git tree, parsed job definition, and network setting. Reused
+attempts cannot themselves be a source. Retention after claim does not reject
+finish or extend the source's file lifetime. After resolving the image and
+before fetching source, the runner checks that the image's configuration
+digest matches. A job without a cache,
 or an attempt outside the protected cache scope, then succeeds without a VM.
 A protected attempt with a cache also requires a complete save of the source's
 cache key on this runner within 24 hours; otherwise it executes and saves as
@@ -429,8 +431,9 @@ tree), image <digest>` and `job ended: success (reused)`, with the cache key
 and save age when checked. It has no `source fetched`, `sandbox started`, or
 `commands ran for` line. `reuse declined` identifies the source and reason
 (digest mismatch, missing cache key/save, or save older than 86400 seconds)
-before normal execution; `reuse unavailable` means no matching execution was
-offered. These lines distinguish reused work from cache refreshes when
+before normal execution; `reuse unavailable: no reuse offered` means the
+service supplied no source, including for manual retries and upgraded old
+attempts. These lines distinguish reused work from cache refreshes when
 measuring queue time and execution time.
 
 At start it removes every sandbox labelled with its own name and every volume
