@@ -52,10 +52,11 @@ commands = [
   "cd web && npm_config_cache=/work/.ci/npm npm ci",
   "cd web && npm run lint",
   "cd web && npm run typecheck",
-  "cd web && npm run test",
+  "cd web && mkdir -p test-results && if npm run test > test-results/vitest.log 2>&1; then cat test-results/vitest.log; else cat test-results/vitest.log; exit 1; fi",
 ]
 timeout_secs = 1200
 cache = { paths = [".ci/npm"], key_files = ["web/package-lock.json"] }
+artifacts = [{ name = "web-tests", paths = ["web/test-results/"] }]
 
 [[jobs]]
 name = "dev-script"

@@ -28,6 +28,8 @@ export default defineConfig({
     proxy: { "/api": proxy, "/git": proxy },
   },
   test: {
+    maxWorkers: 4,
+    reporters: ["default", "./test-timing.ts"],
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
