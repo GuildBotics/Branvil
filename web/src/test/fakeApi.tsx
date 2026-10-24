@@ -74,6 +74,9 @@ export const SESSION = { me: ME, csrf: "csrf-123" };
 export function renderApp(path: string, language: "en" | "ja" = "en") {
   window.history.replaceState(null, "", path);
   const client = createQueryClient();
+  // Exercise the real retry policy without waiting for its 1s/2s backoff.
+  const defaults = client.getDefaultOptions();
+  client.setDefaultOptions({ ...defaults, queries: { ...defaults.queries, retryDelay: 0 } });
   const utils = render(<App client={client} language={language} test />);
   return { ...utils, client };
 }

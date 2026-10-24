@@ -28,6 +28,12 @@ export default defineConfig({
     proxy: { "/api": proxy, "/git": proxy },
   },
   test: {
+    maxWorkers: 4,
+    // Native instanceof/toStrictEqual surprises: https://vitest.dev/config/pool#vmthreads
+    pool: "vmThreads",
+    // A production run alongside the Rust job still reached 4.78s.
+    testTimeout: 10_000,
+    reporters: ["default", "./test-timing.ts"],
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],

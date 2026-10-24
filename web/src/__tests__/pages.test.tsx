@@ -47,7 +47,6 @@ class FakeEventSource {
 }
 
 afterEach(() => {
-  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -291,6 +290,19 @@ describe("pages", () => {
     renderApp("/-/settings/members");
     const warnings = await screen.findByRole("region", { name: "Warnings" });
     expect(await within(warnings).findByText(/Branvil is stopping for an update or a restart once the running CI jobs finish/)).toBeInTheDocument();
+  });
+
+  it("waits for service warnings beyond the former one-second query deadline", async () => {
+    fakeApi({
+      ...SHELL,
+      "GET /api/v1/admin/diagnostics": async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        return json(200, { runner: { state: "stopping", detail: "Branvil is stopping.", mode: "off" } });
+      },
+    });
+    renderApp("/-/settings/members");
+    const warnings = await screen.findByRole("region", { name: "Warnings" });
+    expect(within(warnings).getByText(/Branvil is stopping for an update or a restart once the running CI jobs finish/)).toBeInTheDocument();
   });
 
   it("does not warn about the runner when CI is turned off", async () => {
