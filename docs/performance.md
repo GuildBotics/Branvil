@@ -511,8 +511,9 @@ doubles the largest entries, which the cache copies twice per job (2.6 s and
 ### Web tests
 
 `cd web && npm run test` records file and test durations in
-`web/test-results/timing.json`. The `web` CI job uploads that file and its
-Vitest log as the `web-tests` artifact, including on test failure. To keep a
+`web/test-results/timing.json`. The `web` CI job uploads that file as the
+`web-tests` artifact, including on test failure, and streams Vitest output
+into the job log. To keep a
 local measurement outside the checkout:
 
 ```sh
@@ -603,9 +604,13 @@ per worker; this is JS heap, not total process or microVM memory.
 The timed runs above used Vitest's 5 s test timeout. Although all passed,
 the repeated shared run reached 4.78 s (96% of that limit), so only after
 reducing the measured costs was `testTimeout` raised to 10 s, about twice
-that maximum. Testing Library's 1 s `asyncUtilTimeout` remains unchanged:
-all 231 tests passed in the three updated production runs without a query
-timeout. The normal-pipeline verification is the `web` job
+that maximum. These whole-test timings do not establish headroom for
+Testing Library's separate query deadline. A temporary measurement wraps
+RTL's existing `asyncWrapper`, using a real clock captured before fake
+timers, and records callsites to separate `waitFor`/`findBy*` from user-event
+actions. The measured boundary includes RTL's final event-loop drain, so
+it is a conservative envelope around the actual query wait. The 1 s
+`asyncUtilTimeout` is retained during that measurement. The normal-pipeline verification is the `web` job
 of [PR !38](http://127.0.0.1:7878/GuildBotics/Branvil/-/pulls/38), whose
 `web-tests` artifact records the same measurements for the current head.
 The historical failures in #78 reached 5.58–6.48 s per test and missed

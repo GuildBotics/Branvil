@@ -493,8 +493,8 @@ npm run test
 ```
 
 The tests use at most four workers and write file and test timings to
-`web/test-results/timing.json`; CI keeps this and the Vitest log in the
-`web-tests` artifact. Measurements and interpretation are in
+`web/test-results/timing.json`; CI keeps this in the `web-tests` artifact
+and streams Vitest output into the job log. Measurements and interpretation are in
 [`docs/performance.md`](docs/performance.md#web-tests).
 
 The integration tests start real `branvil serve` processes on free loopback

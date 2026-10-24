@@ -1,4 +1,4 @@
-// Keep file and test timings beside the CI log, including successful runs.
+// Persist file and test timings, including successful CI runs.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { availableParallelism, platform, release } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ export default class TestTiming implements Reporter {
       tests: [...module.children.allTests()].map((test) => ({
         name: test.fullName,
         state: test.result().state,
+        meta: test.meta(),
         ...test.diagnostic(),
       })),
     }));
