@@ -1595,6 +1595,7 @@ pub async fn checks(
             .count()
     };
     let mut checks = head.checks;
+    app.ci.estimate(&repo, &head_sha, &mut checks).await;
     if let Some(published) = &p.upstream
         && published.pushed.as_deref() == Some(head_sha.as_str())
     {
@@ -1604,10 +1605,9 @@ pub async fn checks(
             status: c.status.clone(),
             conclusion: c.conclusion.clone(),
             attempt_id: Some(format!("{provider}-{}", c.id)),
-            attempt: None,
             details_url: c.url.clone(),
             details: c.summary.clone(),
-            artifact_names: Vec::new(),
+            ..Check::default()
         }));
     }
     Ok(ChecksView {

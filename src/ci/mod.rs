@@ -40,8 +40,11 @@ use crate::util;
 use config::CiConfig;
 use queue::{Attempt, PipelineState, Registration};
 
+/// How many commits of the first-parent history `Ci::estimate` looks at.
+const ESTIMATE_DEPTH: usize = 20;
+
 /// One check of a commit, in the shape of `docs/api.md` "Checks".
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
 pub struct Check {
     pub name: String,
     /// `queued`, `in_progress`, or `completed`.
@@ -60,6 +63,15 @@ pub struct Check {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
     pub artifact_names: Vec<String>,
+    /// When its attempt started and finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    /// For a running attempt, how long the job took where it last succeeded
+    /// (`Ci::estimate`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_secs: Option<u64>,
 }
 
 impl Check {
@@ -78,11 +90,8 @@ impl Check {
             name: name.to_string(),
             status: status.to_string(),
             conclusion: conclusion.map(str::to_string),
-            attempt_id: None,
-            attempt: None,
-            details_url: None,
             details: Some(details),
-            artifact_names: Vec::new(),
+            ..Check::default()
         }
     }
 }
@@ -205,6 +214,60 @@ impl Ci {
             details_url: Some(self.job_url(&a.repo_path, &a.id)),
             details: a.details.clone(),
             artifact_names: a.artifacts.iter().map(|x| x.name.clone()).collect(),
+            started_at: a.started_at.clone(),
+            finished_at: a.finished_at.clone(),
+            expected_secs: None,
+        }
+    }
+
+    /// Fills `expected_secs` of the running attempts among `checks` of `sha`:
+    /// how long the same job last took where it succeeded on the commit or
+    /// the nearest of its first-parent ancestors (`ESTIMATE_DEPTH` commits in
+    /// all). Without one (or when Git cannot say), the checks have none.
+    pub async fn estimate(&self, repo: &Repo, sha: &str, checks: &mut [Check]) {
+        let running = |c: &Check| c.recorded() && c.status == "in_progress";
+        if !checks.iter().any(running) {
+            return;
+        }
+        let dir = self.inner.git.repo_dir(&repo.path);
+        let depth = format!("--max-count={ESTIMATE_DEPTH}");
+        let ancestors = match self
+            .inner
+            .git
+            .run_ok(Some(&dir), &["rev-list", "--first-parent", &depth, sha])
+            .await
+        {
+            Ok(out) => out.lines().map(str::to_string).collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::warn!("CI: cannot list the ancestors of {sha} for estimates: {e}");
+                return;
+            }
+        };
+        let id = repo.id.clone();
+        let took = self
+            .inner
+            .store
+            .read(move |r| {
+                let mut took = BTreeMap::new();
+                for sha in &ancestors {
+                    for a in queue::attempts_of(r, &id, sha)?.into_iter().rev() {
+                        if a.conclusion.as_deref() == Some("success")
+                            && let Some(secs) = queue::duration_secs(&a)
+                        {
+                            took.entry(a.job.name).or_insert(secs);
+                        }
+                    }
+                }
+                Ok(took)
+            })
+            .await;
+        match took {
+            Ok(took) => {
+                for c in checks.iter_mut().filter(|c| running(c)) {
+                    c.expected_secs = took.get(&c.name).copied();
+                }
+            }
+            Err(e) => tracing::warn!("CI: cannot read the attempts for estimates: {e}"),
         }
     }
 

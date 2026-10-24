@@ -350,6 +350,10 @@ export interface Check {
   details_url?: string;
   details?: string;
   artifact_names?: string[];
+  started_at?: string;
+  finished_at?: string;
+  /** For an unfinished check: how long the job took where it last succeeded before. */
+  expected_secs?: number;
 }
 
 /** The checks of one commit (docs/api.md, "Checks"). */
