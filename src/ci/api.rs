@@ -49,6 +49,7 @@ pub struct AttemptView {
     pub attempt: u64,
     pub sha: String,
     pub image_digest: Option<String>,
+    pub reused_from: Option<super::ReusedFrom>,
     pub status: String,
     pub conclusion: Option<String>,
     pub details: Option<String>,
@@ -60,8 +61,13 @@ pub struct AttemptView {
     pub log_bytes: u64,
 }
 
-async fn view(app: &Shared, a: &Attempt) -> AttemptView {
-    AttemptView {
+async fn view(app: &Shared, a: &Attempt) -> AppResult<AttemptView> {
+    let own = a.clone();
+    let source = app
+        .store
+        .read(move |r| queue::result_attempt(r, &own))
+        .await?;
+    Ok(AttemptView {
         id: a.id.clone(),
         url: format!("{}/{}/-/jobs/{}", app.base_url, a.repo_path, a.id),
         repository: a.repo_path.clone(),
@@ -69,6 +75,7 @@ async fn view(app: &Shared, a: &Attempt) -> AttemptView {
         attempt: a.number,
         sha: a.sha.clone(),
         image_digest: a.image_digest.clone(),
+        reused_from: app.ci.reused_from(a, &source),
         status: a.status.clone(),
         conclusion: a.conclusion.clone(),
         details: a.details.clone(),
@@ -76,9 +83,13 @@ async fn view(app: &Shared, a: &Attempt) -> AttemptView {
         created_at: a.created_at.clone(),
         started_at: a.started_at.clone(),
         finished_at: a.finished_at.clone(),
-        artifact_names: a.artifacts.iter().map(|x| x.name.clone()).collect(),
+        artifact_names: if source.files_pruned {
+            Vec::new()
+        } else {
+            source.artifacts.iter().map(|x| x.name.clone()).collect()
+        },
         log_bytes: app.ci.log_size(&a.id).await,
-    }
+    })
 }
 
 // ---------------------------------------------------------------- member endpoints
@@ -111,7 +122,7 @@ async fn job_get(
     Path((repo, id)): Path<(String, String)>,
 ) -> R {
     let (_, a) = attempt_of(&app, &c, &repo, &id).await?;
-    Ok(ok(view(&app, &a).await))
+    Ok(ok(view(&app, &a).await?))
 }
 
 async fn job_log(
@@ -155,7 +166,7 @@ async fn job_retry(
         .write(move |w| queue::retry(w, &id, queue_max, &now))
         .await?;
     app.events.publish("check", &repo.path, new.sha.clone());
-    Ok(ok(view(&app, &new).await))
+    Ok(ok(view(&app, &new).await?))
 }
 
 async fn job_cancel(
@@ -170,7 +181,7 @@ async fn job_cancel(
         .write(move |w| queue::cancel(w, &id, &who, &now))
         .await?;
     app.events.publish("check", &repo.path, new.sha.clone());
-    Ok(ok(view(&app, &new).await))
+    Ok(ok(view(&app, &new).await?))
 }
 
 async fn artifact_get(
@@ -288,6 +299,7 @@ pub struct ClaimView {
     pub network: bool,
     /// How long the attempt waited in the queue, in seconds.
     pub queued_secs: u64,
+    pub reuse: Option<queue::Reuse>,
 }
 
 async fn claim(State(app): State<Shared>, c: Caller, body: axum::body::Bytes) -> R {
@@ -340,6 +352,7 @@ async fn claim(State(app): State<Shared>, c: Caller, body: axum::body::Bytes) ->
         network: a.network,
         queued_secs: chrono::DateTime::parse_from_rfc3339(&a.created_at)
             .map_or(0, |t| (now - t.to_utc()).num_seconds().max(0) as u64),
+        reuse: cl.reuse,
     }))
 }
 
@@ -610,6 +623,8 @@ struct FinishInput {
     details: Option<String>,
     #[serde(default)]
     image_digest: Option<String>,
+    reused_from: Option<String>,
+    cache_key: Option<String>,
 }
 
 async fn finish(
@@ -635,13 +650,17 @@ async fn finish(
                 &input.lease,
                 &input.conclusion,
                 input.details,
-                input.image_digest,
+                queue::ResultInfo {
+                    image_digest: input.image_digest,
+                    reused_from: input.reused_from,
+                    cache_key: input.cache_key,
+                },
                 &now,
             )
         })
         .await?;
     app.events.publish("check", &a.repo_path, a.sha.clone());
-    Ok(ok(view(&app, &a).await))
+    Ok(ok(view(&app, &a).await?))
 }
 
 /// The CI routes, merged into `/api/v1`.

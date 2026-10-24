@@ -581,25 +581,27 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
     txn.commit().unwrap();
 }
 
-/// Makes the database file `db` (the service stopped) look as schema
-/// version 13 wrote it: no repository says whether it lands by itself, no
-/// published pull request whether Branvil published it or when the webhook
-/// was told, and a pending merge names who merged it.
-pub fn as_schema_13(db: &Path) {
-    edit_records(db, "repos", |r| {
-        assert!(r.as_object_mut().unwrap().remove("auto_land").is_some());
+/// Recreates schema 14 CI records in a stopped database.
+pub fn as_schema_14(db: &Path) {
+    edit_records(db, "ci_runs", |r| {
+        assert!(r.as_object_mut().unwrap().remove("tree").is_some());
     });
-    edit_records(db, "pulls", |p| {
-        if let Some(x) = p["upstream"].as_object_mut() {
-            assert!(x.remove("auto").is_some() && x.remove("notified_at").is_some());
+    edit_records(db, "ci_attempts", |a| {
+        let a = a.as_object_mut().unwrap();
+        for field in ["reused_from", "cache_key", "allow_reuse"] {
+            assert!(a.remove(field).is_some());
         }
     });
-    edit_records(db, "ref_journal", |e| e["op"]["merged_by"] = json!("alice"));
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(13);
+            *v = json!(14);
         }
     });
+    let database = redb::Database::open(db).unwrap();
+    let txn = database.begin_write().unwrap();
+    txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new("ix_ci_tree"))
+        .unwrap();
+    txn.commit().unwrap();
 }
 
 /// Every table of a database, by name, as raw keys and values.

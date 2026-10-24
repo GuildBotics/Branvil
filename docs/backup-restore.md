@@ -188,11 +188,15 @@ new data directory; when the upgrade fails, the restored directory is left
 at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
 it once the cause is fixed).
 
-Version 13 → 14 (`src/upgrade.rs`): a repository says whether it lands its
-pull requests by itself, and a published pull request whether Branvil
-published it and when the webhook was told. Every repository lands none by
-itself, every published pull request was the owner's and told nobody, and a
-pending merge no longer names who merged it. Nothing else changes.
+Version 14 → 15 (`src/upgrade.rs`): every CI run records its commit's tree,
+read from the restored or existing Git repository. A commit that is already
+missing leaves the tree unset and supplies no reusable results; a Git error
+stops the upgrade before writing. Every attempt gets empty reuse-source and
+cache-key fields. Existing attempts execute once if still unfinished, since
+the old format did not distinguish manual retries; existing successes can
+still supply results to new attempts. All indexes, including the new
+repository/tree/commit index, are rebuilt from the records. Existing
+conclusions, logs, and artifacts stay as they were.
 
 ### The service run by scripts/serve.sh
 

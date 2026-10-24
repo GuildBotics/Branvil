@@ -56,6 +56,7 @@ from guildbotics.runtime.ticket_service import TicketService
 OWNER = "alice"
 MEMBER = "aiko"
 RUNNER = "runner1"
+DIGEST = "sha256:" + "2" * 64
 SCOPE = "acme"
 REPO = f"{SCOPE}/demo"
 PIPELINE = """[[jobs]]
@@ -259,7 +260,7 @@ class World:
                 "POST",
                 f"/runner/attempts/{attempt['attempt_id']}/finish",
                 self.runner,
-                {"lease": attempt["lease"], "conclusion": "success"},
+                {"lease": attempt["lease"], "conclusion": "success", "image_digest": DIGEST},
             )
             if attempt["sha"] == sha:
                 return
@@ -496,5 +497,38 @@ def test_checks_decide_readiness_of_the_current_head(world: World) -> None:
             "pending",
             "blocked",
         )
+
+    world.run(scenario)
+
+
+def test_a_reused_result_is_ready_through_the_provider(world: World) -> None:
+    async def scenario(code: CodeHostingService, _: TicketService) -> None:
+        world.finish_job(world.main)
+        world.git.run("commit", "-q", "--allow-empty", "-m", "same tree")
+        head = world.git.run("rev-parse", "HEAD")
+        credential = await code.git_credential()
+        assert credential is not None
+        world.git.push(await code.clone_url(REPO), head, "same", credential.username, credential.password)
+        created = await code.create_pull_request(
+            REPO, "same", "", "Same tree", "", draft=False, tickets=[]
+        )
+        response = world.service.http.post(
+            "/runner/claim",
+            json={"executor": "microsandbox", "executor_state": "ready"},
+            headers={"Authorization": f"Bearer {world.runner}"},
+        )
+        assert response.status_code == httpx.codes.OK
+        attempt = response.json()
+        source = attempt["reuse"]
+        assert source["sha"] == world.main and source["image_digest"] == DIGEST
+        world.service.call(
+            "POST", f"/runner/attempts/{attempt['attempt_id']}/finish", world.runner,
+            {"lease": attempt["lease"], "conclusion": "success", "image_digest": DIGEST,
+             "reused_from": source["attempt_id"],
+             "details": f"Reused the result of {source['attempt_id']} ({world.main}, the same tree)."},
+        )
+        ready = await code.readiness(created.target.url)
+        assert (ready.head_sha, ready.rollup, ready.readiness) == (head, "success", "ready")
+        assert len(ready.checks) == 1
 
     world.run(scenario)

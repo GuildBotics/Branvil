@@ -51,7 +51,7 @@ closure returns `Ok` and aborts otherwise.
 
 ## Schema version
 
-`meta["schema_version"]` is written on creation (currently `14`: members are
+`meta["schema_version"]` is written on creation (currently `15`: members are
 the owner, agents, and runners, whose kind alone decides what they may do, and
 have accounts on upstream hosts, each a token or an app, and the members asked to review the pull requests they open; a ticket has at most one assignee and may name
 an upstream issue, a parent, and tickets it is blocked by; tickets belong to repositories, which hold their labels, the approvals a merge needs, and whether they land
@@ -60,7 +60,7 @@ may have an upstream; repositories belong to workspaces, each with one board,
 on which every ticket is in a lane;
 a pull request may be published upstream (by the owner or by Branvil, which
 tells the webhook once); a CI run holds its commit's own
-pipeline). A database of any other version is refused at open. One of the
+pipeline and tree, and attempts record reuse sources and cache keys). A database of any other version is refused at open. One of the
 previous version is upgraded by `branvil admin upgrade` or `branvil restore`
 (`src/upgrade.rs`, the only code that reads the previous shapes; it is
 replaced when the version is raised again), which first keeps a copy of the
@@ -90,8 +90,8 @@ not change the stored format of any record or raise the version.
 | `ref_snapshots` | `(repo id, refname)` | last recorded object | `refs::record_refs` | push recording, startup rescan |
 | `ref_journal` | `(journal id)` | repo, ref, expected old/new, operation | merge (before `update-ref`) | completion, startup recovery |
 | `idempotency` | `(fold(member), key)` | request hash, status, response body, time | API middleware | API middleware |
-| `ci_runs` | `(repo id, sha)` | branches that want CI of the commit, the commit's pipeline (absent / invalid + message / job definitions), cache scope, waiting, superseded by | ref recording (`Ci::on_ref_changes`), PR open/reopen, reconciler, queue admission | checks, claims, retries |
-| `ci_attempts` | `(attempt id)` | job definition (snapshot), the configuration digest of the image it ran on, number, queue sequence, status, conclusion, details, SHA-256 of the lease, lease expiry, cancel requested, runner, cache scope, network, times, interrupted/superseded flags, artifact names and sizes, files pruned | registration, claim, heartbeat, finish, cancel, retry, sweeps | checks, job API, runner API, artifacts |
+| `ci_runs` | `(repo id, sha)` | branches that want CI of the commit, tree (unset only for upgraded runs with missing commits), the commit's pipeline (absent / invalid + message / job definitions), cache scope, waiting, superseded by | ref recording (`Ci::on_ref_changes`), PR open/reopen, reconciler, queue admission | checks, claims, retries |
+| `ci_attempts` | `(attempt id)` | job definition (snapshot), image configuration digest, actual source attempt if reused, cache key of an actual execution, reuse permission (manual retries execute), number, queue sequence, status, conclusion, details, SHA-256 of the lease, lease expiry, cancel requested, runner, cache scope, network, times, interrupted/superseded flags, artifact names and sizes, files pruned | registration, claim, heartbeat, finish, cancel, retry, sweeps | checks, job API, runner API, artifacts |
 
 Each comment, review, and inline comment is its own record, so adding one never
 rewrites a history; a reaction rewrites only its target entry.
@@ -121,6 +121,7 @@ Every index entry of a record comes from one function in `src/model.rs`
 | `ix_ci_pending` | `(queue sequence)` → attempt id, queued attempts only | claim (oldest first), queue length and bound, no-runner sweep |
 | `ix_ci_active` | `(attempt id)`, in-progress attempts only | lease-expiry sweep (also the orphans found after a restart) |
 | `ix_ci_waiting` | `(run sequence)` → run key, runs that did not fit the queue | admission in order when room frees up |
+| `ix_ci_tree` | `(repo id, tree, sha)` → run key, runs with a known tree | finding successful actual executions with the same tree at claim |
 
 Cards read only the requested lanes' ranges of one workspace's `ix_cards` (the
 `done` lane keeps every finished ticket, and candidates ask for `ready` and

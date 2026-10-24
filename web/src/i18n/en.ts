@@ -211,6 +211,7 @@ export const en = {
   "ci.showLog": "Show log",
   "ci.hideLog": "Hide log",
   "ci.reason": "Reason",
+  "ci.reused": "Reused result",
   "ci.log": "Log",
   "ci.tailSize": "Show the last",
   "ci.truncated": "Showing the last {shown} of {total} bytes.",

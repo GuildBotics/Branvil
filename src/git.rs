@@ -50,7 +50,14 @@ impl Output {
 /// and `~/.config/git` is not read. Shared with Smart HTTP, the runner API,
 /// and the runner.
 pub fn base_command(global_config: &Path) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = tokio::process::Command::from(base_command_sync(global_config));
+    cmd.kill_on_drop(true);
+    cmd
+}
+
+/// The same isolated Git environment for offline synchronous upgrades.
+pub fn base_command_sync(global_config: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             cmd.env_remove(&key);
@@ -62,8 +69,7 @@ pub fn base_command(global_config: &Path) -> tokio::process::Command {
         .env("XDG_CONFIG_HOME", global_config)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+        .stdin(Stdio::null());
     cmd
 }
 

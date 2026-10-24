@@ -7,7 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::ci::pipeline::{ArtifactDef, CacheDef, JobDef, check_relative};
 
@@ -253,6 +253,8 @@ fn tree_size(path: &Path) -> u64 {
 }
 
 const USED: &str = ".branvil-used";
+const SAVED: &str = ".branvil-saved";
+pub const CACHE_REFRESH_SECS: u64 = 24 * 60 * 60;
 
 fn record_use(entry: &Path, used: SystemTime) -> io::Result<()> {
     fs::File::create(entry.join(USED))?.set_modified(used)
@@ -289,6 +291,16 @@ pub struct Cache {
 }
 
 impl Cache {
+    /// Age of the last complete save, independent of reads. Older entries
+    /// without a save marker need a fresh execution before they can be reused.
+    pub fn saved_age(&self, key: &str, now: SystemTime) -> io::Result<Option<Duration>> {
+        let _reading = self.lock.read().unwrap_or_else(|e| e.into_inner());
+        match fs::metadata(self.root.join(key).join(SAVED)) {
+            Ok(meta) => Ok(now.duration_since(meta.modified()?).ok()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -351,7 +363,9 @@ impl Cache {
                 }
             }
             fs::create_dir_all(&tmp)?;
-            record_use(&tmp, now())?;
+            let saved_at = now();
+            record_use(&tmp, saved_at)?;
+            fs::File::create(tmp.join(SAVED))?.set_modified(saved_at)?;
             let _writing = self.lock.write().unwrap_or_else(|e| e.into_inner());
             let entry = self.root.join(key);
             let _ = fs::remove_dir_all(&entry);
@@ -395,6 +409,52 @@ fn evict(cache_root: &Path, max_bytes: u64, saved_entry: &Path) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_save_age_tracks_complete_saves_and_survives_restore_and_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("cache"));
+        let work = dir.path().join("work");
+        fs::create_dir_all(work.join("target")).unwrap();
+        fs::write(work.join("target/file"), "content").unwrap();
+        let def = CacheDef {
+            paths: vec!["target".into()],
+            key_files: vec![],
+        };
+        let saved = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(cache.saved_age("k", saved).unwrap(), None);
+        cache
+            .save_with_clock("k", &def, &work, 1 << 20, || saved)
+            .unwrap();
+        let now = saved + Duration::from_secs(CACHE_REFRESH_SECS);
+        assert_eq!(
+            cache.saved_age("k", now).unwrap(),
+            Some(Duration::from_secs(CACHE_REFRESH_SECS))
+        );
+        let restored = dir.path().join("restored");
+        fs::create_dir(&restored).unwrap();
+        cache.restore("k", &def, &restored).unwrap();
+        assert_eq!(
+            cache.saved_age("k", now).unwrap(),
+            Some(Duration::from_secs(CACHE_REFRESH_SECS))
+        );
+        assert_eq!(
+            cache
+                .saved_age("k", saved - Duration::from_secs(1))
+                .unwrap(),
+            None,
+            "a future timestamp is not a fresh save"
+        );
+        // A cache written before save timestamps were recorded needs a new save.
+        fs::remove_file(cache.root.join("k").join(SAVED)).unwrap();
+        assert_eq!(cache.saved_age("k", now).unwrap(), None);
+        cache.save_with_clock("k", &def, &work, 0, || now).unwrap();
+        assert_eq!(
+            cache.saved_age("k", now).unwrap(),
+            None,
+            "evicted entries have no save"
+        );
+    }
 
     /// The machine's Git attributes never change the checkout. Git finds
     /// them through the environment, so the checkout runs in a child test

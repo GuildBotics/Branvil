@@ -13,6 +13,168 @@ const IMAGE: &str = "docker.io/library/alpine:3.22";
 /// The configuration digest the scripted runner reports for the image.
 const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
+#[tokio::test]
+async fn schema_14_ci_records_upgrade_with_trees_missing_commits_and_rebuilt_indexes() {
+    let mut w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    let sha = land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test"]))],
+        None,
+    )
+    .await;
+    assert_eq!(runner.drain("success").await, 1);
+    let attempts = w
+        .server
+        .ok(&format!("{}/commits/{sha}/checks", w.repo_path()), &w.owner)
+        .await;
+    let id = attempts["checks"][0]["attempt_id"].as_str().unwrap();
+    let (status, result) = w
+        .server
+        .post(
+            &format!("{}/jobs/{id}/retry", w.repo_path()),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "{result}");
+    w.server.stop();
+    let data = w.server.data.clone();
+    let db = data.join("branvil.redb");
+    as_schema_14(&db);
+    // An old run whose commit was already pruned stays readable, without a tree.
+    let mut lost = records(&db, "ci_runs")[0].clone();
+    lost["sha"] = json!("f".repeat(40));
+    lost["seq"] = json!(100_000);
+    let mut key = lost["repo"].as_str().unwrap().as_bytes().to_vec();
+    key.extend_from_slice(&[0, 1]);
+    key.extend_from_slice(lost["sha"].as_str().unwrap().as_bytes());
+    key.extend_from_slice(&[0, 1]);
+    {
+        let database = redb::Database::open(&db).unwrap();
+        let txn = database.begin_write().unwrap();
+        {
+            let mut table = txn
+                .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("ci_runs"))
+                .unwrap();
+            table
+                .insert(
+                    key.as_slice(),
+                    serde_json::to_vec(&lost).unwrap().as_slice(),
+                )
+                .unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let admin = |what: &str| {
+        let out = std::process::Command::new(BIN)
+            .args(["admin", what, "--data-dir"])
+            .arg(&data)
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    assert!(admin("check").1.contains("branvil admin upgrade"));
+    let old_attempts = records(&db, "ci_attempts");
+    edit_records(&db, "ci_attempts", |a| a["job"] = json!("broken"));
+    let broken = tables(&db);
+    let failed = admin("upgrade");
+    assert_eq!(failed.0, 1, "{}", failed.1);
+    assert_eq!(tables(&db), broken, "decoding failure writes nothing");
+    edit_records(&db, "ci_attempts", |a| {
+        a["job"] = old_attempts
+            .iter()
+            .find(|old| old["id"] == a["id"])
+            .unwrap()["job"]
+            .clone()
+    });
+    let before = tables(&db);
+    // A missing repository is an operational failure, not a missing commit.
+    let bare = data.join("repos").join(format!("{REPO}.git"));
+    let moved = data.join("temporarily-moved.git");
+    std::fs::rename(&bare, &moved).unwrap();
+    let failed = admin("upgrade");
+    assert_eq!(failed.0, 1, "{}", failed.1);
+    std::fs::rename(&moved, &bare).unwrap();
+    assert_eq!(tables(&db), before);
+    // An unreadable/corrupt object is not an absent object, even when quiet
+    // rev-parse reports the same exit status for failed verification.
+    let corrupt = bare.join("objects/ff").join("f".repeat(38));
+    std::fs::create_dir_all(corrupt.parent().unwrap()).unwrap();
+    std::fs::write(&corrupt, "not a compressed git object").unwrap();
+    let failed = admin("upgrade");
+    assert_eq!(failed.0, 1, "{}", failed.1);
+    assert_eq!(tables(&db), before);
+    std::fs::remove_file(corrupt).unwrap();
+    assert!(!std::fs::read_dir(&data).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("branvil-schema-")
+    }));
+    let (code, output) = admin("upgrade");
+    assert_eq!(code, 3, "{output}");
+    assert!(
+        output.contains("from schema version 14 to 15")
+            && output.contains("1 run(s) have no surviving commit"),
+        "{output}"
+    );
+    let copy = std::fs::read_dir(&data)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("branvil-schema-14-")
+        })
+        .unwrap();
+    assert_eq!(tables(&copy), before);
+    let runs = records(&db, "ci_runs");
+    let tree = git_ok(&w.work, &["rev-parse", &format!("{sha}^{{tree}}")]);
+    assert_eq!(runs.iter().find(|r| r["sha"] == sha).unwrap()["tree"], tree);
+    assert!(runs.iter().find(|r| r["sha"] == lost["sha"]).unwrap()["tree"].is_null());
+    for a in records(&db, "ci_attempts") {
+        assert!(a["reused_from"].is_null() && a["cache_key"].is_null());
+        assert_eq!(a["allow_reuse"], false);
+        let mut old_shape = a.clone();
+        for field in ["reused_from", "cache_key", "allow_reuse"] {
+            old_shape.as_object_mut().unwrap().remove(field);
+        }
+        assert!(old_attempts.contains(&old_shape));
+    }
+    assert_eq!(
+        tables(&db)["ix_ci_tree"].len(),
+        runs.iter().filter(|r| r["tree"].is_string()).count()
+    );
+    assert_eq!(admin("upgrade").0, 3, "check is still required");
+    let (code, output) = admin("check");
+    assert_eq!(code, 0, "{output}");
+    assert!(output.contains("indexes: ok"), "{output}");
+    let upgraded = tables(&db);
+    assert_eq!(admin("upgrade").0, 0);
+    assert_eq!(tables(&db), upgraded);
+    w.restart(&[]);
+    let runner = Runner {
+        url: w.server.url.clone(),
+        ..runner
+    };
+    let claimed = runner.claim().await.unwrap();
+    assert!(
+        claimed["reuse"].is_null(),
+        "the pre-upgrade manual retry must execute"
+    );
+    assert_eq!(runner.finish(&claimed, "success").await.0, 200);
+}
+
 pub(crate) fn pipeline(jobs: &[&str]) -> String {
     let mut s = String::new();
     for j in jobs {
@@ -21,6 +183,57 @@ pub(crate) fn pipeline(jobs: &[&str]) -> String {
         ));
     }
     s
+}
+
+#[tokio::test]
+async fn a_reused_success_counts_for_required_checks_and_not_for_duration_estimates() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test"]))],
+        None,
+    )
+    .await;
+    let source = runner.claim().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_eq!(runner.finish(&source, "success").await.0, 200);
+    set_required(&w, &["test"]).await;
+    sync_main(&w);
+    git_ok(&w.work, &["checkout", "-qb", "same"]);
+    git_ok(&w.work, &["commit", "--allow-empty", "-qm", "same tree"]);
+    git_as_ok(&w.work, "aiko", &w.aiko, &["push", "-q", "origin", "same"]);
+    let p = w.open_pull("same", json!([])).await;
+    let number = p["number"].as_u64().unwrap();
+    let c = runner.claim().await.unwrap();
+    assert_eq!(c["reuse"]["attempt_id"], source["attempt_id"]);
+    let (status, result) = runner.post(&c, "finish", json!({"lease": c["lease"], "conclusion": "success", "image_digest": DIGEST, "reused_from": source["attempt_id"]})).await;
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["reused_from"]["sha"], source["sha"]);
+    assert_eq!(
+        check(&checks(&w, number).await, "test")["conclusion"],
+        "success"
+    );
+    let (status, result) = w
+        .server
+        .post(
+            &format!("{}/pulls/{number}/merge", w.repo_path()),
+            &w.owner,
+            json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
+        )
+        .await;
+    assert_eq!(status, 200, "{result}");
+    sync_main(&w);
+    w.push_change("next", "next.txt", "next\n");
+    let next = w.open_pull("next", json!([])).await;
+    runner.claim().await.unwrap();
+    let checks = checks(&w, next["number"].as_u64().unwrap()).await;
+    let took = check(&checks, "test")["expected_secs"].as_u64().unwrap();
+    assert!(
+        took >= 1,
+        "reuse's sub-second duration must not replace the actual duration: {checks}"
+    );
 }
 
 /// A scripted runner talking to the runner API.

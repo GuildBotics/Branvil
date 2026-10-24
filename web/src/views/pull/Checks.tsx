@@ -209,6 +209,13 @@ function CheckRow({ check, repo, required, onOpen }: { check: Check; repo: strin
           {t("ci.reason")}: {reason}
         </Text>
       )}
+      {check.reused_from && (
+        <Text size="xs" ml={24} mb={4}>
+          <Link to={href.job(repo, check.reused_from.attempt_id)}>
+            {t("ci.reused")} · <Sha value={check.reused_from.sha} />
+          </Link>
+        </Text>
+      )}
     </>
   );
 }
@@ -283,6 +290,16 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
         <dd>{j.finished_at ? <Time value={j.finished_at} /> : "—"}</dd>
         <dt>{t("ci.duration")}</dt>
         <dd>{j.started_at ? <RunTime startedAt={j.started_at} finishedAt={j.finished_at} /> : "—"}</dd>
+        {j.reused_from && (
+          <>
+            <dt>{t("ci.reused")}</dt>
+            <dd>
+              <Link to={href.job(repo, j.reused_from.attempt_id)}>
+                {j.reused_from.attempt_id} · <Sha value={j.reused_from.sha} />
+              </Link>
+            </dd>
+          </>
+        )}
         {j.details && (
           <>
             <dt>{t("ci.reason")}</dt>
