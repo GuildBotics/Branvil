@@ -16,6 +16,7 @@ import { routeOfUrl } from "../../router/routes";
 export function Tickets({ pull }: { pull: PullRequest }) {
   const t = useT();
   const [editing, setEditing] = useState(false);
+  if (pull.state !== "open" && pull.tickets.length === 0) return null;
   const label = (url: string) => {
     const route = routeOfUrl(url, new URL(pull.url).origin);
     return route?.name === "ticket" ? ticketRef({ repository: route.repo, key: route.key }) : url;
@@ -71,6 +72,7 @@ function TicketsEditor({ pull, label, onDone }: { pull: PullRequest; label: (url
     <form aria-label={t("pull.editTickets")} onSubmit={(e) => { e.preventDefault(); if (!save.isPending && !conflict) save.mutate(); }}>
       <Stack gap="sm">
         {form.tickets.map((tk) => {
+          const title = cards.data?.items.find((c) => c.url === tk.url)?.title;
           const route = routeOfUrl(tk.url, new URL(pull.url).origin);
           // Only canonical service URLs name local tickets to the API; browser
           // loopback aliases are useful for navigation but remain references.
@@ -78,7 +80,7 @@ function TicketsEditor({ pull, label, onDone }: { pull: PullRequest; label: (url
           const canClose = tk.url.startsWith(prefix) && route?.name === "ticket" && route.repo === pull.repository;
           return (
             <Group key={tk.url} role="group" aria-label={label(tk.url)} justify="space-between">
-              <ServiceLink url={tk.url}>{label(tk.url)}</ServiceLink>
+              <ServiceLink url={tk.url}>{label(tk.url)}{title && ` ${title}`}</ServiceLink>
               <Group gap="xs">
                 <Checkbox
                   label={t("pull.closeOnMerge")}
@@ -103,7 +105,7 @@ function TicketsEditor({ pull, label, onDone }: { pull: PullRequest; label: (url
             label={t("pull.addTicket")}
             searchable
             value={null}
-            data={choices.map((c) => ({ value: c.url, label: `${ticketRef(c)} ${c.title}` }))}
+            data={choices.map((c) => ({ value: c.url, label: `${ticketRef(c)} ${c.title}${c.state === "closed" ? ` (${t("ticket.closed")})` : ""}` }))}
             disabled={save.isPending}
             nothingFoundMessage={t("pull.noTicketChoices")}
             onChange={(url) => { if (url) setForm({ ...form, tickets: [...form.tickets, { url, closes: false }] }); }}

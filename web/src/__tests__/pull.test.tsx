@@ -32,10 +32,13 @@ describe("related ticket editor", () => {
     renderApp("/acme/demo/-/pulls/3", language);
     await user.click(await screen.findByRole("button", { name: words["pull.editTickets"] }));
     const form = screen.getByRole("form", { name: words["pull.editTickets"] });
+    expect(await within(form).findByRole("link", { name: `acme/demo#1 ${removed.title}` })).toBeInTheDocument();
     await user.click(within(form).getByRole("button", { name: words["pull.removeTicket"].replace("{ticket}", "acme/demo#1") }));
     for (const c of [local, other]) {
       await user.click(await within(form).findByRole("combobox", { name: words["pull.addTicket"] }));
-      await user.click(await screen.findByRole("option", { name: `${c.repository}#${c.key} ${c.title}` }));
+      const name = `${c.repository}#${c.key} ${c.title}`;
+      await user.click(await screen.findByRole("option", { name: c.state === "closed" ? `${name} (${words["ticket.closed"]})` : name }));
+      expect(within(form).getByRole("link", { name })).toBeInTheDocument();
     }
     const localRow = within(form).getByRole("group", { name: "acme/demo#12" });
     await user.click(within(localRow).getByRole("checkbox", { name: words["pull.closeOnMerge"] }));
@@ -49,7 +52,8 @@ describe("related ticket editor", () => {
     expect(fake.calls("GET", "/api/v1/workspaces/acme/board/cards")[0]?.search).toContain("state=all");
   });
 
-  it("keeps the opened revision across events, explains a conflict, and reopens on the latest state", async () => {
+  it.each(["en", "ja"] as const)("keeps the opened revision across events, explains a conflict, and reopens on the latest state (%s)", async (language) => {
+    const words = dictionaries[language];
     const tk = card("12", "ready");
     const original = pull({ tickets: [{ url: tk.url, closes: false }], revision: 3 });
     const latest = pull({ tickets: [{ url: tk.url, closes: true }], revision: 4 });
@@ -59,19 +63,21 @@ describe("related ticket editor", () => {
       [`PATCH ${P}`]: apiError(409, "conflict", "Revision mismatch."),
     }));
     const user = userEvent.setup();
-    const { client } = renderApp("/acme/demo/-/pulls/3");
-    await user.click(await screen.findByRole("button", { name: dictionaries.en["pull.editTickets"] }));
+    const { client } = renderApp("/acme/demo/-/pulls/3", language);
+    await user.click(await screen.findByRole("button", { name: words["pull.editTickets"] }));
     applyChange({ kind: "pull", path: "acme/demo", id: "3" }, client);
     await waitFor(() => expect(client.getQueryData(["repo", "acme/demo", "pull", 3])).toMatchObject({ revision: 4 }));
-    const form = screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] });
+    const form = screen.getByRole("form", { name: words["pull.editTickets"] });
     expect(within(form).getByRole("checkbox")).not.toBeChecked();
-    await user.click(within(form).getByRole("button", { name: "Save" }));
-    expect(await within(form).findByRole("alert")).toHaveTextContent(dictionaries.en["pull.ticketsConflict"]);
+    await user.click(within(form).getByRole("button", { name: words["common.save"] }));
+    const alert = await within(form).findByRole("alert");
+    expect(alert).toHaveTextContent(language === "ja" ? "編集中の変更は破棄されます" : "Canceling discards your edits");
+    expect(alert).toHaveTextContent(language === "ja" ? "もう一度変更してください" : "reapply your changes");
     expect(fake.calls("PATCH", P)[0]?.body).toEqual({ tickets: original.tickets, revision: 3 });
-    expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
-    await user.click(within(form).getByRole("button", { name: "Cancel" }));
-    await user.click(screen.getByRole("button", { name: dictionaries.en["pull.editTickets"] }));
-    expect(within(screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] })).getByRole("checkbox")).toBeChecked();
+    expect(within(form).getByRole("button", { name: words["common.save"] })).toBeDisabled();
+    await user.click(within(form).getByRole("button", { name: words["common.cancel"] }));
+    await user.click(screen.getByRole("button", { name: words["pull.editTickets"] }));
+    expect(within(screen.getByRole("form", { name: words["pull.editTickets"] })).getByRole("checkbox")).toBeChecked();
   });
 
   it("can remove every link, including a foreign reference", async () => {
@@ -87,21 +93,25 @@ describe("related ticket editor", () => {
     await user.click(await screen.findByRole("button", { name: dictionaries.en["pull.editTickets"] }));
     const form = screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] });
     expect(within(form).getByRole("checkbox")).toBeDisabled();
+    expect(within(form).getByRole("link", { name: url })).toHaveAttribute("href", url);
     await user.click(within(form).getByRole("button", { name: `Remove ${url}` }));
     await user.click(within(form).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(fake.calls("PATCH", P)[0]?.body).toEqual({ tickets: [], revision: 1 }));
     expect(await screen.findByText(dictionaries.en["pull.noTickets"])).toBeInTheDocument();
   });
 
-  it("keeps a noncanonical loopback alias as a reference", async () => {
+  it.each(["en", "ja"] as const)("keeps a noncanonical loopback alias as a reference (%s)", async (language) => {
+    const words = dictionaries[language];
     fakeApi(pullRoutes({
       [`GET ${P}`]: json(200, pull({ url: "http://127.0.0.1:7878/acme/demo/-/pulls/3", tickets: [{ url: "http://localhost:7878/acme/demo/-/tickets/12", closes: false }] })),
       "GET /api/v1/workspaces/acme/board/cards": json(200, { items: [], next_cursor: null }),
     }));
     const user = userEvent.setup();
-    renderApp("/acme/demo/-/pulls/3");
-    await user.click(await screen.findByRole("button", { name: dictionaries.en["pull.editTickets"] }));
-    expect(within(screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] })).getByRole("checkbox")).toBeDisabled();
+    renderApp("/acme/demo/-/pulls/3", language);
+    await user.click(await screen.findByRole("button", { name: words["pull.editTickets"] }));
+    const form = screen.getByRole("form", { name: words["pull.editTickets"] });
+    expect(within(form).getByRole("checkbox")).toBeDisabled();
+    expect(within(form).getByText(language === "ja" ? "参照のみ（このリンクはマージで閉じられません）" : "Reference only (this link cannot be closed on merge)")).toBeInTheDocument();
   });
 
   it("waits for the conflict refresh before allowing the editor to reopen", async () => {
@@ -140,12 +150,22 @@ describe("related ticket editor", () => {
     expect(within(form).getByRole("button", { name: "Remove acme/demo#12" })).toBeEnabled();
   });
 
-  it.each([{ state: "closed" as const }, { state: "closed" as const, merged: true }])("hides editing for a closed PR ($merged)", async (state) => {
-    const fake = fakeApi(pullRoutes({ [`GET ${P}`]: json(200, pull(state)) }));
-    renderApp("/acme/demo/-/pulls/3");
-    await screen.findByRole("heading", { name: /Fix login/ });
-    expect(screen.queryByRole("button", { name: dictionaries.en["pull.editTickets"] })).not.toBeInTheDocument();
-    expect(fake.calls("GET", "/api/v1/workspaces/acme/board/cards")).toHaveLength(0);
+  describe.each(["en", "ja"] as const)("closed PR tickets (%s)", (language) => {
+    it.each([
+      { merged: false, linked: false }, { merged: false, linked: true },
+      { merged: true, linked: false }, { merged: true, linked: true },
+    ])("shows links but hides the empty section and editing (merged=$merged, linked=$linked)", async ({ merged, linked }) => {
+      const words = dictionaries[language];
+      const tk = card("12", "ready");
+      const fake = fakeApi(pullRoutes({ [`GET ${P}`]: json(200, pull({ state: "closed", merged, tickets: linked ? [{ url: tk.url, closes: false }] : [] })) }));
+      renderApp("/acme/demo/-/pulls/3", language);
+      await screen.findByRole("heading", { name: /Fix login/ });
+      expect(screen.queryByRole("button", { name: words["pull.editTickets"] })).not.toBeInTheDocument();
+      const section = screen.queryByRole("region", { name: words["pull.tickets"] });
+      if (linked) expect(within(section!).getByRole("link", { name: "acme/demo#12" })).toBeInTheDocument();
+      else expect(section).not.toBeInTheDocument();
+      expect(fake.calls("GET", "/api/v1/workspaces/acme/board/cards")).toHaveLength(0);
+    });
   });
 });
 

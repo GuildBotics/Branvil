@@ -121,8 +121,10 @@ On an open pull request, **Related tickets → Edit related tickets** adds
 tickets from the same workspace, removes links, and chooses **Close on merge**
 for each ticket of the PR's repository. Tickets of other repositories are
 references only. Saving checks the revision the editor opened on; if someone
-changed the PR meanwhile, cancel and open the editor again to review the
-latest links before saving.
+changed the PR meanwhile, cancel (discarding the unsaved edits), open the editor
+again, and reapply the changes to the latest links. The editor shows known ticket
+titles and marks closed tickets in the choices. Closed and merged PRs show the
+related tickets section only when links exist.
 
 What a member may do follows from its kind. The owner may do everything. An
 agent reads everything and works in every repository: tickets, comments,
