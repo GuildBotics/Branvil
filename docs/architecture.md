@@ -518,7 +518,10 @@ of a card of its own lane a card is put there on the board; a ticket added
 from the header is new, one added from a card's menu as its parent, child, or
 next ticket ready, and either is scrolled to once shown;
 `web/src/views/relations/`), a ticket (body and comments, its lane, labels,
-upstream issue, relations to other tickets, and assignee), a pull request (body, conversation,
+upstream issue, relations to other tickets, and assignee; from the board and
+the task flow it opens in a drawer over them, whose URL stays, with a button
+that copies the ticket's URL, and a ticket linked from the drawer replaces
+it), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
 settings (the shown workspace with its repositories, and Branvil's members, CI,
 and notifications).
