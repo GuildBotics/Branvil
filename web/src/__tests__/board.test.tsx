@@ -214,7 +214,10 @@ describe("kanban board", () => {
 
     await user.click(screen.getByRole("button", { name: "Actions of acme/demo#1" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual(["New", "Ready", "In progress", "Done", "Up", "Down"]);
+    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual(["New", "Ready", "In progress", "Done", "Up", "Down", "Copy URL"]);
+
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy URL" }));
+    expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}/acme/demo/-/tickets/1`);
   });
 
   it("moves a card to another lane from its menu (no drag needed)", async () => {
@@ -288,7 +291,7 @@ describe("kanban board", () => {
     expect(within(lane(/^Done/)).queryByText("Title of 1")).not.toBeInTheDocument();
   });
 
-  it("marks a card blocked by an open ticket and counts its closed children, and says why a start is refused", async () => {
+  it("marks a card blocked by an open ticket, shows no count of its children, and says why a start is refused", async () => {
     const ref = (key: string, state: "open" | "closed") => ({ ...card(key, "new"), state, state_reason: null });
     fakeApi(
       boardRoutes({
@@ -306,10 +309,9 @@ describe("kanban board", () => {
     renderApp("/acme");
     const one = await screen.findByRole("article", { name: "acme/demo#1 Title of 1" });
     expect(within(one).getByText("Blocked")).toBeInTheDocument();
-    expect(within(one).getByText("Children 1/2")).toBeInTheDocument();
+    expect(within(one).queryByText(/Children/)).not.toBeInTheDocument();
     const five = screen.getByRole("article", { name: "acme/demo#5 Title of 5" });
     expect(within(five).queryByText("Blocked")).not.toBeInTheDocument();
-    expect(within(five).queryByText(/Children/)).not.toBeInTheDocument();
 
     await pickFromMenu(user, "Actions of acme/demo#1", "In progress");
     expect(await screen.findByRole("alert")).toHaveTextContent(

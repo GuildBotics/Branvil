@@ -1,6 +1,6 @@
 import { ActionIcon, Badge, Menu, Text, Tooltip } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, Ellipsis, GitPullRequest } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, Ellipsis, GitPullRequest } from "lucide-react";
 import { memo, useState, type ReactElement, type ReactNode } from "react";
 import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
@@ -113,8 +113,15 @@ export function LaneButton({ card, lanes, onLane, disabled }: { card: Card; lane
   );
 }
 
-const childrenText = (card: Card, t: Translate) =>
-  t("board.children", { closed: card.children.filter((c) => c.state === "closed").length, total: card.children.length });
+/** A menu item that copies the ticket's own URL. */
+export function CopyUrlItem({ url }: { url: string }) {
+  const t = useT();
+  return (
+    <Menu.Item leftSection={<Copy size={14} />} onClick={() => void navigator.clipboard.writeText(url).catch(() => {})}>
+      {t("board.copyUrl")}
+    </Menu.Item>
+  );
+}
 
 /** Opens or closes a card's children (or the frame of new tickets'). */
 export function ChildrenToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
@@ -175,11 +182,6 @@ export function CardView({
         {lane}
         {card.state === "closed" && <StateBadge>{t("ticket.closed")}</StateBadge>}
         {card.state === "open" && card.blocked_by.some((b) => b.state === "open") && <StateBadge tone="warning">{t("board.blocked")}</StateBadge>}
-        {card.children.length > 0 && (
-          <Text span size="xs" c="dimmed">
-            {childrenText(card, t)}
-          </Text>
-        )}
         {busy && (
           <Text span size="xs" c="dimmed">
             {t("board.moving")}
@@ -285,6 +287,8 @@ function CardMenu({
         >
           {t("board.down")}
         </Menu.Item>
+        <Menu.Divider />
+        <CopyUrlItem url={card.url} />
       </LazyMenu>
     </div>
   );
