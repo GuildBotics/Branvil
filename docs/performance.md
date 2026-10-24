@@ -169,7 +169,8 @@ What these numbers show (on this machine, with this fixture):
   keyed creates reach about half the rate (≈ 80/s).
 - **Pull request paths are bounded by Git processes.** A PR read starts
   `git for-each-ref` (branch tips) and, once per range, `git diff` (changed
-  files, cached in memory afterwards); checks add `git rev-list --count`. At 32
+  files, cached in memory afterwards); checks add `git rev-list --count`, and
+  while a job runs `git rev-list --first-parent` (its estimate). At 32
   clients these wait for the 8 Git command slots: `readiness` went from 32 ms
   (1 client) to 157 ms (32), and its requests from 6.5 ms to 32 ms.
   `pr_create` (48 ms alone) is mostly Git: the head is resolved and the

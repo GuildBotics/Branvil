@@ -222,6 +222,92 @@ fn set_ci_config(w: &World, values: &[(&str, toml::Value)]) {
 }
 
 #[tokio::test]
+async fn checks_say_when_they_ran_and_how_long_the_job_took_where_it_last_succeeded() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test", "lint"]))],
+        None,
+    )
+    .await;
+    // On main's tip, test succeeds after a while and lint fails.
+    let main_test = runner.claim().await.unwrap();
+    let main_lint = runner.claim().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    runner.finish(&main_test, "success").await;
+    runner.finish(&main_lint, "failure").await;
+    let tip = main_test["sha"].as_str().unwrap();
+    let on_main = w
+        .server
+        .ok(&format!("{}/commits/{tip}/checks", w.repo_path()), &w.aiko)
+        .await;
+    let ran = check(&on_main, "test");
+    let secs = |c: &Value| {
+        let at = |k: &str| chrono::DateTime::parse_from_rfc3339(c[k].as_str().unwrap()).unwrap();
+        (at("finished_at") - at("started_at")).num_seconds()
+    };
+    let took = secs(ran);
+    assert!(took >= 1, "{on_main}");
+    assert!(ran.get("expected_secs").is_none(), "{on_main}");
+
+    // A head on top of it. Queued, nothing has a time yet; running, its test
+    // expects test's time on main, and lint, which never succeeded, nothing.
+    sync_main(&w);
+    w.push_change("feature", "f.txt", "1\n");
+    let p = w.open_pull("feature", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let v = checks(&w, n).await;
+    assert_eq!(check(&v, "test")["status"], "queued");
+    assert!(check(&v, "test").get("started_at").is_none(), "{v}");
+    assert!(check(&v, "test").get("expected_secs").is_none(), "{v}");
+    let running = runner.claim().await.unwrap();
+    let lint = runner.claim().await.unwrap();
+    let v = checks(&w, n).await;
+    let t = check(&v, "test");
+    assert_eq!(t["status"], "in_progress");
+    assert!(
+        t["started_at"].is_string() && t.get("finished_at").is_none(),
+        "{v}"
+    );
+    assert_eq!(t["expected_secs"], took, "{v}");
+    assert!(check(&v, "lint").get("expected_secs").is_none(), "{v}");
+    // The commit's page says the same.
+    let head = running["sha"].as_str().unwrap();
+    let on_head = w
+        .server
+        .ok(&format!("{}/commits/{head}/checks", w.repo_path()), &w.aiko)
+        .await;
+    assert_eq!(check(&on_head, "test")["expected_secs"], took, "{on_head}");
+
+    // Finished, it says how long it took, and expects nothing.
+    runner.finish(&running, "success").await;
+    runner.finish(&lint, "success").await;
+    let v = checks(&w, n).await;
+    let t = check(&v, "test").clone();
+    assert!(t.get("expected_secs").is_none(), "{v}");
+    let own = secs(&t);
+    assert!(own < took, "{v}");
+    // Run again, it expects the time it took on this very commit.
+    let (st, again) = w
+        .server
+        .post(
+            &format!(
+                "{}/jobs/{}/retry",
+                w.repo_path(),
+                t["attempt_id"].as_str().unwrap()
+            ),
+            &w.aiko,
+            json!({}),
+        )
+        .await;
+    assert!(st.is_success(), "{again}");
+    runner.claim().await.unwrap();
+    assert_eq!(check(&checks(&w, n).await, "test")["expected_secs"], own);
+}
+
+#[tokio::test]
 async fn a_head_runs_its_own_pipeline_and_reports_logs_and_artifacts() {
     let w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;

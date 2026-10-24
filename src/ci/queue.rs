@@ -580,6 +580,13 @@ fn lease_hash(lease: &str) -> String {
     util::hex(&util::sha256(lease.as_bytes()))
 }
 
+/// How long a completed attempt ran, from its claim to its conclusion.
+pub fn duration_secs(a: &Attempt) -> Option<u64> {
+    let at = |t: &Option<String>| chrono::DateTime::parse_from_rfc3339(t.as_deref()?).ok();
+    let secs = (at(&a.finished_at)? - at(&a.started_at)?).num_seconds();
+    u64::try_from(secs).ok()
+}
+
 pub fn later(now: &str, secs: u64) -> String {
     let t = chrono::DateTime::parse_from_rfc3339(now)
         .map(|t| t.with_timezone(&chrono::Utc))
