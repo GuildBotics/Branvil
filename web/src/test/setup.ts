@@ -1,7 +1,10 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 import { setCsrfToken } from "../api/client";
+
+// Production query waits reached 1.50s including RTL's event-loop drain.
+configure({ asyncUtilTimeout: 3_000 });
 
 afterEach(() => {
   cleanup();

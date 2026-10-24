@@ -521,7 +521,7 @@ cd web
 BRANVIL_TEST_RESULTS=/tmp/branvil-web-timing npm run test
 ```
 
-Measurements for #78 on 2026-10-24: 231 tests in 20 files, Vitest 5.0.2,
+Initial measurements for #78 on 2026-10-24: 231 tests in 20 files, Vitest 5.0.2,
 jsdom 30.1.1, Node.js 24.22.1, at most four workers. The host is an Apple
 M1 Pro (10 cores, 16 GiB), macOS 26.7.1. Production CI uses a Linux 6.12.99
 microVM with four CPUs and 6144 MiB per job, image configuration
@@ -605,14 +605,8 @@ The timed runs above used Vitest's 5 s test timeout. Although all passed,
 the repeated shared run reached 4.78 s (96% of that limit), so only after
 reducing the measured costs was `testTimeout` raised to 10 s, about twice
 that maximum. These whole-test timings do not establish headroom for
-Testing Library's separate query deadline. A temporary measurement wraps
-RTL's existing `asyncWrapper`, using a real clock captured before fake
-timers, and records callsites to separate `waitFor`/`findBy*` from user-event
-actions. The measured boundary includes RTL's final event-loop drain, so
-it is a conservative envelope around the actual query wait. The 1 s
-`asyncUtilTimeout` was used for the first measurement, which reproduced
-query timeouts. A second measurement temporarily allows 5 s per query and
-30 s per test to observe successful waits without censoring at 1 s. The normal-pipeline verification is the `web` job
+Testing Library's separate query deadline; the per-query measurement below
+sets that deadline. The normal-pipeline verification is the `web` job
 of [PR !38](http://127.0.0.1:7878/GuildBotics/Branvil/-/pulls/38), whose
 `web-tests` artifact records the same measurements for the current head.
 The historical failures in #78 reached 5.58–6.48 s per test and missed
@@ -631,3 +625,52 @@ Selected file and individual-test durations from the web-only comparison
 | Image-operation polling test | 3.32 s | 0.90 s |
 | Runner polling test | 3.13 s | 0.19 s |
 | Closed-ticket retries test | 3.43 s | 0.31 s |
+
+#### Query wait headroom
+
+After taking the drawer change `36bc560` from main, the suite had 233 tests.
+A temporary wrapper preserved RTL's existing `getConfig().asyncWrapper`,
+recording each call's elapsed time and stack in test metadata. Its clock
+was captured before tests installed fake timers: advancing the test clock
+by 30 s moved the captured clock by 0.3 ms; replacing it with a dynamic
+global clock made that check fail. Call stacks distinguish `waitFor` and
+`findBy*` from user-event actions, which use the same wrapper. The measured
+boundary includes RTL's final event-loop drain, so it is a conservative
+envelope around the actual query wait.
+
+The first production run, [`55e0220`](http://127.0.0.1:7878/GuildBotics/Branvil/-/jobs/att_01M5P3RW4JFQH6C62B4KKQBE88), retained the 1 s query deadline and
+10 s test deadline: 12 tests failed (nine query deadlines and three test
+deadlines). Of 495 recorded query waits, 28 reached at least 1 s. Failed
+calls included diagnostic generation, so their longest values
+were not used to choose the new deadline.
+
+The next run, [`91c383c`](http://127.0.0.1:7878/GuildBotics/Branvil/-/jobs/att_01M5P4AMM3BQ5JKTZ06N0ENX7P), temporarily allowed 5 s per query and 30 s per test
+to measure successful waits without the 1 s cutoff. All 233 tests passed.
+The same four-CPU, 6144 MiB production job overlapped main's
+`branvil-integration` job for the entire 44.67 s test interval
+(13:59:09–13:59:54 JST, verified from runner logs). Of 839 wrapper calls,
+521 were query waits, 318 were user-event actions and none were unclassified.
+All query waits succeeded; four exceeded the old 1 s deadline.
+
+| Query wait envelope | Milliseconds |
+| --- | ---: |
+| Median | 33.12 |
+| p95 | 464.52 |
+| p99 | 874.75 |
+| Maximum | 1499.77 |
+
+The maximum was 150% of the old query deadline. `asyncUtilTimeout` is now
+3000 ms, about twice that conservative maximum (50% utilisation). The
+longest complete test in this run was 3.29 s; `testTimeout` remains 10 s.
+The temporary wrapper, metadata traces, 5 s / 30 s measurement limits and
+two-job measurement pipeline were removed; the normal six jobs run again.
+
+A regression test delays the warnings response beyond the former 1 s
+deadline and waits through the ordinary `findByRole` default. Changing the
+query deadline back to 1 s makes it fail. This brings the retained suite to
+234 tests. Log streaming was checked with a
+command that emits stdout/stderr and then blocks: the output arrives before
+exit, survives termination and preserves a failing exit status. Restoring
+the buffered command makes this check fail. The production run also showed
+Vitest output in the job log before the job ended. Only `timing.json` is
+retained as an artifact; diagnostics continue to stream into the job log.

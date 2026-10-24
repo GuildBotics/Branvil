@@ -20,7 +20,6 @@ export default class TestTiming implements Reporter {
       tests: [...module.children.allTests()].map((test) => ({
         name: test.fullName,
         state: test.result().state,
-        meta: test.meta(),
         ...test.diagnostic(),
       })),
     }));

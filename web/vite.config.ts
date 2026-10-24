@@ -31,12 +31,12 @@ export default defineConfig({
     maxWorkers: 4,
     // Native instanceof/toStrictEqual surprises: https://vitest.dev/config/pool#vmthreads
     pool: "vmThreads",
-    // Temporary headroom to measure uncensored query waits; final cap follows the data.
-    testTimeout: 30_000,
+    // A production run alongside the Rust job still reached 4.78s.
+    testTimeout: 10_000,
     reporters: ["default", "./test-timing.ts"],
     environment: "jsdom",
     globals: true,
-    setupFiles: ["./src/test/setup.ts", "./src/test/waitTiming.ts"],
+    setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     restoreMocks: true,
     unstubGlobals: true,
