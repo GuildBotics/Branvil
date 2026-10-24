@@ -90,11 +90,19 @@ describe("relations edits", () => {
       expect(linkEdit(other, fresh)).toMatchObject({ changes: [{ key: "5" }, lane("5", "ready")], inverse: [{ key: "5" }, lane("5", "new")] });
     });
 
-    it("moves no lane when a relation is taken away, nor for a closed ticket (moving it would reopen it)", () => {
-      const inNew = card("8", "new", { parent: ref(parent), blocked_by: [ref(other)] });
-      expect(parentEdit(inNew, null)?.changes).toHaveLength(1);
+    it("makes a new child taken out onto the background ready, and new again in its parent when it is undone", () => {
+      const inNew = card("8", "new", { parent: ref(parent) });
+      expect(parentEdit(inNew, null)).toMatchObject({
+        changes: [{ key: "8", patch: { parent: null } }, lane("8", "ready")],
+        inverse: [{ key: "8", patch: { parent: url("1") } }, lane("8", "new")],
+      });
+    });
+
+    it("moves no lane when a dependency is removed, nor for a closed ticket (moving it would reopen it)", () => {
+      const inNew = card("8", "new", { blocked_by: [ref(other)] });
       expect(unlinkEdit(other, inNew).changes).toHaveLength(1);
       expect(parentEdit(closed, other)?.changes).toHaveLength(1);
+      expect(parentEdit(card("9", "new", { state: "closed", parent: ref(parent) }), null)?.changes).toHaveLength(1);
       expect(readied([closed, fresh, other])).toEqual([lane("5", "ready")]);
     });
   });

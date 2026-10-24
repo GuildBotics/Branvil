@@ -13,7 +13,7 @@ export type EditMessage = Extract<
 >;
 
 export interface Edit {
-  /** Written in order: the relation, then the moves of the tickets it relates. */
+  /** Written in order: the relation, then the moves of the new tickets it makes ready. */
   changes: Change[];
   /** The changes that write it back as it was. */
   inverse: Change[];
@@ -27,7 +27,8 @@ const moves = (tickets: Ticket[], lane: Lane): Change[] =>
 
 /**
  * The moves that make the new tickets among `tickets` ready, as they are being
- * related: only a ticket without relations is new (the figure's frame of new tickets).
+ * related or dropped on the background: only a ticket without relations is new
+ * (the figure's frame of new tickets).
  */
 export const readied = (tickets: Ticket[]): Change[] => moves(tickets, "ready");
 
@@ -37,27 +38,28 @@ function edit(
   inverse: TicketPatch,
   message: EditMessage,
   params: Record<string, string>,
-  relates: Card[] = [],
+  readies: Card[] = [],
 ): Edit {
   const change = (p: TicketPatch) => ({ repo: card.repository, key: card.key, patch: p });
   return {
-    changes: [change(patch), ...readied(relates)],
-    inverse: [change(inverse), ...moves(relates, "new")],
+    changes: [change(patch), ...readied(readies)],
+    inverse: [change(inverse), ...moves(readies, "new")],
     message,
     params,
   };
 }
 
 /**
- * The update for dropping a card onto `target` (null: the graph's background);
- * null when it changes nothing. Cycles are left to the server to refuse.
+ * The update for dropping a card onto `target` (null: the graph's background,
+ * where a new ticket is made ready); null when it changes no relation. Cycles
+ * are left to the server to refuse.
  */
 export function parentEdit(dragged: Card, target: Card | null): Edit | null {
   const parent = dragged.parent;
   const child = ticketRef(dragged);
   if (!target) {
     if (!parent) return null;
-    return edit(dragged, { parent: null }, { parent: parent.url }, "relations.unparented", { child, parent: ticketRef(parent) });
+    return edit(dragged, { parent: null }, { parent: parent.url }, "relations.unparented", { child, parent: ticketRef(parent) }, [dragged]);
   }
   if (ticketRef(target) === child || (parent && ticketRef(target) === ticketRef(parent))) return null;
   return edit(

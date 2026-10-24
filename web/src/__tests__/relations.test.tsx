@@ -187,6 +187,43 @@ describe("relations", () => {
     expect(fake.calls("PUT", "/api/v1/repos/acme/demo/tickets/4/board").map((r) => r.body)).toEqual([{ lane: "ready" }]);
   });
 
+  it("makes a new child taken out of its parent onto the background ready, and undoes both", async () => {
+    const user = userEvent.setup();
+    const open = [card("1", "ready", { children: [ref("2")] }), card("2", "new", { parent: ref("1") })];
+    const fake = fakeApi(
+      routes({ open }, { "PATCH /api/v1/repos/acme/demo/tickets/2": json(200, open[1]), "PUT /api/v1/repos/acme/demo/tickets/2/board": json(200, open[1]) }),
+    );
+    await shown();
+    await openParent(user);
+    fireEvent.dragStart(draggable("2"), { dataTransfer: dataTransfer() });
+    fireEvent.drop(document.querySelector(".relations-canvas") as HTMLElement);
+    expect(await screen.findByText("Took acme/demo#2 out of acme/demo#1.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText("Undone.")).toBeInTheDocument();
+    const writes = fake.requests.filter((r) => r.method !== "GET").map((r) => [r.method, r.path.replace("/api/v1/repos/acme/demo/tickets/", ""), r.body]);
+    expect(writes).toEqual([
+      ["PATCH", "2", { parent: null }],
+      ["PUT", "2/board", { lane: "ready" }],
+      ["PATCH", "2", { parent: url("1") }],
+      ["PUT", "2/board", { lane: "new" }],
+    ]);
+  });
+
+  it("counts relations to tickets it does not show: such a ticket is not in the frame of new tickets, nor can it be dropped there", async () => {
+    const user = userEvent.setup();
+    // #8 (new) waits for the closed #9 and #7 (ready) has the closed child #6, neither shown; #5 has no relation.
+    const open = [card("7", "ready", { children: [ref("6", "closed")] }), card("8", "new", { blocked_by: [ref("9", "closed")] }), card("5", "new")];
+    fakeApi(routes({ open }));
+    renderApp("/acme/-/relations");
+    const frame = await screen.findByRole("group", { name: "New tickets (1)" });
+    await user.click(within(frame).getByRole("button", { name: "Open child tickets" }));
+    expect(within(frame).getAllByRole("article").map((a) => a.getAttribute("aria-label")?.split(" ")[0])).toEqual(["acme/demo#5"]);
+    expect(frame).not.toContainElement(article("8"));
+    fireEvent.dragStart(draggable("7"), { dataTransfer: dataTransfer() });
+    fireEvent.dragOver(frame);
+    expect(frame).not.toHaveClass("drop-target");
+  });
+
   it("takes a child out of its parent when it is dropped on the background", async () => {
     const user = userEvent.setup();
     const fake = fakeApi(routes(undefined, { "PATCH /api/v1/repos/acme/demo/tickets/2": json(200, CARDS[2]) }));

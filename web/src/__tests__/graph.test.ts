@@ -9,17 +9,20 @@ interface Spec {
   closed?: boolean;
 }
 
-/** Cards in board order; a key not in `specs` names a ticket that is not loaded. */
+/** Cards in board order, each relation on both ends as the service gives it; a key not in `specs` names a ticket that is not loaded. */
 function board(specs: Record<string, Spec>): Card[] {
   const cards = Object.entries(specs).map(([key, s]) => card(key, "new", s.closed ? { state: "closed" } : {}));
   const ref = (key: string): TicketRef => {
     const c = cards.find((c) => c.key === key) ?? card(key, "new");
     return { url: c.url, repository: c.repository, key, title: c.title, state: c.state, state_reason: null };
   };
+  const loaded = (key: string) => cards.find((c) => c.key === key);
   for (const c of cards) {
     const s = specs[c.key]!;
     c.parent = s.parent ? ref(s.parent) : null;
     c.blocked_by = (s.blockedBy ?? []).map(ref);
+    if (s.parent) loaded(s.parent)?.children.push(ref(c.key));
+    for (const b of s.blockedBy ?? []) loaded(b)?.blocks.push(ref(c.key));
   }
   return cards;
 }
@@ -54,7 +57,6 @@ describe("relations graph", () => {
     expect(lines(g)).toEqual(["A>C", "B>C", "D>C", "A>B"]);
     const solid = g.edges[0]!;
     expect([solid.blocker?.key, solid.blocked?.key]).toEqual(["A", "C"]);
-    expect([...g.related].map(short).sort()).toEqual(["A", "B", "C", "D"]);
   });
 
   it("puts the lanes that matter most first in a column, keeping the board's order within a lane", () => {
@@ -64,11 +66,13 @@ describe("relations graph", () => {
     expect(layout(g.level)).toBe("E B F A C D | Z");
   });
 
-  it("gathers the new tickets with no relation into one frame, counting relations to tickets not loaded as none", () => {
-    const g = graph({ B: { blockedBy: ["Z"] }, A: { parent: "Y" }, C: {} });
-    expect(layout(g.level)).toBe("{B A C}");
+  it("gathers the new tickets with no relation into one frame, counting relations to tickets not shown or not loaded", () => {
+    // B waits for Z and A is a child of Y, neither loaded; D is the parent of a hidden closed child E,
+    // F waits for it; only C and G have no relation.
+    const g = graph({ B: { blockedBy: ["Z"] }, A: { parent: "Y" }, C: {}, D: {}, E: { parent: "D", closed: true }, F: { blockedBy: ["E"] }, G: {} });
+    expect(layout(g.level)).toBe("B A {C G} D F");
     expect(g.edges).toEqual([]);
-    expect(g.related.size).toBe(0);
+    expect(at(g.level, 0, 3)).toMatchObject({ hasChildren: false });
   });
 
   it("lays out the other tickets with no relation, and the frame where its first ticket would be, by lane", () => {
@@ -93,7 +97,7 @@ describe("relations graph", () => {
       R: { parent: "Q", closed: true },
     };
     const hidden = graph(specs, ["G", "P"]);
-    expect(layout(hidden.level)).toBe("{A} G[P[C]]");
+    expect(layout(hidden.level)).toBe("A G[P[C]]");
     expect(lines(hidden)).toEqual([]);
 
     const all = graph(specs, ["G", "P"], true);

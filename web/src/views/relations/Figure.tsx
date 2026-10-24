@@ -8,7 +8,7 @@ import { useT } from "../../i18n";
 import { ChildrenToggle } from "../board/CardView";
 import { matchesFilter, type CardFilter } from "../board/ordering";
 import { linkEdit, parentEdit, unlinkEdit, type Edit } from "./edits";
-import type { Graph, GraphEdge, Level } from "./graph";
+import { hasRelations, type Graph, type GraphEdge, type Level } from "./graph";
 import { RelationCard, type Addition } from "./RelationCard";
 
 /** How long a gap the card could not go into stays marked after the drag: the dragged card hid it. */
@@ -155,7 +155,7 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
     }
     const ref = el ? refOf(el) : e.target instanceof Node && canvasRef.current?.contains(e.target) ? BACKGROUND : null;
     if (ref === null) return null;
-    if (ref === FRESH) return !graph.related.has(ticketRef(dragged)) && dragged.lane !== "new" ? { ref, drop: { lane: "new" } } : null;
+    if (ref === FRESH) return !hasRelations(dragged) && dragged.lane !== "new" ? { ref, drop: { lane: "new" } } : null;
     const over = ref === BACKGROUND ? null : byRef.get(ref);
     if (over === undefined) return null;
     const drop = parentEdit(dragged, over) ?? (!over && dragged.lane === "new" ? { lane: "ready" as const } : null);
