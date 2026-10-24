@@ -534,18 +534,20 @@ run; the host also runs the service and other desktop applications.
 | Before, web-only pipeline | `652e221` | 65.53 s | 231 passed |
 | After, web-only pipeline | `7f2a712` | 36.84 s | 231 passed |
 | After, normal pipeline; Rust `test` running alongside `web` | `9f0c6e0` | 32.36 s | 231 passed |
+| After, normal pipeline repeated; Rust `test` running alongside `web` | `ec3dde1` | 77.88 s | 231 passed |
 
 The service's attempt-start timestamps in `~/Library/Logs/branvil.log` and
 the completed job logs in `<data>/ci/logs/` were checked across repositories.
 Completed logs' last-write times bound their ends; service restarts bound
 older interrupted logs. The test intervals in `timing.json` were
 12:57:41–12:58:47 and 13:00:21–13:00:58 JST for the two web-only runs:
-no other job overlapped either interval. In both normal-pipeline runs,
+no other job overlapped either interval. In all three normal-pipeline runs,
 the Rust `test` job overlapped the web tests. The runner's two-job limit
 was unchanged throughout.
 
 Before the change, the shared run was 6.26 s slower than the solitary run;
-after it, the shared run was 4.48 s faster. These are observations, not
+after it, the first shared run was 4.48 s faster, but its repeat took
+77.88 s. These are observations, not
 isolated estimates of the cost of another job: the individual phases and
 background activity also vary between runs.
 
@@ -558,6 +560,7 @@ across workers, not percentages of wall time):
 | Before, web-only pipeline | 52% | 23% | 18% | 5% | 2% | <1% |
 | After, web-only pipeline | 52% | 13% | 26% | 6% | 1% | 3% |
 | After, normal pipeline | 72% | 10% | 11% | 4% | 1% | 2% |
+| After, normal pipeline repeated | 74% | 10% | 10% | 3% | 1% | 3% |
 
 The normal pipeline spent 78.33 s in total creating jsdom environments,
 once per file. File test durations were `relations` 25.68 s, `pull` 22.28 s,
@@ -569,8 +572,12 @@ polling (3.13 s), image-operation polling (3.09 s) and board filtering
 The two web-only runs used the same image, dependencies and worker limit.
 Wall time fell by 28.69 s (44%); cumulative environment setup fell from
 57.65 s to 17.51 s (70%). The slowest test after the change took 1.42 s.
-In the normal pipeline, wall time fell from 71.79 s to 32.36 s (55%) and
-cumulative environment setup from 78.33 s to 12.14 s (84%).
+The first normal-pipeline run took 32.36 s (55% less than the baseline),
+but a repeat took 77.88 s, so the shared-run wall-time improvement was not
+consistent. Cumulative environment setup fell from 78.33 s to 12.14 s in
+the first run and 29.74 s in the repeat. Test execution dominated the
+repeat (74% of tracked time); its slowest test was board filtering at
+4.78 s. Environment reuse does not eliminate contention during rendering.
 
 The changes reduce two measured costs:
 
@@ -593,10 +600,12 @@ polling deliberately failed both polling tests; disabling retries failed
 the closed-ticket test. A heap measurement of the VM pool reached 342 MiB
 per worker; this is JS heap, not total process or microVM memory.
 
-The maximum after the change was 1.42 s alone and 2.03 s alongside Rust
-tests, below Vitest's 5 s test timeout, so it remains unchanged. Testing
-Library's 1 s `asyncUtilTimeout` also remains unchanged: all 231 tests
-passed in both production runs without a timeout. The normal-pipeline verification is the `web` job
+The timed runs above used Vitest's 5 s test timeout. Although all passed,
+the repeated shared run reached 4.78 s (96% of that limit), so only after
+reducing the measured costs was `testTimeout` raised to 10 s, about twice
+that maximum. Testing Library's 1 s `asyncUtilTimeout` remains unchanged:
+all 231 tests passed in the three updated production runs without a query
+timeout. The normal-pipeline verification is the `web` job
 of [PR !38](http://127.0.0.1:7878/GuildBotics/Branvil/-/pulls/38), whose
 `web-tests` artifact records the same measurements for the current head.
 The historical failures in #78 reached 5.58–6.48 s per test and missed

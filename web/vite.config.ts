@@ -30,6 +30,8 @@ export default defineConfig({
   test: {
     maxWorkers: 4,
     pool: "vmThreads",
+    // A production run alongside the Rust job still reached 4.78s.
+    testTimeout: 10_000,
     reporters: ["default", "./test-timing.ts"],
     environment: "jsdom",
     globals: true,
