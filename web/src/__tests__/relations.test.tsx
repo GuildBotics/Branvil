@@ -121,10 +121,10 @@ describe("relations", () => {
     expect(toggle).toHaveClass("card-control");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle).toHaveTextContent(/^▶$/);
-    // First in the card, before the key; the count of children is a plain label.
+    // First in the card, before the key. A parent does not count its children on the card.
     expect(toggle.parentElement?.firstElementChild).toBe(toggle);
     expect(toggle.nextElementSibling).toHaveTextContent("acme/demo#1");
-    expect(within(article("1")).getByText("Children 0/2").closest("button")).toBeNull();
+    expect(within(article("1")).queryByText(/Children/)).not.toBeInTheDocument();
     // A parent has the colour of its header; a ticket without children does not.
     expect(article("1")).toHaveClass("parent");
     expect(article("4")).not.toHaveClass("parent");
@@ -146,6 +146,25 @@ describe("relations", () => {
     expect(within(edge("4", "2") as unknown as HTMLElement).getByRole("button")).toBeInTheDocument();
     expect(edge("4", "1")).toBeNull();
     expect(JSON.parse(window.localStorage.getItem("branvil.relations.open.acme") ?? "[]")).toEqual(["acme/demo#1"]);
+  });
+
+  it("copies a ticket's URL from its menu", async () => {
+    const user = userEvent.setup();
+    fakeApi(routes());
+    await shown();
+    await user.click(within(article("4")).getByRole("button", { name: "Actions of acme/demo#4" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual([
+      "Add parent ticket",
+      "Add child ticket",
+      "Add next ticket",
+      "Copy URL",
+    ]);
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy URL" }));
+    expect(await navigator.clipboard.readText()).toBe(url("4"));
+    expect(await within(menu).findByRole("menuitem", { name: "Copied" })).toBeInTheDocument();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
   });
 
   it("makes a dropped card a child and the new tickets it relates ready, and undoes it", async () => {

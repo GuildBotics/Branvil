@@ -1,7 +1,8 @@
-import { ActionIcon, Badge, Menu, Text, Tooltip } from "@mantine/core";
+import { ActionIcon, Badge, Menu, Text, Tooltip, useMenuContext } from "@mantine/core";
+import { useClipboard } from "@mantine/hooks";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, Ellipsis, GitPullRequest } from "lucide-react";
-import { memo, useState, type ReactElement, type ReactNode } from "react";
+import { ArrowDown, ArrowUp, Check, Copy, Ellipsis, GitPullRequest } from "lucide-react";
+import { memo, useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
 import { ticketRef, type Card, type Lane, type PullSummary } from "../../api/types";
@@ -17,6 +18,9 @@ import { rollup, type CiRollup } from "./ordering";
 
 /** The most pull requests whose checks a page of cards loads (one request each). */
 const CI_BUDGET = 30;
+
+/** How long a menu keeps "copied" on screen before it closes. */
+const COPIED_MS = 1500;
 
 /** The pull requests whose checks `cards` load: the first CI_BUDGET open ones that are this Branvil's. */
 export function ciUrlsOf(cards: Card[]): Set<string> {
@@ -113,8 +117,35 @@ export function LaneButton({ card, lanes, onLane, disabled }: { card: Card; lane
   );
 }
 
-const childrenText = (card: Card, t: Translate) =>
-  t("board.children", { closed: card.children.filter((c) => c.state === "closed").length, total: card.children.length });
+/**
+ * A menu item that copies the ticket's own URL and says so.
+ * The item stays open until "copied" has been shown, then the menu closes.
+ * A failed copy leaves the label and the menu as they were, so it does not
+ * look like success. The hook keeps `copied` longer than the menu stays open:
+ * clearing it on the same timer would cancel the close.
+ */
+export function CopyUrlItem({ url }: { url: string }) {
+  const t = useT();
+  const clipboard = useClipboard({ timeout: COPIED_MS + 1_000 });
+  const close = useMenuContext().closeDropdownImmediately;
+  const closeRef = useRef(close);
+
+  useEffect(() => {
+    closeRef.current = close;
+  }, [close]);
+
+  useEffect(() => {
+    if (!clipboard.copied) return;
+    const id = window.setTimeout(() => closeRef.current(), COPIED_MS);
+    return () => window.clearTimeout(id);
+  }, [clipboard.copied]);
+
+  return (
+    <Menu.Item closeMenuOnClick={false} leftSection={clipboard.copied ? <Check size={14} /> : <Copy size={14} />} onClick={() => clipboard.copy(url)}>
+      {clipboard.copied ? t("common.copied") : t("board.copyUrl")}
+    </Menu.Item>
+  );
+}
 
 /** Opens or closes a card's children (or the frame of new tickets'). */
 export function ChildrenToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
@@ -175,11 +206,6 @@ export function CardView({
         {lane}
         {card.state === "closed" && <StateBadge>{t("ticket.closed")}</StateBadge>}
         {card.state === "open" && card.blocked_by.some((b) => b.state === "open") && <StateBadge tone="warning">{t("board.blocked")}</StateBadge>}
-        {card.children.length > 0 && (
-          <Text span size="xs" c="dimmed">
-            {childrenText(card, t)}
-          </Text>
-        )}
         {busy && (
           <Text span size="xs" c="dimmed">
             {t("board.moving")}
@@ -285,6 +311,8 @@ function CardMenu({
         >
           {t("board.down")}
         </Menu.Item>
+        <Menu.Divider />
+        <CopyUrlItem url={card.url} />
       </LazyMenu>
     </div>
   );

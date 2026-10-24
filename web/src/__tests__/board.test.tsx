@@ -214,7 +214,34 @@ describe("kanban board", () => {
 
     await user.click(screen.getByRole("button", { name: "Actions of acme/demo#1" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual(["New", "Ready", "In progress", "Done", "Up", "Down"]);
+    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual(["New", "Ready", "In progress", "Done", "Up", "Down", "Copy URL"]);
+
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy URL" }));
+    expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}/acme/demo/-/tickets/1`);
+    // The item says it copied and stays. It does not close on the click.
+    expect(await within(menu).findByRole("menuitem", { name: "Copied" })).toBeInTheDocument();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+  });
+
+  it("leaves the copy item unchanged when the clipboard refuses", async () => {
+    fakeApi(boardRoutes());
+    const user = userEvent.setup();
+    renderApp("/acme");
+    await screen.findByText("Title of 1");
+    vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("denied"));
+
+    await user.click(screen.getByRole("button", { name: "Actions of acme/demo#1" }));
+    const menu = await screen.findByRole("menu");
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy URL" }));
+
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(within(menu).getByRole("menuitem", { name: "Copy URL" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Copied" })).not.toBeInTheDocument();
+    // Longer than the success label stays up: a refusal must not close the menu later.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_700)));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Copied" })).not.toBeInTheDocument();
   });
 
   it("moves a card to another lane from its menu (no drag needed)", async () => {
@@ -288,7 +315,7 @@ describe("kanban board", () => {
     expect(within(lane(/^Done/)).queryByText("Title of 1")).not.toBeInTheDocument();
   });
 
-  it("marks a card blocked by an open ticket and counts its closed children, and says why a start is refused", async () => {
+  it("marks a card blocked by an open ticket, shows no count of its children, and says why a start is refused", async () => {
     const ref = (key: string, state: "open" | "closed") => ({ ...card(key, "new"), state, state_reason: null });
     fakeApi(
       boardRoutes({
@@ -306,10 +333,9 @@ describe("kanban board", () => {
     renderApp("/acme");
     const one = await screen.findByRole("article", { name: "acme/demo#1 Title of 1" });
     expect(within(one).getByText("Blocked")).toBeInTheDocument();
-    expect(within(one).getByText("Children 1/2")).toBeInTheDocument();
+    expect(within(one).queryByText(/Children/)).not.toBeInTheDocument();
     const five = screen.getByRole("article", { name: "acme/demo#5 Title of 5" });
     expect(within(five).queryByText("Blocked")).not.toBeInTheDocument();
-    expect(within(five).queryByText(/Children/)).not.toBeInTheDocument();
 
     await pickFromMenu(user, "Actions of acme/demo#1", "In progress");
     expect(await screen.findByRole("alert")).toHaveTextContent(
