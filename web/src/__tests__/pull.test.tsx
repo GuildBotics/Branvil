@@ -5,11 +5,149 @@ import type { Check, Checks } from "../api/types";
 import { dictionaries } from "../i18n";
 import { applyChange } from "../query/events";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
-import { BASE, HEAD, NEW_HEAD, pull } from "./fixtures";
+import { BASE, HEAD, NEW_HEAD, card, pull } from "./fixtures";
 
 const P = "/api/v1/repos/acme/demo/pulls/3";
 const SUCCESS: Check = { name: "test", status: "completed", conclusion: "success" };
 const CHECKS: Checks = { head_sha: HEAD, base_sha: BASE, behind_by: 0, checks: [SUCCESS], checks_expected: true, base_checks: 1 };
+
+describe("related ticket editor", () => {
+  it.each(["en", "ja"] as const)("adds, removes and switches links with the opened revision (%s)", async (language) => {
+    const words = dictionaries[language];
+    const local = card("12", "ready");
+    const other = card("7", "done", { repository: "acme/other", state: "closed" });
+    const removed = card("1", "ready");
+    // The service's URL can differ from the browser's dev proxy origin.
+    const service = "http://127.0.0.1:7878";
+    for (const c of [local, other, removed]) c.url = `${service}/${c.repository}/-/tickets/${c.key}`;
+    const original = pull({ url: `${service}/acme/demo/-/pulls/3`, tickets: [{ url: removed.url, closes: true }], revision: 4 });
+    const tickets = [{ url: local.url, closes: true }, { url: other.url, closes: false }];
+    const edited = { ...original, tickets, revision: 5 };
+    const fake = fakeApi(pullRoutes({
+      [`GET ${P}`]: [json(200, original), json(200, edited)],
+      "GET /api/v1/workspaces/acme/board/cards": json(200, { items: [local, other, removed], next_cursor: null }),
+      [`PATCH ${P}`]: json(200, edited),
+    }));
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/pulls/3", language);
+    await user.click(await screen.findByRole("button", { name: words["pull.editTickets"] }));
+    const form = screen.getByRole("form", { name: words["pull.editTickets"] });
+    await user.click(within(form).getByRole("button", { name: words["pull.removeTicket"].replace("{ticket}", "acme/demo#1") }));
+    for (const c of [local, other]) {
+      await user.click(await within(form).findByRole("combobox", { name: words["pull.addTicket"] }));
+      await user.click(await screen.findByRole("option", { name: `${c.repository}#${c.key} ${c.title}` }));
+    }
+    const localRow = within(form).getByRole("group", { name: "acme/demo#12" });
+    await user.click(within(localRow).getByRole("checkbox", { name: words["pull.closeOnMerge"] }));
+    const otherRow = within(form).getByRole("group", { name: "acme/other#7" });
+    expect(within(otherRow).getByRole("checkbox")).toBeDisabled();
+    expect(within(otherRow).getByText(words["pull.referenceOnly"])).toBeInTheDocument();
+    await user.click(within(form).getByRole("button", { name: words["common.save"] }));
+    await waitFor(() => expect(fake.calls("PATCH", P)[0]?.body).toEqual({ tickets, revision: 4 }));
+    await waitFor(() => expect(screen.queryByRole("form", { name: words["pull.editTickets"] })).not.toBeInTheDocument());
+    expect(screen.getByText(words["pull.closesTicket"])).toBeInTheDocument();
+    expect(fake.calls("GET", "/api/v1/workspaces/acme/board/cards")[0]?.search).toContain("state=all");
+  });
+
+  it("keeps the opened revision across events, explains a conflict, and reopens on the latest state", async () => {
+    const tk = card("12", "ready");
+    const original = pull({ tickets: [{ url: tk.url, closes: false }], revision: 3 });
+    const latest = pull({ tickets: [{ url: tk.url, closes: true }], revision: 4 });
+    const fake = fakeApi(pullRoutes({
+      [`GET ${P}`]: [json(200, original), json(200, latest)],
+      "GET /api/v1/workspaces/acme/board/cards": json(200, { items: [tk], next_cursor: null }),
+      [`PATCH ${P}`]: apiError(409, "conflict", "Revision mismatch."),
+    }));
+    const user = userEvent.setup();
+    const { client } = renderApp("/acme/demo/-/pulls/3");
+    await user.click(await screen.findByRole("button", { name: dictionaries.en["pull.editTickets"] }));
+    applyChange({ kind: "pull", path: "acme/demo", id: "3" }, client);
+    await waitFor(() => expect(client.getQueryData(["repo", "acme/demo", "pull", 3])).toMatchObject({ revision: 4 }));
+    const form = screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] });
+    expect(within(form).getByRole("checkbox")).not.toBeChecked();
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    expect(await within(form).findByRole("alert")).toHaveTextContent(dictionaries.en["pull.ticketsConflict"]);
+    expect(fake.calls("PATCH", P)[0]?.body).toEqual({ tickets: original.tickets, revision: 3 });
+    expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.click(within(form).getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: dictionaries.en["pull.editTickets"] }));
+    expect(within(screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] })).getByRole("checkbox")).toBeChecked();
+  });
+
+  it("can remove every link, including a foreign reference", async () => {
+    const url = "https://example.com/tickets/4";
+    const original = pull({ tickets: [{ url, closes: false }] });
+    const fake = fakeApi(pullRoutes({
+      [`GET ${P}`]: [json(200, original), json(200, pull({ revision: 2 }))],
+      "GET /api/v1/workspaces/acme/board/cards": json(200, { items: [], next_cursor: null }),
+      [`PATCH ${P}`]: json(200, pull({ revision: 2 })),
+    }));
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/pulls/3");
+    await user.click(await screen.findByRole("button", { name: dictionaries.en["pull.editTickets"] }));
+    const form = screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] });
+    expect(within(form).getByRole("checkbox")).toBeDisabled();
+    await user.click(within(form).getByRole("button", { name: `Remove ${url}` }));
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fake.calls("PATCH", P)[0]?.body).toEqual({ tickets: [], revision: 1 }));
+    expect(await screen.findByText(dictionaries.en["pull.noTickets"])).toBeInTheDocument();
+  });
+
+  it("keeps a noncanonical loopback alias as a reference", async () => {
+    fakeApi(pullRoutes({
+      [`GET ${P}`]: json(200, pull({ url: "http://127.0.0.1:7878/acme/demo/-/pulls/3", tickets: [{ url: "http://localhost:7878/acme/demo/-/tickets/12", closes: false }] })),
+      "GET /api/v1/workspaces/acme/board/cards": json(200, { items: [], next_cursor: null }),
+    }));
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/pulls/3");
+    await user.click(await screen.findByRole("button", { name: dictionaries.en["pull.editTickets"] }));
+    expect(within(screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] })).getByRole("checkbox")).toBeDisabled();
+  });
+
+  it("waits for the conflict refresh before allowing the editor to reopen", async () => {
+    const tk = card("12", "ready");
+    let refresh!: (value: ReturnType<typeof json>) => void;
+    fakeApi(pullRoutes({
+      [`GET ${P}`]: [json(200, pull()), () => new Promise((resolve) => { refresh = resolve; })],
+      "GET /api/v1/workspaces/acme/board/cards": json(200, { items: [tk], next_cursor: null }),
+      [`PATCH ${P}`]: apiError(409, "conflict", "Revision mismatch."),
+    }));
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/pulls/3");
+    await user.click(await screen.findByRole("button", { name: dictionaries.en["pull.editTickets"] }));
+    const form = screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] });
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(refresh).toBeTypeOf("function"));
+    expect(within(form).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await act(async () => refresh(json(200, pull({ revision: 5, tickets: [{ url: tk.url, closes: true }] }))));
+    await within(form).findByRole("alert");
+    await user.click(within(form).getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: dictionaries.en["pull.editTickets"] }));
+    expect(within(screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] })).getByRole("checkbox")).toBeChecked();
+  });
+
+  it("shows a candidate load failure while allowing existing links to be removed", async () => {
+    const tk = card("12", "ready");
+    fakeApi(pullRoutes({
+      [`GET ${P}`]: json(200, pull({ tickets: [{ url: tk.url, closes: false }] })),
+      "GET /api/v1/workspaces/acme/board/cards": apiError(403, "forbidden", "Cannot list tickets."),
+    }));
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/pulls/3");
+    await user.click(await screen.findByRole("button", { name: dictionaries.en["pull.editTickets"] }));
+    const form = screen.getByRole("form", { name: dictionaries.en["pull.editTickets"] });
+    expect(await within(form).findByRole("alert")).toHaveTextContent("Cannot list tickets.");
+    expect(within(form).getByRole("button", { name: "Remove acme/demo#12" })).toBeEnabled();
+  });
+
+  it.each([{ state: "closed" as const }, { state: "closed" as const, merged: true }])("hides editing for a closed PR ($merged)", async (state) => {
+    const fake = fakeApi(pullRoutes({ [`GET ${P}`]: json(200, pull(state)) }));
+    renderApp("/acme/demo/-/pulls/3");
+    await screen.findByRole("heading", { name: /Fix login/ });
+    expect(screen.queryByRole("button", { name: dictionaries.en["pull.editTickets"] })).not.toBeInTheDocument();
+    expect(fake.calls("GET", "/api/v1/workspaces/acme/board/cards")).toHaveLength(0);
+  });
+});
 
 function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]> = {}) {
   return {
