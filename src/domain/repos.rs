@@ -338,10 +338,9 @@ pub async fn commit_checks(
 ) -> AppResult<CommitChecksView> {
     let repo = visible(app, caller, path).await?;
     let sha = commit_of(app, &repo, sha).await?.sha;
-    Ok(CommitChecksView {
-        checks: app.ci.head_checks(&repo, &sha).await?,
-        sha,
-    })
+    let mut checks = app.ci.head_checks(&repo, &sha).await?;
+    app.ci.estimate(&repo, &sha, &mut checks.checks).await;
+    Ok(CommitChecksView { checks, sha })
 }
 
 #[derive(Serialize, Debug)]

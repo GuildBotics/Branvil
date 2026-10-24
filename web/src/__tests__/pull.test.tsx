@@ -1,6 +1,6 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Check, Checks } from "../api/types";
 import { dictionaries } from "../i18n";
 import { applyChange } from "../query/events";
@@ -87,6 +87,10 @@ function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]>
   };
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("pull request review", () => {
   it("shows the description (or 'Not provided'), the files in a drawer, checks with reason and a log in a drawer, and status notices", async () => {
     const fake = fakeApi(pullRoutes());
@@ -114,6 +118,54 @@ describe("pull request review", () => {
     expect(await within(check).findByText("test login ... FAILED")).toBeInTheDocument();
     expect(fake.calls("GET", "/api/v1/repos/acme/demo/jobs/att_1/log")[0]?.search).toBe("?tail_bytes=16384");
     expect(within(check).getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it.each([
+    ["en", "3m 12s", "1m 5s · about 55s left", "1m 7s · about 53s left", "1m 0s · 30s last time"],
+    ["ja", "3分12秒", "1分5秒 · 残り約 55秒", "1分7秒 · 残り約 53秒", "1分0秒 · 前回 30秒"],
+  ] as const)("says how long each check ran, and while one runs how long so far and what is left (%s)", async (language, took, running, later, past) => {
+    // The page's clock stands still but for the timers advanced below.
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(new Date("2026-10-24T10:00:00Z"));
+    const ago = (secs: number) => new Date(Date.now() - secs * 1000).toISOString();
+    const times = { started_at: "2026-10-24T09:50:00Z", finished_at: "2026-10-24T09:53:12Z" };
+    const unfinished = { conclusion: null, attempt: 1 } as const;
+    fakeApi(
+      pullRoutes({
+        [`GET ${P}/checks`]: json(200, {
+          ...CHECKS,
+          checks: [
+            { name: "test", status: "completed", conclusion: "failure", attempt_id: "att_1", attempt: 1, ...times },
+            { name: "lint", status: "in_progress", attempt_id: "att_2", started_at: ago(65), expected_secs: 120, ...unfinished },
+            { name: "web", status: "in_progress", attempt_id: "att_3", started_at: ago(60), expected_secs: 30, ...unfinished },
+            { name: "fmt", status: "queued", attempt_id: "att_4", expected_secs: 30, ...unfinished },
+          ],
+        }),
+        "GET /api/v1/repos/acme/demo/jobs/att_1": json(200, {
+          id: "att_1", job: "test", attempt: 1, sha: HEAD, status: "completed", conclusion: "failure", details: "exit code 101", artifact_names: [], ...times,
+        }),
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/pulls/3", language);
+    const words = dictionaries[language];
+    const region = await screen.findByRole("region", { name: words["pull.checks"] });
+    expect(await within(region).findByText(took)).toBeInTheDocument();
+    // Past its estimate, a running check says what the job took before.
+    expect(within(region).getByText(past)).toBeInTheDocument();
+    // A running check counts each second.
+    const lint = within(region).getByText(running);
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(lint).toHaveTextContent(later);
+    // A queued one has no time yet.
+    expect(within(region).getByRole("button", { name: words["ci.open"].replace("{name}", "fmt") })).not.toHaveTextContent(/\d+(s|秒)/);
+    // The job's drawer says how long it took.
+    await user.click(within(region).getByRole("button", { name: words["ci.open"].replace("{name}", "test") }));
+    const drawer = await screen.findByRole("dialog", { name: /test/ });
+    expect(within(drawer).getByText(words["ci.duration"])).toBeInTheDocument();
+    expect(within(drawer).getByText(took)).toBeInTheDocument();
   });
 
   it("opens the changed files at a thread's file from the thread", async () => {

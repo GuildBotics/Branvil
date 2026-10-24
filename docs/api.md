@@ -640,7 +640,8 @@ once its pull request is open on the host.
     {"name": "test", "status": "completed", "conclusion": "success",
      "attempt_id": "att_01JA...", "attempt": 1,
      "details_url": "http://127.0.0.1:7878/acme/demo/-/jobs/att_01JA...",
-     "artifact_names": ["report"]}
+     "artifact_names": ["report"],
+     "started_at": "2026-10-24T09:50:00.000Z", "finished_at": "2026-10-24T09:53:12.000Z"}
   ],
   "checks_expected": true,
   "base_checks": 1
@@ -665,6 +666,13 @@ once its pull request is open on the host.
 - `details` (optional on every check) explains a conclusion or a state: the
   failing exit code, "Superseded: …", "Interrupted: …", "No CI runner has
   contacted Branvil …", the executor's reason for `startup_failure`.
+- A check of a Branvil attempt has `started_at` once a runner claimed it and
+  `finished_at` once it concluded (the GUI shows how long it ran, or has run
+  so far). While it is `in_progress`, `expected_secs` is how long the same job
+  (by name) last took from claim to conclusion where it succeeded: on the
+  commit itself or the nearest of its first-parent ancestors (20 commits in
+  all); there is none without such a commit. The GUI shows the time left by
+  it.
 - `status` is `queued`, `in_progress`, or `completed`. `conclusion` (when
   completed) is `success`, `failure`, `cancelled`, `timed_out`, `skipped`, or
   `startup_failure` (no runner or no usable executor; the details say which).

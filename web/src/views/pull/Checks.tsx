@@ -4,7 +4,7 @@
 import { Anchor, Box, Button, Card, Drawer, Group, Select, Stack, Text } from "@mantine/core";
 import { useMutation, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { ChevronRight, CircleCheck, CircleDashed, CircleX, ExternalLink } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import * as api from "../../api/endpoints";
 import type { Check, CheckSet } from "../../api/types";
 import { ErrorMessage, Loading, Sha, StateBadge, Time, type Tone } from "../../components/common";
@@ -39,6 +39,44 @@ function StatusIcon({ check }: { check: Check }) {
   if (tone === "success") return <CircleCheck size={16} color="var(--color-success)" />;
   if (tone === "danger") return <CircleX size={16} color="var(--color-danger)" />;
   return <CircleDashed size={16} color="var(--color-warning)" />;
+}
+
+/** Whole seconds in minutes and seconds ("3m 12s"). */
+function useDuration() {
+  const t = useT();
+  return (secs: number) => {
+    const s = Math.max(0, Math.floor(secs));
+    return s < 60 ? t("ci.seconds", { seconds: s }) : t("ci.minutesSeconds", { minutes: Math.floor(s / 60), seconds: s % 60 });
+  };
+}
+
+/** How long a job ran, or has run so far (counting each second from when it
+ * is shown, so it is shown only once the job started), and while it runs what
+ * its estimate leaves: the time remaining, or once that is past, the time the
+ * job took before. */
+function RunTime({ startedAt, finishedAt, expectedSecs }: { startedAt: string; finishedAt?: string | null; expectedSecs?: number }) {
+  const t = useT();
+  const duration = useDuration();
+  const running = !finishedAt;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
+  const secs = ((finishedAt ? Date.parse(finishedAt) : now) - Date.parse(startedAt)) / 1000;
+  const estimate =
+    running && expectedSecs !== undefined
+      ? expectedSecs > secs
+        ? t("ci.remaining", { time: duration(expectedSecs - secs) })
+        : t("ci.lastTime", { time: duration(expectedSecs) })
+      : null;
+  return (
+    <Text span size="sm" c="dimmed">
+      {duration(secs)}
+      {estimate && ` · ${estimate}`}
+    </Text>
+  );
 }
 
 /** A check of the upstream host has an id but no Branvil attempt; its page is on the host. */
@@ -150,6 +188,7 @@ function CheckRow({ check, repo, required, onOpen }: { check: Check; repo: strin
         </Text>
       )}
       <span style={{ marginLeft: "auto" }} />
+      {check.started_at && <RunTime startedAt={check.started_at} finishedAt={check.finished_at} expectedSecs={check.expected_secs} />}
       <CheckStatusBadge status={check.status} conclusion={check.conclusion} />
       {check.attempt_id && <ChevronRight size={16} color="var(--mantine-color-dimmed)" />}
     </>
@@ -242,6 +281,8 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
         <dd>{j.started_at ? <Time value={j.started_at} /> : "—"}</dd>
         <dt>{t("ci.finished")}</dt>
         <dd>{j.finished_at ? <Time value={j.finished_at} /> : "—"}</dd>
+        <dt>{t("ci.duration")}</dt>
+        <dd>{j.started_at ? <RunTime startedAt={j.started_at} finishedAt={j.finished_at} /> : "—"}</dd>
         {j.details && (
           <>
             <dt>{t("ci.reason")}</dt>
