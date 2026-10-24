@@ -117,6 +117,15 @@ gets a parent ticket (it is not completed while a child is open) and tickets
 it is blocked by (it is not moved to In progress while one of them is open),
 among the tickets of its workspace.
 
+On an open pull request, **Related tickets → Edit related tickets** adds
+tickets from the same workspace, removes links, and chooses **Close on merge**
+for each ticket of the PR's repository. Tickets of other repositories are
+references only. Saving checks the revision the editor opened on; if someone
+changed the PR meanwhile, cancel (discarding the unsaved edits), open the editor
+again, and reapply the changes to the latest links. The editor shows known ticket
+titles and marks closed tickets in the choices. Closed and merged PRs show the
+related tickets section only when links exist.
+
 What a member may do follows from its kind. The owner may do everything. An
 agent reads everything and works in every repository: tickets, comments,
 reviews, pull requests, pushes to unprotected branches. Creating workspaces
