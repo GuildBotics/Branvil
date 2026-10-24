@@ -5,6 +5,7 @@ import { setCsrfToken } from "../api/client";
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   setCsrfToken(null);
   window.history.replaceState(null, "", "/");
   window.localStorage.clear();

@@ -29,6 +29,7 @@ export default defineConfig({
   },
   test: {
     maxWorkers: 4,
+    pool: "vmThreads",
     reporters: ["default", "./test-timing.ts"],
     environment: "jsdom",
     globals: true,
