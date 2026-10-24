@@ -1,14 +1,11 @@
 // The ticket updates the relations graph's drags make (unit tested).
 
 import type { TicketPatch } from "../../api/endpoints";
-import { ticketRef, type Card } from "../../api/types";
+import { ticketRef, type Card, type Lane, type Ticket } from "../../api/types";
 import type { MessageKey } from "../../i18n/en";
 
-export interface Change {
-  repo: string;
-  key: string;
-  patch: TicketPatch;
-}
+/** A ticket's update, or its move to the end of a lane of its board. */
+export type Change = { repo: string; key: string } & ({ patch: TicketPatch } | { lane: Lane });
 
 export type EditMessage = Extract<
   MessageKey,
@@ -16,34 +13,63 @@ export type EditMessage = Extract<
 >;
 
 export interface Edit {
-  change: Change;
-  /** The change that writes the relation back as it was. */
-  inverse: Change;
+  /** Written in order: the relation, then the moves of the new tickets it makes ready. */
+  changes: Change[];
+  /** The changes that write it back as it was. */
+  inverse: Change[];
   message: EditMessage;
   params: Record<string, string>;
 }
 
-function edit(card: Card, patch: TicketPatch, inverse: TicketPatch, message: EditMessage, params: Record<string, string>): Edit {
+/** The moves of the open new tickets among `tickets` to `lane` (a closed one moved would be reopened). */
+const moves = (tickets: Ticket[], lane: Lane): Change[] =>
+  tickets.filter((t) => t.lane === "new" && t.state === "open").map((t) => ({ repo: t.repository, key: t.key, lane }));
+
+/**
+ * The moves that make the new tickets among `tickets` ready, as they are being
+ * related or dropped on the background: only a ticket without relations is new
+ * (the figure's frame of new tickets).
+ */
+export const readied = (tickets: Ticket[]): Change[] => moves(tickets, "ready");
+
+function edit(
+  card: Card,
+  patch: TicketPatch,
+  inverse: TicketPatch,
+  message: EditMessage,
+  params: Record<string, string>,
+  readies: Card[] = [],
+): Edit {
   const change = (p: TicketPatch) => ({ repo: card.repository, key: card.key, patch: p });
-  return { change: change(patch), inverse: change(inverse), message, params };
+  return {
+    changes: [change(patch), ...readied(readies)],
+    inverse: [change(inverse), ...moves(readies, "new")],
+    message,
+    params,
+  };
 }
 
 /**
- * The update for dropping a card onto `target` (null: the graph's background);
- * null when it changes nothing. Cycles are left to the server to refuse.
+ * The update for dropping a card onto `target` (null: the graph's background,
+ * where a new ticket is made ready); null when it changes no relation. Cycles
+ * are left to the server to refuse.
  */
 export function parentEdit(dragged: Card, target: Card | null): Edit | null {
   const parent = dragged.parent;
   const child = ticketRef(dragged);
   if (!target) {
     if (!parent) return null;
-    return edit(dragged, { parent: null }, { parent: parent.url }, "relations.unparented", { child, parent: ticketRef(parent) });
+    return edit(dragged, { parent: null }, { parent: parent.url }, "relations.unparented", { child, parent: ticketRef(parent) }, [dragged]);
   }
   if (ticketRef(target) === child || (parent && ticketRef(target) === ticketRef(parent))) return null;
-  return edit(dragged, { parent: target.url }, { parent: parent?.url ?? null }, "relations.madeChild", {
-    child,
-    parent: ticketRef(target),
-  });
+  return edit(
+    dragged,
+    { parent: target.url },
+    { parent: parent?.url ?? null },
+    "relations.madeChild",
+    { child, parent: ticketRef(target) },
+    [dragged, target],
+  );
 }
 
 /** The update for drawing a line from `blocker` to `blocked`; null when it changes nothing. */
@@ -61,8 +87,12 @@ export function unlinkEdit(blocker: Card, blocked: Card): Edit {
 function dependency(blocker: Card, blocked: Card, add: boolean): Edit {
   const on = { add_blocked_by: [blocker.url] };
   const off = { remove_blocked_by: [blocker.url] };
-  return edit(blocked, add ? on : off, add ? off : on, add ? "relations.linked" : "relations.unlinked", {
-    blocked: ticketRef(blocked),
-    blocker: ticketRef(blocker),
-  });
+  return edit(
+    blocked,
+    add ? on : off,
+    add ? off : on,
+    add ? "relations.linked" : "relations.unlinked",
+    { blocked: ticketRef(blocked), blocker: ticketRef(blocker) },
+    add ? [blocker, blocked] : [],
+  );
 }

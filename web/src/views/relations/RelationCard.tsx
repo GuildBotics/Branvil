@@ -53,7 +53,7 @@ export const RelationCard = memo(function RelationCard({
       // A parent has the colour of the header it becomes once opened.
       className={[open !== undefined && "parent", dim && "dim"].filter(Boolean).join(" ")}
       lane={<LaneButton card={card} lanes={lanes} onLane={onLane} disabled={busy} />}
-      lead={open === undefined ? undefined : <ChildrenToggle card={card} open={open} onToggle={onToggle} />}
+      lead={open === undefined ? undefined : <ChildrenToggle open={open} onToggle={() => onToggle(ticketRef(card))} />}
     >
       <span
         className="rel-handle"

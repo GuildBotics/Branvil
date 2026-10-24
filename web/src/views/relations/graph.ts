@@ -4,7 +4,7 @@ import { ticketRef, type Card, type Lane } from "../../api/types";
 
 // Cards are identified by their ticketRef and arrive in board order (lane order, then rank).
 // The figure puts the lanes that matter most first and keeps the board's order
-// within a lane: inside a column, among children, and in `unrelated`.
+// within a lane: inside a column, among children, and in the frame of new tickets.
 const PRIORITY: readonly Lane[] = ["in_progress", "ready", "new", "done"];
 
 export interface GraphNode {
@@ -16,8 +16,13 @@ export interface GraphNode {
   inner: Level | null;
 }
 
+/** The new tickets without relations, in one frame laid out where the first of them would be. */
+export interface NewFrame {
+  fresh: Card[];
+}
+
 /** Columns from left to right; each column in board order. */
-export type Level = GraphNode[][];
+export type Level = (GraphNode | NewFrame)[][];
 
 export interface GraphEdge {
   /** The ref of the shown node the line starts from (the blocker side). */
@@ -34,8 +39,10 @@ export interface GraphEdge {
 export interface Graph {
   level: Level;
   edges: GraphEdge[];
-  unrelated: Card[];
 }
+
+/** Whether a ticket has a parent, a child, or a dependency, shown or not: only one without is new. */
+export const hasRelations = (c: Card) => !!c.parent || c.children.length + c.blocked_by.length + c.blocks.length > 0;
 
 export function buildGraph(board: Card[], options: { includeClosed: boolean; open: ReadonlySet<string> }): Graph {
   const cards = board.toSorted((a, b) => PRIORITY.indexOf(a.lane) - PRIORITY.indexOf(b.lane));
@@ -63,7 +70,6 @@ export function buildGraph(board: Card[], options: { includeClosed: boolean; ope
   /** The card itself, or its topmost closed ancestor. */
   const rep = (c: Card) => path(c).slice(0, -1).find((a) => !options.open.has(a)) ?? ticketRef(c);
 
-  const related = new Set<string>([...children.keys()].concat(shown.filter(parentOf).map(ticketRef)));
   // Within a level, sibling a precedes sibling b when a's subtree blocks b's subtree.
   const preds = new Map<string, string[]>();
   const edges = new Map<string, GraphEdge>();
@@ -71,7 +77,6 @@ export function buildGraph(board: Card[], options: { includeClosed: boolean; ope
     for (const r of blocked.blocked_by) {
       const blocker = byRef.get(ticketRef(r));
       if (!blocker) continue;
-      related.add(ticketRef(blocker)).add(ticketRef(blocked));
       const [px, py] = [path(blocker), path(blocked)];
       const i = px.findIndex((a, j) => a !== py[j]);
       const [a, b] = [px[i], py[i]];
@@ -102,22 +107,22 @@ export function buildGraph(board: Card[], options: { includeClosed: boolean; ope
   };
   for (const c of shown) columnOf(ticketRef(c));
 
+  const isFresh = (c: Card) => c.lane === "new" && !hasRelations(c);
+  const fresh = shown.filter(isFresh);
   const levelOf = (members: Card[]): Level => {
     const level: Level = [];
     for (const card of members) {
       const ref = ticketRef(card);
       const kids = children.get(ref);
-      const node = { card, ref, hasChildren: !!kids, inner: kids && options.open.has(ref) ? levelOf(kids) : null };
-      (level[columnOf(ref)] ??= []).push(node);
+      const item = isFresh(card)
+        ? card === fresh[0] && { fresh }
+        : { card, ref, hasChildren: !!kids, inner: kids && options.open.has(ref) ? levelOf(kids) : null };
+      if (item) (level[columnOf(ref)] ??= []).push(item);
     }
     return level;
   };
 
-  return {
-    level: levelOf(shown.filter((c) => related.has(ticketRef(c)) && !parentOf(c))),
-    edges: [...edges.values()],
-    unrelated: shown.filter((c) => !related.has(ticketRef(c))),
-  };
+  return { level: levelOf(shown.filter((c) => !parentOf(c))), edges: [...edges.values()] };
 }
 
 function append<T>(map: Map<string, T[]>, key: string, value: T) {

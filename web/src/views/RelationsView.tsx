@@ -13,23 +13,23 @@ import { CardFilters } from "./board/CardFilters";
 import { ciUrlsOf, moveRefusal, type Notice } from "./board/CardView";
 import { NewTicketModal, useTicketRepos } from "./board/NewTicket";
 import type { CardFilter } from "./board/ordering";
-import type { Change, Edit } from "./relations/edits";
+import { readied, type Change, type Edit } from "./relations/edits";
 import { Figure } from "./relations/Figure";
 import type { Addition } from "./relations/RelationCard";
-import { buildGraph, type Graph, type Level } from "./relations/graph";
+import { buildGraph, type Level } from "./relations/graph";
 
 /** A relation written: what it changes, what the notice then says, and what undoes it. */
 interface Write {
   /** Written in order. */
   changes: Change[];
   done: string;
-  undo?: Change;
+  undo?: Change[];
   /** The ticket to bring into view once written (a new one), whether or not the change is made. */
   reveal?: string;
 }
 
 /** What the page says after a change: the board's notice with an undo, or a refusal of the service as the ticket page shows it. */
-type Said = (Notice & { undo?: Change }) | { tone: "error"; error: unknown };
+type Said = (Notice & { undo?: Change[] }) | { tone: "error"; error: unknown };
 
 /** What a new ticket made from a card's menu is made as. */
 function addingNote(to: Card, as: Addition | undefined, t: Translate): string {
@@ -48,10 +48,9 @@ function openParents(stored: string | null): Set<string> {
   }
 }
 
-/** The cards a figure shows: those of its levels (the open frames' too) and those without relations. */
-function cardsOf(graph: Graph): Card[] {
-  const ofLevel = (level: Level): Card[] => level.flat().flatMap((n) => [n.card, ...(n.inner ? ofLevel(n.inner) : [])]);
-  return [...ofLevel(graph.level), ...graph.unrelated];
+/** The cards a figure shows: those of its levels, the open frames' and the new tickets' too. */
+function cardsOf(level: Level): Card[] {
+  return level.flat().flatMap((n) => ("fresh" in n ? n.fresh : [n.card, ...(n.inner ? cardsOf(n.inner) : [])]));
 }
 
 /** A workspace's tickets as a figure of their dependencies and parents. */
@@ -68,7 +67,7 @@ export function RelationsView({ workspace }: { workspace: string }) {
   /** The new ticket being made: unrelated, or related to a card. */
   const [adding, setAdding] = useState<{ to?: Card; as?: Addition } | null>(null);
   const [reveal, setReveal] = useState<string | null>(null);
-  const [unrelatedOpen, setUnrelatedOpen] = useState(false);
+  const [freshOpen, setFreshOpen] = useState(false);
   const { query: repos, repos: wsRepos, repo, chooseRepo } = useTicketRepos(workspace);
 
   // Closed tickets are read only when they are shown, or when one is the
@@ -87,20 +86,20 @@ export function RelationsView({ workspace }: { workspace: string }) {
   const lanes = useMemo(() => boardQuery.data?.lanes ?? [], [boardQuery.data]);
   const people = usePeople();
   // Checks are loaded for the pull requests of the cards the figure shows.
-  const ciUrls = useMemo(() => ciUrlsOf(cardsOf(graph)), [graph]);
+  const ciUrls = useMemo(() => ciUrlsOf(cardsOf(graph.level)), [graph]);
   const refresh = () => client.invalidateQueries({ queryKey: ["board"] });
 
   // The figure changes once the service has the change: a refusal leaves it as it was.
   const relate = useMutation({
     mutationFn: async ({ changes }: Write) => {
-      for (const c of changes) await api.tickets.update(c.repo, c.key, c.patch);
+      for (const c of changes) await ("patch" in c ? api.tickets.update(c.repo, c.key, c.patch) : api.tickets.place(c.repo, c.key, { lane: c.lane }));
     },
     onMutate: () => setNotice(null),
     onSuccess: (_ticket, { done, undo }) => setNotice({ tone: "info", text: done, undo }),
     onError: (error) => setNotice({ tone: "error", error }),
     // The figure is changed only once the cards are read again with what was written (until then
     // it is not editable), and only then is a new ticket asked into view: before, it would be found
-    // where it was (among the other tickets) and the request used up there.
+    // where it was (on its own or among the new tickets) and the request used up there.
     onSettled: async (_ticket, _error, { reveal }) => {
       await refresh();
       if (reveal) setReveal(reveal);
@@ -117,7 +116,7 @@ export function RelationsView({ workspace }: { workspace: string }) {
 
   const { mutate: write } = relate;
   const { mutate: place } = move;
-  const onEdit = useCallback((edit: Edit) => write({ changes: [edit.change], done: t(edit.message, edit.params), undo: edit.inverse }), [write, t]);
+  const onEdit = useCallback((edit: Edit) => write({ changes: edit.changes, done: t(edit.message, edit.params), undo: edit.inverse }), [write, t]);
   const onLane = useCallback((card: Card, lane: Lane) => place({ card, lane }), [place]);
   const onPlace = useCallback((card: Card, at: { before: string } | { after: string }) => place({ card, lane: card.lane, at }), [place]);
   const onAdd = useCallback((to: Card, as: Addition) => setAdding({ to, as }), []);
@@ -138,17 +137,19 @@ export function RelationsView({ workspace }: { workspace: string }) {
       return;
     }
     const key = ticketRef(to);
-    const madeChange = (patch: Change["patch"]) => ({ repo: ticket.repository, key: ticket.key, patch });
+    const madeChange = (patch: api.TicketPatch) => ({ repo: ticket.repository, key: ticket.key, patch });
+    // The relation, then the new tickets it relates made ready.
+    const related = (changes: Change[], done: string) => write({ changes: [...changes, ...readied([ticket, to])], done, reveal: made });
     if (adding.as === "parent") {
       // A parent made for a child keeps it where it was: under the child's parent, if it had one.
       const changes = [...(to.parent ? [madeChange({ parent: to.parent.url })] : []), { repo: to.repository, key: to.key, patch: { parent: ticket.url } }];
       // Opened, so the child is seen in it.
       keepOpened(JSON.stringify([...open, made]));
-      write({ changes, done: t("relations.createdParent", { parent: made, child: key }), reveal: made });
+      related(changes, t("relations.createdParent", { parent: made, child: key }));
     } else if (adding.as === "child") {
-      write({ changes: [madeChange({ parent: to.url })], done: t("relations.createdChild", { child: made, parent: key }), reveal: made });
+      related([madeChange({ parent: to.url })], t("relations.createdChild", { child: made, parent: key }));
     } else {
-      write({ changes: [madeChange({ add_blocked_by: [to.url] })], done: t("relations.createdNext", { blocked: made, blocker: key }), reveal: made });
+      related([madeChange({ add_blocked_by: [to.url] })], t("relations.createdNext", { blocked: made, blocker: key }));
     }
   };
   const onToggle = useCallback(
@@ -197,7 +198,7 @@ export function RelationsView({ workspace }: { workspace: string }) {
               size="compact-sm"
               variant="default"
               disabled={relate.isPending}
-              onClick={() => notice.undo && write({ changes: [notice.undo], done: t("relations.undone") })}
+              onClick={() => notice.undo && write({ changes: notice.undo, done: t("relations.undone") })}
             >
               {t("relations.undo")}
             </Button>
@@ -233,14 +234,15 @@ export function RelationsView({ workspace }: { workspace: string }) {
           onAdd={onAdd}
           reveal={reveal}
           onRevealed={onRevealed}
-          unrelatedOpen={unrelatedOpen}
-          onUnrelatedOpen={setUnrelatedOpen}
+          freshOpen={freshOpen}
+          onFreshOpen={setFreshOpen}
         />
       )}
       <NewTicketModal
         workspace={workspace}
         lanes={lanes}
-        start={adding && { lane: "new", title: "" }}
+        // A ticket made related to a card is ready: only one without relations is new.
+        start={adding && { lane: adding.to ? "ready" : "new", title: "" }}
         note={adding?.to && addingNote(adding.to, adding.as, t)}
         onCreated={onCreated}
         repos={wsRepos}

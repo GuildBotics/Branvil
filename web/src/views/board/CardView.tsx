@@ -115,13 +115,13 @@ export function LaneButton({ card, lanes, onLane, disabled }: { card: Card; lane
 const childrenText = (card: Card, t: Translate) =>
   t("board.children", { closed: card.children.filter((c) => c.state === "closed").length, total: card.children.length });
 
-/** Opens or closes a card's children; `onToggle` gets the card's reference. */
-export function ChildrenToggle({ card, open, onToggle }: { card: Card; open: boolean; onToggle: (ref: string) => void }) {
+/** Opens or closes a card's children (or the frame of new tickets'). */
+export function ChildrenToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   const t = useT();
   const label = t(open ? "relations.closeChildren" : "relations.openChildren");
   return (
     <Tooltip label={label}>
-      <button type="button" className="card-control" aria-label={label} aria-expanded={open} onClick={() => onToggle(ticketRef(card))}>
+      <button type="button" className="card-control" aria-label={label} aria-expanded={open} onClick={onToggle}>
         {open ? "▼" : "▶"}
       </button>
     </Tooltip>
