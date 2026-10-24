@@ -11,16 +11,18 @@ use aws_lc_rs::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
 use super::host::{
-    AppIdentity, As, Credential, HostError, HostPull, HostResult, PullChange, PullState,
+    AdvisoryId, AlertState, AppIdentity, As, Credential, DependencyAlert, HostError, HostPull,
+    HostResult, PullChange, PullState,
 };
 use crate::config::GitHubConfig;
 use crate::error::{AppError, AppResult};
 use crate::model::HostCheck;
+use crate::util;
 
 pub struct GitHub {
     api: String,
@@ -67,6 +69,87 @@ fn number_ok(s: &str) -> Option<u64> {
     (!s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit()))
         .then(|| s.parse().ok())
         .flatten()
+}
+
+/// What a refusal of Dependabot alerts may come from: GitHub's answer does
+/// not tell which.
+const ALERTS_ACCESS: &str = "Check that the reader's account can read the repository's Dependabot alerts: a GitHub App needs Repository permissions → Dependabot alerts: Read-only and access to the repository, with the added permission approved on the installation; a fine-grained token needs the same permission, a classic token the security_events (or repo) scope. Dependabot alerts must also be enabled for the repository.";
+
+/// The `after` cursor of the `next` link GitHub sends with a page that has
+/// more, `None` on the last page. The link itself is not followed (GitHub
+/// may spell it otherwise), and a next page without a cursor is a failure,
+/// never the end of the list.
+fn next_after(headers: &reqwest::header::HeaderMap) -> HostResult<Option<String>> {
+    let Some(next) = headers
+        .get("Link")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|l| l.split(',').find(|l| l.contains(r#"rel="next""#)))
+    else {
+        return Ok(None);
+    };
+    // Percent-decoded only: a cursor's `+` is not a space.
+    next.trim()
+        .strip_prefix('<')
+        .and_then(|n| n.split_once('>'))
+        .and_then(|(url, _)| url.split_once('?'))
+        .and_then(|(_, query)| query.split('&').find_map(|p| p.strip_prefix("after=")))
+        .and_then(|v| percent_decode_str(v).decode_utf8().ok())
+        .map(|v| Some(v.into_owned()))
+        .ok_or_else(|| {
+            host_error(
+                None,
+                "GitHub sent a next page of Dependabot alerts that Branvil cannot follow.",
+            )
+        })
+}
+
+/// A Dependabot alert in Branvil's words.
+fn alert(v: &Value) -> HostResult<DependencyAlert> {
+    let unreadable = || host_error(None, "GitHub sent a Dependabot alert Branvil cannot read.");
+    let id = v["number"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .ok_or_else(unreadable)?;
+    let state = match v["state"].as_str() {
+        Some("open") => AlertState::Open,
+        Some("fixed") => AlertState::Resolved,
+        Some("dismissed" | "auto_dismissed") => AlertState::Dismissed,
+        _ => return Err(unreadable()),
+    };
+    let text = |v: &Value| v.as_str().map(str::to_string);
+    let time = |v: &Value| v.as_str().and_then(|t| util::parse_time(t).ok());
+    let (dependency, advisory, vulnerability) = (
+        &v["dependency"],
+        &v["security_advisory"],
+        &v["security_vulnerability"],
+    );
+    Ok(DependencyAlert {
+        id: id.to_string(),
+        state,
+        url: text(&v["html_url"]),
+        package: text(&dependency["package"]["name"]),
+        ecosystem: text(&dependency["package"]["ecosystem"]),
+        manifest_path: text(&dependency["manifest_path"]),
+        severity: text(&vulnerability["severity"]).or_else(|| text(&advisory["severity"])),
+        identifiers: advisory["identifiers"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|i| {
+                Some(AdvisoryId {
+                    kind: text(&i["type"])?,
+                    value: text(&i["value"])?,
+                })
+            })
+            .collect(),
+        summary: text(&advisory["summary"]),
+        description: text(&advisory["description"]),
+        affected_versions: text(&vulnerability["vulnerable_version_range"]),
+        patched_version: text(&vulnerability["first_patched_version"]["identifier"]),
+        created_at: time(&v["created_at"]),
+        updated_at: time(&v["updated_at"]),
+    })
 }
 
 fn host_error(status: Option<u16>, message: impl Into<String>) -> HostError {
@@ -220,8 +303,31 @@ impl GitHub {
             .header("X-GitHub-Api-Version", "2022-11-28")
     }
 
+    /// A refusal; a used-up rate limit (`429`, or `403` saying so) is `429`.
     async fn failure(response: reqwest::Response) -> HostError {
         let status = response.status();
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        if status == StatusCode::TOO_MANY_REQUESTS
+            || (status == StatusCode::FORBIDDEN
+                && (header("x-ratelimit-remaining").as_deref() == Some("0")
+                    || header("retry-after").is_some()))
+        {
+            let reset = header("x-ratelimit-reset")
+                .and_then(|s| s.parse().ok())
+                .and_then(|s| DateTime::from_timestamp(s, 0))
+                .map(|t| format!(" until {}", util::format_time(t)))
+                .unwrap_or_default();
+            return host_error(
+                Some(429),
+                format!("GitHub's rate limit for the account is used up{reset}; try again later."),
+            );
+        }
         let detail = response
             .json::<Value>()
             .await
@@ -582,6 +688,69 @@ impl GitHub {
         kept.drain(..kept.len().saturating_sub(tail));
         Ok((kept, size))
     }
+
+    /// One read of Dependabot alerts, never cached (not polled), and the
+    /// `after` cursor of the rest.
+    async fn alerts(&self, who: As<'_>, path: &str) -> HostResult<(Value, Option<String>)> {
+        let response = self
+            .request(Method::GET, who, path)
+            .send()
+            .await
+            .map_err(Self::transport)?;
+        if !response.status().is_success() {
+            let e = Self::failure(response).await;
+            return Err(match e.status {
+                Some(401 | 403 | 404) => host_error(e.status, format!("{} {ALERTS_ACCESS}", e)),
+                _ => e,
+            });
+        }
+        let next = next_after(response.headers())?;
+        Ok((response.json().await.map_err(Self::transport)?, next))
+    }
+
+    pub async fn dependency_alerts(
+        &self,
+        who: As<'_>,
+        repository: &str,
+        state: AlertState,
+        limit: usize,
+        after: Option<&str>,
+    ) -> HostResult<(Vec<DependencyAlert>, Option<String>)> {
+        let state = match state {
+            AlertState::Open => "open",
+            AlertState::Resolved => "fixed",
+            AlertState::Dismissed => "dismissed,auto_dismissed",
+        };
+        let mut path =
+            format!("/repos/{repository}/dependabot/alerts?state={state}&per_page={limit}");
+        if let Some(after) = after {
+            path.push_str(&format!("&after={}", utf8_percent_encode(after, IN_QUERY)));
+        }
+        let (v, next) = self.alerts(who, &path).await?;
+        let alerts = v
+            .as_array()
+            .ok_or_else(|| host_error(None, "GitHub sent no list of Dependabot alerts."))?
+            .iter()
+            .map(alert)
+            .collect::<HostResult<_>>()?;
+        Ok((alerts, next))
+    }
+
+    pub async fn dependency_alert(
+        &self,
+        who: As<'_>,
+        repository: &str,
+        id: &str,
+    ) -> HostResult<DependencyAlert> {
+        if number_ok(id).is_none() {
+            return Err(host_error(
+                Some(404),
+                format!("'{id}' names no Dependabot alert."),
+            ));
+        }
+        let path = format!("/repos/{repository}/dependabot/alerts/{id}");
+        alert(&self.alerts(who, &path).await?.0)
+    }
 }
 
 #[cfg(test)]
@@ -630,6 +799,37 @@ mod tests {
             ..app
         };
         assert_eq!(app_jwt(&path_like).unwrap_err().status, Some(400));
+    }
+
+    #[test]
+    fn the_next_page_of_alerts_is_its_after_cursor_or_a_failure() {
+        let link = |value: &str| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("Link", value.parse().unwrap());
+            next_after(&headers)
+        };
+        assert_eq!(next_after(&Default::default()), Ok(None));
+        assert_eq!(
+            link(
+                r#"<https://api.github.com/repositories/9/dependabot/alerts?per_page=2&after=a+b%2F%3D>; rel="next""#
+            ),
+            Ok(Some("a+b/=".into()))
+        );
+        assert_eq!(
+            link(r#"<https://x/a?before=z>; rel="prev", <https://x/a?after=y>; rel="next""#),
+            Ok(Some("y".into()))
+        );
+        assert_eq!(link(r#"<https://x/a?before=z>; rel="prev""#), Ok(None));
+        for unfollowable in [
+            r#"<https://x/a?per_page=30&page=2>; rel="next""#,
+            r#"<https://x/a>; rel="next""#,
+        ] {
+            assert_eq!(
+                link(unfollowable).unwrap_err().status,
+                None,
+                "{unfollowable}"
+            );
+        }
     }
 
     #[test]

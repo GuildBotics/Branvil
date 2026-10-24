@@ -352,6 +352,15 @@ outside see. Branvil never pushes the default branch; it follows it.
    Notifications, the owner enters its URL (a Slack Incoming Webhook takes the
    message as it is), which is kept like a credential and never shown again.
 
+Members read the GitHub repository's Dependabot alerts through Branvil
+(`docs/api.md`, "Dependency alerts"), with the reader's account; Branvil
+keeps none of them. For that the reader needs Dependabot alerts enabled for
+the repository and, for a GitHub App, Repository permissions → **Dependabot
+alerts: Read-only** with access to the repository (adding a permission to an
+installed app takes effect once the account that installed it approves it);
+for a token, the same permission (fine-grained) or the `security_events`
+scope (classic).
+
 Branvil polls GitHub with conditional requests (an unchanged answer is a free
 `304`): every 60 s while a published pull request is open, every 15 min
 otherwise, and at once after publishing or "Check now". Settings in

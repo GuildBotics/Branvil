@@ -55,7 +55,7 @@ README); "provider unit tests on the double" are GuildBotics'
 | `read(pull_request_threads)` / `review_thread_comments` | → `ReviewThread` / `ThreadComment` page | inline comments | — | `inline(pull, seq)` | — | `GET pulls/{n}/threads[/{id}/comments]` | provider unit | done: provider unit tests on the double |
 | `read(pull_request_readiness)` | → `Readiness` | as `readiness` | — | — | — | — | contract | done |
 | `read(ticket_pull_requests)` | ticket URL → `TicketPullRequest` page; foreign → `ServiceUnsupported`; PR URL → `ServiceNotFound` | ticket→PR links | — | `ticket_pulls(ticket, pull)` | — | `GET repos/{r}/tickets/{n}` (`pull_requests` via cards) / `GET repos/{r}/tickets/{n}/pulls` | contract | done: smoke |
-| `read(dependency_alerts)` | → `ServiceUnsupported` (Branvil keeps no dependency advisories; out of the product scope of §1) | — | — | — | — | — | contract | done (unsupported) |
+| `read(dependency_alerts)` | repository path → `DependencyAlert` page, or one alert by `id`; the upstream host's alerts, read with the upstream's reader (Branvil keeps none); no upstream → `ServiceUnsupported`; a refusal, a missing account, or an unreachable host → `ServiceError` (never an empty page) | upstream setting, reader's credential | — | — | each page read from the host at request time; the cursor carries the host's, bound to the upstream | `GET repos/{r}/upstream/dependency-alerts[/{id}]` | contract + provider unit | done |
 | `identity(check)` | → `{"branvil_username": ...}`; with `check`, `GET /me` and raise on `401` | member | — | — | — | `GET /me` | provider unit | done: provider unit tests on the double |
 | `comment(url, body, status)` | → `CommentWritten` | PR | comment | `comments` | one write txn | `POST pulls/{n}/comments` | contract | done |
 | `create_pull_request` | → `PullRequestCreated`; existing open (head, base) returned unchanged; foreign ticket + `closes` → `ServiceUnsupported`; ticket of another repository + `closes` → `ServiceUnsupported`; missing Branvil ticket → `ServiceNotFound` | head branch tip, open PR index, ticket | PR, ticket links | `open_pulls(repo, head, base)` (unique), `ticket_pulls` | lookup + insert in one write txn (single writer ⇒ no double create) | `POST repos/{r}/pulls` | contract + service test | done: smoke |
@@ -98,7 +98,7 @@ README); "provider unit tests on the double" are GuildBotics'
 | --- | --- |
 | `request_changes` | supported |
 | artifacts | supported |
-| `dependency_alerts` | `ServiceUnsupported` |
+| `dependency_alerts` | supported for a repository with an upstream (the host's alerts); `ServiceUnsupported` without one |
 | ticket created off the board | `ServiceUnsupported` (every ticket is a card) |
 | failed logs | supported |
 | PRs of another service's ticket | `ServiceUnsupported` |
@@ -111,5 +111,6 @@ resolution, merge, CI retry/cancel, required checks, the upstream, publishing: r
 the GUI and the `branvil` CLI only. Workspaces, members, tokens, and members' accounts are
 not in the ports either; they are Branvil's public admin API (`api.md`, "Members and tokens
 (admin API)"), which a local app holding an owner token from the consent screen may use to
-set Branvil up. A pull request merged on the upstream host reads as merged here, and the host's
-checks of a published head are among its checks.
+set Branvil up. A pull request merged on the upstream host reads as merged here, the host's
+checks of a published head are among its checks, and the host's dependency alerts are the
+repository's.

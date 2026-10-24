@@ -5,7 +5,7 @@
 
 use crate::common;
 
-use common::github::{AppKey, FakeGitHub};
+use common::github::{AppKey, FakeGitHub, Refusal};
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -436,6 +436,35 @@ async fn a_pull_request_is_published_as_its_author_and_follows_the_host_to_the_m
     assert_eq!(log["log"], "boom on Windows\n");
     assert_eq!(log["truncated"], true);
     assert_eq!(log["log_bytes"], "line 1\nboom on Windows\n".len());
+    // Read as the reader only; a refusal or a missing credential is said.
+    let log_path = format!("{}/jobs/github-41/log", w.repo_path());
+    gh.set(|st| {
+        st.refusal = Some(Refusal {
+            status: 403,
+            headers: vec![],
+            message: "Resource not accessible by integration",
+        })
+    });
+    let (st, v) = s.get(&log_path, &w.aiko).await;
+    assert_eq!(
+        (st, &v["error"]["code"]),
+        (StatusCode::CONFLICT, &json!("upstream_refused"))
+    );
+    gh.set(|st| st.refusal = None);
+    let file = s.data.join("secrets/accounts/alice.github.json");
+    let kept = std::fs::read(&file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let (st, v) = s.get(&log_path, &w.aiko).await;
+    assert_eq!(
+        (st, &v["error"]["code"]),
+        (StatusCode::CONFLICT, &json!("no_account"))
+    );
+    std::fs::write(&file, kept).unwrap();
+    assert!(
+        gh.requests("GET", "/logs")
+            .iter()
+            .all(|(_, l)| l == "alice-gh")
+    );
 
     // A fix pushed in Branvil and an edited body reach GitHub as aiko.
     let fixed = w.push_change("ticket/1", "f.txt", "fixed\n");
@@ -1359,5 +1388,284 @@ async fn an_app_account_reads_and_publishes_with_installation_tokens_renewed_bef
                 file.display()
             );
         }
+    }
+}
+
+fn alerts_path(w: &World) -> String {
+    format!("{}/upstream/dependency-alerts", w.repo_path())
+}
+
+/// Every alert of `query`, following `next_cursor` page by page.
+async fn all_alerts(w: &World, query: &str) -> (Vec<Value>, usize) {
+    let (mut found, mut pages, mut cursor) = (Vec::new(), 0, String::new());
+    loop {
+        let mut path = format!("{}?{query}", alerts_path(w));
+        if !cursor.is_empty() {
+            path = format!("{path}&cursor={cursor}");
+        }
+        let v = w.server.ok(&path, &w.aiko).await;
+        found.extend(v["items"].as_array().unwrap().iter().cloned());
+        pages += 1;
+        match v["next_cursor"].as_str() {
+            Some(c) => cursor = c.to_string(),
+            None => return (found, pages),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dependency_alerts_are_read_from_the_host_page_by_page_with_the_readers_account() {
+    let (w, gh) = followed().await;
+    let s = &w.server;
+    // aiko has an account too, but the owner's is the upstream's reader.
+    set_account(&w, "aiko", AIKO_TOKEN).await;
+    assert_eq!(reader_now(&w).await["member"], "alice");
+
+    // Nothing on the host yet: an empty list, read from the host.
+    let v = s.ok(&alerts_path(&w), &w.aiko).await;
+    assert_eq!(v, json!({"items": [], "next_cursor": null}));
+
+    gh.alert(1, "open", Some("2.0.0"));
+    gh.alert(2, "fixed", Some("2.0.0"));
+    gh.alert(3, "open", None);
+    gh.alert(4, "auto_dismissed", Some("2.0.0"));
+    gh.alert(5, "open", Some("2.1.0"));
+    gh.alert(6, "dismissed", None);
+
+    // Any member who sees the repository reads them, in the host's order,
+    // across pages; the host's cursor is carried in Branvil's.
+    let (open, pages) = all_alerts(&w, "limit=2").await;
+    let ids: Vec<&str> = open.iter().map(|a| a["id"].as_str().unwrap()).collect();
+    assert_eq!((ids, pages), (vec!["1", "3", "5"], 2));
+    assert_eq!(
+        open[0],
+        json!({
+            "id": "1", "state": "open",
+            "url": "https://github.test/octo/demo/security/dependabot/1",
+            "package": "pkg-1", "ecosystem": "npm", "manifest_path": "package-lock.json",
+            "severity": "high",
+            "identifiers": [
+                {"type": "GHSA", "value": "GHSA-0000-0000-0001"},
+                {"type": "CVE", "value": "CVE-2026-0001"},
+            ],
+            "summary": "Advisory 1", "description": "What goes wrong.",
+            "affected_versions": "< 2.0.0", "patched_version": "2.0.0",
+            "created_at": "2026-10-20T08:00:00.000Z", "updated_at": "2026-10-21T09:30:00.000Z",
+        })
+    );
+    // Without a version that fixes it.
+    assert_eq!(open[1]["patched_version"], Value::Null);
+    let states = |list: &[Value]| -> Vec<(String, String)> {
+        list.iter()
+            .map(|a| {
+                (
+                    a["id"].as_str().unwrap().into(),
+                    a["state"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    };
+    let (resolved, _) = all_alerts(&w, "state=resolved").await;
+    assert_eq!(states(&resolved), [("2".into(), "resolved".into())]);
+    let (dismissed, _) = all_alerts(&w, "state=dismissed&limit=1").await;
+    assert_eq!(
+        states(&dismissed),
+        [
+            ("4".into(), "dismissed".into()),
+            ("6".into(), "dismissed".into())
+        ]
+    );
+
+    // One alert by its id.
+    let v = s.ok(&format!("{}/2", alerts_path(&w)), &w.aiko).await;
+    assert_eq!((&v["id"], &v["state"]), (&json!("2"), &json!("resolved")));
+    for missing in ["99", "0", "02", "x"] {
+        let (st, v) = s
+            .get(&format!("{}/{missing}", alerts_path(&w)), &w.aiko)
+            .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{missing}: {v}");
+    }
+
+    // A cursor is bound to the conditions (`limit` aside, as for every
+    // collection) and to the upstream.
+    let first = s.ok(&format!("{}?limit=1", alerts_path(&w)), &w.aiko).await;
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    let rest = s
+        .ok(
+            &format!("{}?limit=5&cursor={cursor}", alerts_path(&w)),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(rest["items"].as_array().unwrap().len(), 2, "{rest}");
+    for other in [
+        format!("state=resolved&limit=1&cursor={cursor}"),
+        "limit=1&cursor=garbage".to_string(),
+    ] {
+        let (st, v) = s
+            .get(&format!("{}?{other}", alerts_path(&w)), &w.aiko)
+            .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{other}: {v}");
+        assert_eq!(v["error"]["code"], "invalid_cursor");
+    }
+    let (st, v) = s
+        .get(&format!("{}?state=fixed", alerts_path(&w)), &w.aiko)
+        .await;
+    assert_eq!(
+        (st, &v["error"]["code"]),
+        (StatusCode::BAD_REQUEST, &json!("invalid"))
+    );
+
+    // Every read went to GitHub as the reader, never as aiko's account.
+    let reads = gh.requests("GET", "/dependabot/alerts");
+    assert!(!reads.is_empty());
+    assert!(
+        reads.iter().all(|(_, login)| login == "alice-gh"),
+        "{reads:?}"
+    );
+    let answer = s
+        .ok(&format!("{}?limit=100", alerts_path(&w)), &w.aiko)
+        .await;
+    assert!(!answer.to_string().contains(OWNER_TOKEN));
+
+    // A GitHub App reads them with its installation token.
+    let key = with_app(&gh);
+    let (st, v) = s
+        .put(
+            "/members/aiko/accounts/github",
+            &w.owner,
+            app_body(&key.pem, INSTALLATION),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let mut named = json!({"provider": "github", "repository": GH});
+    named["reader"] = json!("aiko");
+    put_upstream(&w, named).await;
+    let since = gh.requests("GET", "/dependabot/alerts").len();
+    let (open, _) = all_alerts(&w, "limit=100").await;
+    assert_eq!(open.len(), 3);
+    let reads = gh.requests("GET", "/dependabot/alerts");
+    assert!(
+        reads[since..].iter().all(|(_, l)| l == "octo-app[bot]"),
+        "{reads:?}"
+    );
+
+    // The cursor of an earlier upstream does not continue on another one.
+    let first = s.ok(&format!("{}?limit=1", alerts_path(&w)), &w.aiko).await;
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    gh.repository("octo/other", &w.work);
+    put_upstream(
+        &w,
+        json!({"provider": "github", "repository": "octo/other"}),
+    )
+    .await;
+    let (st, v) = s
+        .get(
+            &format!("{}?limit=1&cursor={cursor}", alerts_path(&w)),
+            &w.aiko,
+        )
+        .await;
+    assert_eq!(
+        (st, &v["error"]["code"]),
+        (StatusCode::BAD_REQUEST, &json!("invalid_cursor"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_read_of_dependency_alerts_is_never_an_empty_list() {
+    let (w, gh) = followed().await;
+    let s = &w.server;
+    set_account(&w, "aiko", AIKO_TOKEN).await;
+    gh.alert(1, "open", None);
+    let list = alerts_path(&w);
+    let one = format!("{list}/1");
+    let failed = |st: StatusCode, v: &Value, code: &str| {
+        assert_eq!((st, v["error"]["code"].as_str()), (st, Some(code)), "{v}");
+        assert!(v.get("items").is_none(), "{v}");
+    };
+
+    // The host refuses: what it said and what to check, as the reader only.
+    let refused = |status, message| Refusal {
+        status,
+        headers: vec![],
+        message,
+    };
+    let access = "Dependabot alerts: Read-only";
+    let rate_limited = Refusal {
+        headers: vec![
+            ("x-ratelimit-remaining", "0".into()),
+            ("x-ratelimit-reset", "1792483200".into()),
+        ],
+        ..refused(403, "API rate limit exceeded")
+    };
+    let cases = [
+        (
+            refused(403, "Resource not accessible by integration"),
+            StatusCode::CONFLICT,
+            "upstream_refused",
+            vec!["Resource not accessible by integration", access],
+        ),
+        (
+            refused(401, "Bad credentials"),
+            StatusCode::CONFLICT,
+            "upstream_refused",
+            vec!["Bad credentials", access],
+        ),
+        (
+            refused(404, "Not Found"),
+            StatusCode::NOT_FOUND,
+            "not_found",
+            vec!["Not Found", access],
+        ),
+        (
+            rate_limited,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            vec!["rate limit", "until 2026-10-20T08:00:00.000Z"],
+        ),
+        (
+            refused(502, "Server Error"),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            vec!["502"],
+        ),
+    ];
+    for (refusal, expected, code, words) in cases {
+        gh.set(|st| st.refusal = Some(refusal.clone()));
+        for path in [&list, &one] {
+            let (st, v) = s.get(path, &w.aiko).await;
+            assert_eq!(st, expected, "{} {path}: {v}", refusal.status);
+            failed(st, &v, code);
+            let said = v["error"]["message"].as_str().unwrap();
+            assert!(words.iter().all(|w| said.contains(w)), "{said}");
+        }
+    }
+    let reads = gh.requests("GET", "/dependabot/alerts");
+    assert!(
+        reads.iter().all(|(_, login)| login == "alice-gh"),
+        "{reads:?}"
+    );
+    gh.set(|st| st.refusal = None);
+    assert_eq!(s.ok(&list, &w.aiko).await["items"][0]["id"], "1");
+
+    // The reader's credential is not on this machine: nobody else's is used.
+    let file = s.data.join("secrets/accounts/alice.github.json");
+    let kept = std::fs::read(&file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let before = gh.requests("GET", "/dependabot/alerts").len();
+    let (st, v) = s.get(&list, &w.aiko).await;
+    failed(st, &v, "no_account");
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(gh.requests("GET", "/dependabot/alerts").len(), before);
+    std::fs::write(&file, kept).unwrap();
+
+    // No upstream: nothing to read alerts of.
+    let (st, _) = s
+        .delete(&format!("{}/upstream", w.repo_path()), &w.owner)
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    for path in [&list, &one] {
+        let (st, v) = s.get(path, &w.aiko).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+        failed(st, &v, "unsupported");
     }
 }
