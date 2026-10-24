@@ -1,6 +1,6 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CiSettings } from "../api/types";
 import { apiError, fakeApi, json, ME, renderApp, SESSION } from "../test/fakeApi";
 
@@ -172,6 +172,7 @@ describe("CI settings", () => {
   });
 
   it("pulls an image, follows the running operation to what it added, and marks it in the list", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const pulling = { ...RUNNING, kind: "pull", target: "debian:bookworm" };
     const pulled = { ...pulling, state: "succeeded", finished_at: "2026-10-18T06:01:00Z", loaded: [{ reference: "debian:bookworm" }] };
     const debian = { ...CACHED, reference: "debian:bookworm", digest: DEBIAN_DIGEST, size_bytes: 123 * 2 ** 20, used_by: [] };
@@ -197,7 +198,10 @@ describe("CI settings", () => {
     expect(await within(dialog).findByText("An image is being added: debian:bookworm")).toBeInTheDocument();
     await user.type(within(dialog).getByRole("textbox", { name: "Image reference" }), "alpine:3.20");
     expect(within(dialog).getByRole("button", { name: "Add" })).toBeDisabled();
-    const added = await within(dialog).findByRole("list", { name: "Added images" }, { timeout: 4000 });
+    expect(fake.calls("GET", "/api/v1/admin/ci")).toHaveLength(1);
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    const added = await within(dialog).findByRole("list", { name: "Added images" });
+    expect(fake.calls("GET", "/api/v1/admin/ci")).toHaveLength(2);
     expect(within(added).getByText("Added debian:bookworm")).toBeInTheDocument();
     await user.click(within(added).getByRole("button", { name: "Copy reference" }));
     expect(await navigator.clipboard.readText()).toBe("debian:bookworm");
@@ -208,7 +212,7 @@ describe("CI settings", () => {
     const [agent, pulledRow] = within(screen.getByRole("list", { name: "In the cache" })).getAllByRole("listitem") as [HTMLElement, HTMLElement];
     expect(within(pulledRow).getByText("Added")).toBeInTheDocument();
     expect(within(agent).queryByText("Added")).not.toBeInTheDocument();
-  }, 15_000);
+  });
 
   it("says why Add is busy when an operation started elsewhere is running", async () => {
     fakeApi({ ...SHELL, "GET /api/v1/admin/ci": json(200, { ...CI, operation: RUNNING }) });
@@ -273,13 +277,17 @@ describe("CI settings", () => {
   });
 
   it("follows a runner switched on until it reports", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const starting = { ...CI, runner: { ...CI.runner, state: "no_runner", detail: "No runner has contacted Branvil.", runners: [] } };
-    fakeApi({ ...SHELL, "GET /api/v1/admin/ci": [json(200, starting), json(200, CI)] });
+    const fake = fakeApi({ ...SHELL, "GET /api/v1/admin/ci": [json(200, starting), json(200, CI)] });
     renderApp("/-/settings/ci");
     const runner = await screen.findByRole("region", { name: "Runner" });
     expect(within(runner).getByText("No runner")).toBeInTheDocument();
-    await waitFor(() => expect(within(screen.getByRole("region", { name: "Runner" })).getByText("Ready")).toBeInTheDocument(), { timeout: 5000 });
-  }, 15_000);
+    expect(fake.calls("GET", "/api/v1/admin/ci")).toHaveLength(1);
+    await act(() => vi.advanceTimersByTimeAsync(3_000));
+    expect(await within(runner).findByText("Ready")).toBeInTheDocument();
+    expect(fake.calls("GET", "/api/v1/admin/ci")).toHaveLength(2);
+  });
 
   it("shows that the service waits for the running jobs before it stops", async () => {
     const stopping = { ...CI, runner: { ...CI.runner, state: "stopping", detail: "Branvil is stopping (an update or a restart)." } };

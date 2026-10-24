@@ -1,6 +1,6 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Check, Checks } from "../api/types";
 import { dictionaries } from "../i18n";
 import { applyChange } from "../query/events";
@@ -86,10 +86,6 @@ function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]>
     ...extra,
   };
 }
-
-afterEach(() => {
-  vi.useRealTimers();
-});
 
 describe("pull request review", () => {
   it("shows the description (or 'Not provided'), the files in a drawer, checks with reason and a log in a drawer, and status notices", async () => {

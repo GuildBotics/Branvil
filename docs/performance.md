@@ -507,3 +507,170 @@ Incremental data saves about 17 s of compiling a commit (`clippy` was not
 compared: the change failed its lint `items_after_test_module`) and more than
 doubles the largest entries, which the cache copies twice per job (2.6 s and
 5.6 s for `test`'s 2218 MiB). The pipeline keeps `CARGO_INCREMENTAL=0`.
+
+### Web tests
+
+`cd web && npm run test` records file and test durations in
+`web/test-results/timing.json`. The `web` CI job uploads that file as the
+`web-tests` artifact, including on test failure, and streams Vitest output
+into the job log. To keep a
+local measurement outside the checkout:
+
+```sh
+cd web
+BRANVIL_TEST_RESULTS=/tmp/branvil-web-timing npm run test
+```
+
+Initial measurements for #78 on 2026-10-24: 231 tests in 20 files, Vitest 5.0.2,
+jsdom 30.1.1, Node.js 24.22.1, at most four workers. The host is an Apple
+M1 Pro (10 cores, 16 GiB), macOS 26.7.1. Production CI uses a Linux 6.12.99
+microVM with four CPUs and 6144 MiB per job, image configuration
+`sha256:67d06b064a73876d72ccf609b0b9854cb5f19b19cfc6ea9dd8f39b8b1d067932`,
+and a runner configured for two simultaneous jobs. Each row below is one
+run; the host also runs the service and other desktop applications.
+
+| Run | Commit | Vitest wall time | Result |
+| --- | --- | ---: | --- |
+| Before, normal pipeline; `test` observed running alongside `web` | `4cb2ffe` | 71.79 s | 231 passed |
+| Before, web-only pipeline | `652e221` | 65.53 s | 231 passed |
+| After, web-only pipeline | `7f2a712` | 36.84 s | 231 passed |
+| After, normal pipeline; Rust `test` running alongside `web` | `9f0c6e0` | 32.36 s | 231 passed |
+| After, normal pipeline repeated; Rust `test` running alongside `web` | `ec3dde1` | 77.88 s | 231 passed |
+
+The service's attempt-start timestamps in `~/Library/Logs/branvil.log` and
+the completed job logs in `<data>/ci/logs/` were checked across repositories.
+Completed logs' last-write times bound their ends; service restarts bound
+older interrupted logs. The test intervals in `timing.json` were
+12:57:41–12:58:47 and 13:00:21–13:00:58 JST for the two web-only runs:
+no other job overlapped either interval. In all three normal-pipeline runs,
+the Rust `test` job overlapped the web tests. The runner's two-job limit
+was unchanged throughout.
+
+Before the change, the shared run was 6.26 s slower than the solitary run;
+after it, the first shared run was 4.48 s faster, but its repeat took
+77.88 s. These are observations, not
+isolated estimates of the cost of another job: the individual phases and
+background activity also vary between runs.
+
+Vitest's `Duration` breakdown, as percentages of all tracked phases (summed
+across workers, not percentages of wall time):
+
+| Run | Tests | Environment | Import | Setup | Transform | Worker |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before, normal pipeline | 40% | 29% | 19% | 8% | 3% | <1% |
+| Before, web-only pipeline | 52% | 23% | 18% | 5% | 2% | <1% |
+| After, web-only pipeline | 52% | 13% | 26% | 6% | 1% | 3% |
+| After, normal pipeline | 72% | 10% | 11% | 4% | 1% | 2% |
+| After, normal pipeline repeated | 74% | 10% | 10% | 3% | 1% | 3% |
+
+The normal pipeline spent 78.33 s in total creating jsdom environments,
+once per file. File test durations were `relations` 25.68 s, `pull` 22.28 s,
+`board` 13.89 s, `ci` 12.05 s, `settings` 11.87 s and `pages` 5.77 s. The
+slowest individual tests were closed-ticket read retries (3.25 s), runner
+polling (3.13 s), image-operation polling (3.09 s) and board filtering
+(2.73 s).
+
+The two web-only runs used the same image, dependencies and worker limit.
+Wall time fell by 28.69 s (44%); cumulative environment setup fell from
+57.65 s to 17.51 s (70%). The slowest test after the change took 1.42 s.
+The first normal-pipeline run took 32.36 s (55% less than the baseline),
+but a repeat took 77.88 s, so the shared-run wall-time improvement was not
+consistent. Cumulative environment setup fell from 78.33 s to 12.14 s in
+the first run and 29.74 s in the repeat. Test execution dominated the
+repeat (74% of tracked time); its slowest test was board filtering at
+4.78 s. Environment reuse does not eliminate contention during rendering.
+
+The changes reduce two measured costs:
+
+- `pool: "vmThreads"` loads jsdom once per worker while giving each file a
+  fresh VM context and window ([Vitest's pool documentation](https://vitest.dev/config/pool)).
+  File isolation stays enabled. The default
+  pool had started a new process and loaded jsdom for every file.
+- The two polling tests advance only the interval clock by 2 s or 3 s;
+  rendering, user actions and query notifications keep their real clocks.
+  The test renderer sets query retry delays to zero while keeping the
+  production retry policy. The closed-ticket failure test checks all three
+  attempts and the fourth, successful read after Retry. No application
+  polling or retry setting changes.
+
+Locally, the original suite took 14.27–18.17 s in four runs; the updated
+suite took 11.23–25.54 s in three runs. Background activity varied between these local runs,
+so the production measurements above are the comparison to use. The
+updated suite also passed with shuffled execution (seed 78, 15.10 s). Disabling
+polling deliberately failed both polling tests; disabling retries failed
+the closed-ticket test. A heap measurement of the VM pool reached 342 MiB
+per worker; this is JS heap, not total process or microVM memory.
+
+The timed runs above used Vitest's 5 s test timeout. Although all passed,
+the repeated shared run reached 4.78 s (96% of that limit), so only after
+reducing the measured costs was `testTimeout` raised to 10 s, about twice
+that maximum. These whole-test timings do not establish headroom for
+Testing Library's separate query deadline; the per-query measurement below
+sets that deadline. The normal-pipeline verification is the `web` job
+of [PR !38](http://127.0.0.1:7878/GuildBotics/Branvil/-/pulls/38), whose
+`web-tests` artifact records the same measurements for the current head.
+The historical failures in #78 reached 5.58–6.48 s per test and missed
+the 1 s query deadline. The rows above report the observed runs, not a
+guarantee about all future host loads.
+
+Selected file and individual-test durations from the web-only comparison
+(execution only, excluding each file's environment and import):
+
+| File or test | Before | After |
+| --- | ---: | ---: |
+| `relations.test.tsx` | 30.27 s | 15.77 s |
+| `ci.test.tsx` | 15.55 s | 6.13 s |
+| `board.test.tsx` | 13.65 s | 7.80 s |
+| `pages.test.tsx` | 7.55 s | 4.21 s |
+| Image-operation polling test | 3.32 s | 0.90 s |
+| Runner polling test | 3.13 s | 0.19 s |
+| Closed-ticket retries test | 3.43 s | 0.31 s |
+
+#### Query wait headroom
+
+After taking the drawer change `36bc560` from main, the suite had 233 tests.
+A temporary wrapper preserved RTL's existing `getConfig().asyncWrapper`,
+recording each call's elapsed time and stack in test metadata. Its clock
+was captured before tests installed fake timers: advancing the test clock
+by 30 s moved the captured clock by 0.3 ms; replacing it with a dynamic
+global clock made that check fail. Call stacks distinguish `waitFor` and
+`findBy*` from user-event actions, which use the same wrapper. The measured
+boundary includes RTL's final event-loop drain, so it is a conservative
+envelope around the actual query wait.
+
+The first production run, [`55e0220`](http://127.0.0.1:7878/GuildBotics/Branvil/-/jobs/att_01M5P3RW4JFQH6C62B4KKQBE88), retained the 1 s query deadline and
+10 s test deadline: 12 tests failed (nine query deadlines and three test
+deadlines). Of 495 recorded query waits, 28 reached at least 1 s. Failed
+calls included diagnostic generation, so their longest values
+were not used to choose the new deadline.
+
+The next run, [`91c383c`](http://127.0.0.1:7878/GuildBotics/Branvil/-/jobs/att_01M5P4AMM3BQ5JKTZ06N0ENX7P), temporarily allowed 5 s per query and 30 s per test
+to measure successful waits without the 1 s cutoff. All 233 tests passed.
+The same four-CPU, 6144 MiB production job overlapped main's
+`branvil-integration` job for the entire 44.67 s test interval
+(13:59:09–13:59:54 JST, verified from runner logs). Of 839 wrapper calls,
+521 were query waits, 318 were user-event actions and none were unclassified.
+All query waits succeeded; four exceeded the old 1 s deadline.
+
+| Query wait envelope | Milliseconds |
+| --- | ---: |
+| Median | 33.12 |
+| p95 | 464.52 |
+| p99 | 874.75 |
+| Maximum | 1499.77 |
+
+The maximum was 150% of the old query deadline. `asyncUtilTimeout` is now
+3000 ms, about twice that conservative maximum (50% utilisation). The
+longest complete test in this run was 3.29 s; `testTimeout` remains 10 s.
+The temporary wrapper, metadata traces, 5 s / 30 s measurement limits and
+two-job measurement pipeline were removed; the normal six jobs run again.
+
+A regression test delays the warnings response beyond the former 1 s
+deadline and waits through the ordinary `findByRole` default. Changing the
+query deadline back to 1 s makes it fail. This brings the retained suite to
+234 tests. Log streaming was checked with a
+command that emits stdout/stderr and then blocks: the output arrives before
+exit, survives termination and preserves a failing exit status. Restoring
+the buffered command makes this check fail. The production run also showed
+Vitest output in the job log before the job ended. Only `timing.json` is
+retained as an artifact; diagnostics continue to stream into the job log.

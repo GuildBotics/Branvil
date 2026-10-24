@@ -2,5 +2,6 @@ target/
 /builds/
 web/node_modules/
 web/dist/
+web/test-results/
 /data/
 __pycache__/
