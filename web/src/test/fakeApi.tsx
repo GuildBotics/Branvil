@@ -75,7 +75,8 @@ export function renderApp(path: string, language: "en" | "ja" = "en") {
   window.history.replaceState(null, "", path);
   const client = createQueryClient();
   // Exercise the real retry policy without waiting for its 1s/2s backoff.
-  client.setDefaultOptions({ queries: { ...client.getDefaultOptions().queries, retryDelay: 0 } });
+  const defaults = client.getDefaultOptions();
+  client.setDefaultOptions({ ...defaults, queries: { ...defaults.queries, retryDelay: 0 } });
   const utils = render(<App client={client} language={language} test />);
   return { ...utils, client };
 }

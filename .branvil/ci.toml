@@ -1,4 +1,49 @@
-# Temporary single-job measurement for ticket #78.
+# Branvil's own CI: the checks of "Development" in README.md, one job each.
+#
+# The image is GuildBotics' development image (Rust, Python 3, Node.js, Git),
+# named by its tag: the version the runner's cache holds under it runs, and
+# the jobs get the runner's CPUs and memory (Settings → CI).
+#
+# Cargo's home is under the work directory, where the cache can keep its
+# registry. The cache restores `target` built from other commits, which can
+# look newer than the checked-out files: the first command makes them newer
+# than any restored output, so Cargo rebuilds this crate and reuses only the
+# dependencies.
+# Incremental data would save little of that rebuild and fill the cache
+# (CARGO_INCREMENTAL=0; measured in docs/performance.md, "Branvil's own
+# pipeline").
+#
+# npm's cache is under the work directory too; `node_modules` is installed
+# again by `npm ci` every time.
+#
+# Fetching crates and npm packages needs the repository's network access
+# (`ci_network`).
+
+[[jobs]]
+name = "fmt"
+image = "guildbotics/agent-environment:dev"
+commands = ["CARGO_HOME=/work/.ci/cargo-home cargo fmt --check"]
+timeout_secs = 300
+
+[[jobs]]
+name = "clippy"
+image = "guildbotics/agent-environment:dev"
+commands = [
+  "find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +",
+  "CARGO_HOME=/work/.ci/cargo-home CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings",
+]
+timeout_secs = 1800
+cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.lock"] }
+
+[[jobs]]
+name = "test"
+image = "guildbotics/agent-environment:dev"
+commands = [
+  "find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +",
+  "CARGO_HOME=/work/.ci/cargo-home CARGO_INCREMENTAL=0 cargo test",
+]
+timeout_secs = 1800
+cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.lock"] }
 
 [[jobs]]
 name = "web"
@@ -13,3 +58,27 @@ timeout_secs = 1200
 cache = { paths = [".ci/npm"], key_files = ["web/package-lock.json"] }
 artifacts = [{ name = "web-tests", paths = ["web/test-results/"] }]
 
+[[jobs]]
+name = "dev-script"
+image = "guildbotics/agent-environment:dev"
+commands = ["python3 -m unittest discover -s tests -p test_dev_script.py -v"]
+timeout_secs = 1200
+
+# GuildBotics' provider against this commit's service (README.md, "Checking
+# with GuildBotics"), with GuildBotics' main cloned from GitHub, as a job
+# reaches only public networks; uv keeps its downloads in the cache. `uv sync`
+# builds GuildBotics' dependencies that have no wheel for its Python with
+# Cargo, so CARGO_HOME points into the job for it too.
+[[jobs]]
+name = "branvil-integration"
+image = "guildbotics/agent-environment:dev"
+commands = ['''
+set -eu
+export CARGO_HOME=/work/.ci/cargo-home
+find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +
+git clone --quiet --depth 1 https://github.com/GuildBotics/GuildBotics.git /tmp/guildbotics
+(cd /tmp/guildbotics && UV_CACHE_DIR=/work/.ci/uv UV_LOCKED=1 uv sync --extra test --extra dev)
+CARGO_INCREMENTAL=0 scripts/guildbotics-smoke.sh /tmp/guildbotics
+''']
+timeout_secs = 1800
+cache = { paths = [".ci/cargo-home/registry", "target", ".ci/uv"], key_files = ["Cargo.lock"] }

@@ -507,3 +507,98 @@ Incremental data saves about 17 s of compiling a commit (`clippy` was not
 compared: the change failed its lint `items_after_test_module`) and more than
 doubles the largest entries, which the cache copies twice per job (2.6 s and
 5.6 s for `test`'s 2218 MiB). The pipeline keeps `CARGO_INCREMENTAL=0`.
+
+### Web tests
+
+`cd web && npm run test` records file and test durations in
+`web/test-results/timing.json`. The `web` CI job uploads that file and its
+Vitest log as the `web-tests` artifact, including on test failure. To keep a
+local measurement outside the checkout:
+
+```sh
+cd web
+BRANVIL_TEST_RESULTS=/tmp/branvil-web-timing npm run test
+```
+
+Measurements for #78 on 2026-10-24: 231 tests in 20 files, Vitest 5.0.2,
+jsdom 30.1.1, Node.js 24.22.1, at most four workers. The host is an Apple
+M1 Pro (10 cores, 16 GiB), macOS 26.7.1. Production CI uses a Linux 6.12.99
+microVM with four CPUs and 6144 MiB per job, image configuration
+`sha256:67d06b064a73876d72ccf609b0b9854cb5f19b19cfc6ea9dd8f39b8b1d067932`,
+and a runner configured for two simultaneous jobs. Each row below is one
+run; the host also runs the service and other desktop applications.
+
+| Run | Commit | Vitest wall time | Result |
+| --- | --- | ---: | --- |
+| Before, normal pipeline; `test` observed running alongside `web` | `4cb2ffe` | 71.79 s | 231 passed |
+| Before, web-only pipeline | `652e221` | 65.53 s | 231 passed |
+| After, web-only pipeline | `7f2a712` | 36.84 s | 231 passed |
+
+The web-only pipeline queued no other job of this run; it did not change
+the runner's parallel-job limit. Other repositories' jobs were not inspected.
+The 6.26 s difference between these two runs is an observation, not an
+isolated estimate of the cost of another job: the individual phases also
+vary between runs.
+
+Vitest's `Duration` breakdown, as percentages of all tracked phases (summed
+across workers, not percentages of wall time):
+
+| Run | Tests | Environment | Import | Setup | Transform | Worker |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before, normal pipeline | 40% | 29% | 19% | 8% | 3% | <1% |
+| Before, web-only pipeline | 52% | 23% | 18% | 5% | 2% | <1% |
+| After, web-only pipeline | 52% | 13% | 26% | 6% | 1% | 3% |
+
+The normal pipeline spent 78.33 s in total creating jsdom environments,
+once per file. File test durations were `relations` 25.68 s, `pull` 22.28 s,
+`board` 13.89 s, `ci` 12.05 s, `settings` 11.87 s and `pages` 5.77 s. The
+slowest individual tests were closed-ticket read retries (3.25 s), runner
+polling (3.13 s), image-operation polling (3.09 s) and board filtering
+(2.73 s).
+
+The two web-only runs used the same image, dependencies and worker limit.
+Wall time fell by 28.69 s (44%); cumulative environment setup fell from
+57.65 s to 17.51 s (70%). The slowest test after the change took 1.42 s.
+
+The changes reduce two measured costs:
+
+- `pool: "vmThreads"` loads jsdom once per worker while giving each file a
+  fresh VM context and window ([Vitest's pool documentation](https://vitest.dev/config/pool)).
+  File isolation stays enabled. The default
+  pool had started a new process and loaded jsdom for every file.
+- The two polling tests advance only the interval clock by 2 s or 3 s;
+  rendering, user actions and query notifications keep their real clocks.
+  The test renderer sets query retry delays to zero while keeping the
+  production retry policy. The closed-ticket failure test checks all three
+  attempts and the fourth, successful read after Retry. No application
+  polling or retry setting changes.
+
+Locally, the original suite took 14.27–18.17 s in four runs; the updated
+suite took 11.23–25.54 s in three runs. Background activity varied between these local runs,
+so the production measurements above are the comparison to use. The
+updated suite also passed with shuffled execution (seed 78, 15.10 s). Disabling
+polling deliberately failed both polling tests; disabling retries failed
+the closed-ticket test. A heap measurement of the VM pool reached 342 MiB
+per worker; this is JS heap, not total process or microVM memory.
+
+The measured maximum after the change is well below Vitest's 5 s test
+timeout, so it remains unchanged. Testing Library's 1 s `asyncUtilTimeout`
+also remains unchanged. The normal-pipeline verification is the `web` job
+of [PR !38](http://127.0.0.1:7878/GuildBotics/Branvil/-/pulls/38), whose
+`web-tests` artifact records the same measurements for the current head.
+The historical failures in #78 reached 5.58–6.48 s per test and missed
+the 1 s query deadline; the web-only measurement alone cannot prove that
+contention will never exhaust either deadline.
+
+Selected file and individual-test durations from the web-only comparison
+(execution only, excluding each file's environment and import):
+
+| File or test | Before | After |
+| --- | ---: | ---: |
+| `relations.test.tsx` | 30.27 s | 15.77 s |
+| `ci.test.tsx` | 15.55 s | 6.13 s |
+| `board.test.tsx` | 13.65 s | 7.80 s |
+| `pages.test.tsx` | 7.55 s | 4.21 s |
+| Image-operation polling test | 3.32 s | 0.90 s |
+| Runner polling test | 3.13 s | 0.19 s |
+| Closed-ticket retries test | 3.43 s | 0.31 s |
