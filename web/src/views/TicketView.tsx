@@ -5,7 +5,7 @@ import { useState } from "react";
 import { isApiError } from "../api/client";
 import * as api from "../api/endpoints";
 import { LANES, type Lane, type Reaction, type Ticket } from "../api/types";
-import { CommentView, ComposeForm, CopyButton, ErrorMessage, Loading, Post, PostHead, Refusal, StateBadge } from "../components/common";
+import { ComposeForm, CopyButton, ErrorMessage, Loading, Post, PostHead, Refusal, StateBadge } from "../components/common";
 import { BodyEditor, EditableTitle, EditPencil } from "../components/Editable";
 import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
@@ -15,6 +15,7 @@ import { useMemberKinds, useRepo, useTicket, useTicketComments, useTicketPulls, 
 import { keys } from "../query/keys";
 import { ServiceLink } from "../router/Router";
 import { Relations, relationRefusal } from "./ticket/Relations";
+import { TicketComment } from "./ticket/TicketComment";
 
 /** A ticket: its page, or, in a `drawer` over a page, whose URL it does not take: then it offers its own to copy. */
 export function TicketView({ repo, ticketKey, drawer }: { repo: string; ticketKey: string; drawer?: boolean }) {
@@ -127,7 +128,7 @@ export function TicketView({ repo, ticketKey, drawer }: { repo: string; ticketKe
                 <ErrorMessage error={comments.error} />
               ) : (
                 comments.data.items.map((c) => (
-                  <CommentView key={c.id} comment={c} kind={kindOf(c.author)} onReact={(reaction, on) => react.mutate({ id: c.id, reaction, on })} />
+                  <TicketComment key={c.id} repo={repo} ticketKey={ticketKey} comment={c} kind={kindOf(c.author)} onReact={(reaction, on) => react.mutate({ id: c.id, reaction, on })} />
                 ))
               )}
               {react.isError && <ErrorMessage error={react.error} />}

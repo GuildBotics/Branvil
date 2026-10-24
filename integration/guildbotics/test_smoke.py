@@ -409,6 +409,30 @@ def test_tickets_and_their_relations(world: World) -> None:
         assert (await _read(tickets, parent))["children"] == []
         assert (await _read(tickets, blocker))["blocks"] == []
 
+        # The GUI's edits and deletions are seen through the existing provider
+        # reads and by the candidate refresh just before dispatch.
+        written = await tickets.comment(url, "Original comment")
+        [before] = (await tickets.read("ticket_comments", url)).items
+        path = f"/repos/{quote(REPO, safe='')}/tickets/1/comments/{written.id}"
+        world.service.call(
+            "PATCH", path, world.service.owner, {"body": "Edited comment"}
+        )
+        [edited] = (await tickets.read("ticket_comments", url)).items
+        assert edited == {**before, "body": "Edited comment"}
+        # A human's later comment makes this working ticket a candidate.
+        world.service.call(
+            "POST", path.rsplit("/", 1)[0], world.service.owner, {"body": "Continue"}
+        )
+        refreshed = await tickets.refresh(task)
+        assert refreshed is not None
+        assert [c.content for c in refreshed.comments] == ["Edited comment", "Continue"]
+        world.service.call("DELETE", path, world.service.owner)
+        [remaining] = (await tickets.read("ticket_comments", url)).items
+        assert remaining["body"] == "Continue"
+        refreshed = await tickets.refresh(task)
+        assert refreshed is not None
+        assert [c.content for c in refreshed.comments] == ["Continue"]
+
     world.run(scenario)
 
 

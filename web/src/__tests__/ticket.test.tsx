@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { choose, pickFromMenu } from "../test/mantine";
 import { ticketNamed } from "../views/ticket/Relations";
@@ -36,6 +36,71 @@ function ticketRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string
 }
 
 describe("ticket view", () => {
+  it("edits a comment, keeps a failed draft, cancels, and confirms permanent deletion", async () => {
+    const comment = { id: "cmt_1", author: "comment-agent", body: "Original comment", meta: { routing: "suppress" }, created_at: at, url: "", reactions: [] };
+    let comments = [comment];
+    const fake = fakeApi(ticketRoutes({
+      [`GET ${TICKET}`]: json(200, card("1", "new")),
+      [`GET ${TICKET}/comments`]: () => json(200, { items: comments, next_cursor: null }),
+      [`PATCH ${TICKET}/comments/cmt_1`]: [apiError(400, "invalid", "Cannot save."), (req) => {
+        comments = [{ ...comment, body: (req.body as { body: string }).body }];
+        return json(200, comments[0]);
+      }],
+      [`DELETE ${TICKET}/comments/cmt_1`]: [apiError(403, "forbidden", "Cannot delete."), () => {
+        comments = [];
+        return json(204, null);
+      }],
+    }));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/tickets/1");
+    await user.click(await screen.findByRole("button", { name: "Edit comment" }));
+    const body = screen.getByRole("textbox", { name: "Comment body" });
+    await user.clear(body);
+    await user.type(body, "   ");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.clear(body);
+    await user.type(body, "Edited comment");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Cannot save.");
+    expect(body).toHaveValue("Edited comment");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Edited comment")).toBeInTheDocument();
+    expect(fake.calls("PATCH", `${TICKET}/comments/cmt_1`)[1]?.body).toEqual({ body: "Edited comment" });
+    expect(screen.getByText("Status notice")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Edit comment" }));
+    await user.type(screen.getByRole("textbox", { name: "Comment body" }), " discarded");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByText("Edited comment")).toBeInTheDocument();
+    expect(fake.calls("PATCH", `${TICKET}/comments/cmt_1`)).toHaveLength(2);
+    await user.click(screen.getByRole("button", { name: "Delete comment" }));
+    expect(fake.calls("DELETE", `${TICKET}/comments/cmt_1`)).toHaveLength(0);
+    confirm.mockReturnValue(true);
+    await user.click(screen.getByRole("button", { name: "Delete comment" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Cannot delete.");
+    expect(screen.getByText("Edited comment")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete comment" }));
+    await waitFor(() => expect(screen.queryByText("Edited comment")).not.toBeInTheDocument());
+    expect(confirm).toHaveBeenCalledWith("Delete this comment? This cannot be undone.");
+  });
+
+  it("offers comment changes only to the author or owner", async () => {
+    fakeApi(ticketRoutes({
+      "GET /api/v1/session": json(200, { ...SESSION, me: { ...SESSION.me, name: "comment-agent", kind: "agent" } }),
+      [`GET ${TICKET}`]: json(200, card("1", "new")),
+      [`GET ${TICKET}/comments`]: json(200, { items: ["COMMENT-AGENT", "other-agent"].map((author) => ({
+        id: author, author, body: `${author}'s comment`, meta: null, created_at: at, url: "", reactions: [],
+      })), next_cursor: null }),
+    }));
+    renderApp("/acme/demo/-/tickets/1");
+    const mine = (await screen.findByText("COMMENT-AGENT's comment")).closest("article")!;
+    const other = screen.getByText("other-agent's comment").closest("article")!;
+    expect(within(mine).getByRole("button", { name: "Edit comment" })).toBeInTheDocument();
+    expect(within(mine).getByRole("button", { name: "Delete comment" })).toBeInTheDocument();
+    expect(within(other).queryByRole("button", { name: "Edit comment" })).not.toBeInTheDocument();
+    expect(within(other).queryByRole("button", { name: "Delete comment" })).not.toBeInTheDocument();
+  });
+
   it("chooses one assignee from the avatar menu, replacing the current one, and clears it", async () => {
     const fake = fakeApi(
       ticketRoutes({

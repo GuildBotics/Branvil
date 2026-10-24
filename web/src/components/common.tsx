@@ -212,10 +212,14 @@ export function CommentView({
   comment,
   kind,
   onReact,
+  actions,
+  children,
 }: {
   comment: Comment;
   kind?: MemberKind;
   onReact: OnReact;
+  actions?: ReactNode;
+  children?: ReactNode;
 }) {
   const t = useT();
   const notice = comment.meta?.["routing"] === "suppress";
@@ -223,9 +227,10 @@ export function CommentView({
     <article className={notice ? "comment notice" : "comment"} id={comment.id} aria-label={notice ? t("comment.notice") : undefined}>
       <PostHead author={comment.author} kind={kind} at={comment.created_at}>
         {notice && <StateBadge tone="info">{t("comment.notice")}</StateBadge>}
+        {actions}
       </PostHead>
       <div className="post-body">
-        <Markdown source={comment.body} />
+        {children ?? <Markdown source={comment.body} />}
         <Reactions reactions={comment.reactions ?? []} onReact={onReact} />
       </div>
     </article>
