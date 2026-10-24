@@ -23,6 +23,7 @@ import { PullView } from "./views/PullView";
 import { RelationsView } from "./views/RelationsView";
 import { SettingsView } from "./views/SettingsView";
 import { TicketView } from "./views/TicketView";
+import { TicketDrawer } from "./views/ticket/TicketDrawer";
 import { useCurrentWorkspace } from "./workspace";
 
 export function App({ client, language, test }: { client: QueryClient; language?: "en" | "ja"; test?: boolean }) {
@@ -84,11 +85,19 @@ function RouteView({ route, workspace, workspaces }: { route: AppRoute; workspac
     case "settings":
       return <SettingsView section={route.section} workspace={workspace} repo={route.repo ?? null} />;
     case "workspace":
-      return <BoardView key={route.workspace} workspace={route.workspace} />;
+      return (
+        <TicketDrawer key={route.workspace}>
+          <BoardView workspace={route.workspace} />
+        </TicketDrawer>
+      );
     case "pulls":
       return <PullsView key={route.workspace} workspace={route.workspace} repo={null} />;
     case "relations":
-      return <RelationsView key={route.workspace} workspace={route.workspace} />;
+      return (
+        <TicketDrawer key={route.workspace}>
+          <RelationsView workspace={route.workspace} />
+        </TicketDrawer>
+      );
     case "repo":
       return <PullsView key={route.repo} workspace={route.repo.split("/")[0] as string} repo={route.repo} />;
     case "ticket":
