@@ -109,3 +109,10 @@ workflow.
   provider (README.md, "Checking with GuildBotics"). The pipeline's
   `branvil-integration` runs it with GuildBotics' `main`; an API change that
   needs a provider change fails it until both are merged.
+
+## Dependency alerts
+
+To resolve the repository's open dependency alerts by raising packages in
+`Cargo.lock` and `web/package-lock.json`, follow
+[`.agents/skills/resolve-dependency-alerts/SKILL.md`](.agents/skills/resolve-dependency-alerts/SKILL.md)
+(`.claude/skills/resolve-dependency-alerts/SKILL.md` points to the same).
