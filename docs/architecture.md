@@ -233,6 +233,9 @@ today. A host:
   merge commit); creates one, finds the open one with a head, and changes its
   title, body, and state;
 - reads the check runs of a commit and one check run's log;
+- reads the repository's dependency alerts (GitHub: Dependabot alerts), one
+  page from the host's cursor or one by its id, in Branvil's words (`open`,
+  `resolved`, `dismissed`), and says what to check when the host refuses;
 - recognizes its issue URLs and writes a reference to one from a pull request
   of a repository (`#12`, `owner/other#12`) and the line that closes or refers
   to it.
@@ -265,7 +268,7 @@ as a Bearer header. Backups do not carry it.
 - **Writes** (the branch, the pull request) use the account of the Branvil pull
   request's author.
 - **Reads** (following the default branch, polling pull requests and check
-  runs, logs) use one member's account, the upstream's *reader*: the host
+  runs, logs, dependency alerts) use one member's account, the upstream's *reader*: the host
   counts only authenticated conditional requests as free. The owner may name
   it; otherwise one is picked when the upstream is set: an agent's account
   (the first by name), the owner's only when no agent has one, so the owner's

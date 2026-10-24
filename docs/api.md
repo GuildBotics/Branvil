@@ -120,6 +120,8 @@ serves each of them.
 | 409 | `not_mergeable` | Merge preconditions are not met (message says which). |
 | 409 | `children_open` | A ticket is closed as completed while one of its children is open. |
 | 409 | `blocked` | A ticket is moved into `in_progress` while one of its blockers is open. |
+| 409 | `no_account` | The member whose account the upstream host needs has none there, or its credential is not on this machine ("Upstream"). |
+| 409 | `upstream_refused` | The upstream host refused what Branvil sent or asked for (the message says why). |
 | 409 | `idempotency_conflict` | See conventions. |
 | 413 | `too_large` | Body, log, or artifact above its limit. |
 | 421 | `misdirected` | Wrong `Host`. |
@@ -312,6 +314,59 @@ branch of exactly that name.
 `{"base": "...", "head": "...", "merge_base": "...", "ahead_by": 2, "behind_by": 0}`
 (`merge_base` is `null` for unrelated histories; `404` when either commit is missing).
 `behind_by` counts commits reachable from `base` and not from `head`.
+
+### Dependency alerts
+
+The dependency vulnerabilities the upstream host reports for the repository
+it follows ("Upstream"; GitHub: Dependabot alerts). Branvil keeps none of them
+and judges nothing: each request reads the host with the upstream's reader,
+and only its account (another member's is never tried). Any member who sees
+the repository may read them.
+
+- `GET /api/v1/repos/{repo}/upstream/dependency-alerts?state={state}` →
+  items in the host's order. `state` is `open` (the default), `resolved`, or
+  `dismissed`; `limit` and `cursor` as for any collection. The cursor carries
+  the host's own and is bound to the repository, `state`, and the upstream
+  (provider and repository) it was read from: after the upstream changes it
+  is `400 invalid_cursor`. An empty `items` is the host's answer that it has
+  no such alert.
+- `GET /api/v1/repos/{repo}/upstream/dependency-alerts/{id}` → one alert.
+
+```json
+{"id": "12", "state": "open",
+ "url": "https://github.com/acme/demo/security/dependabot/12",
+ "package": "lodash", "ecosystem": "npm", "manifest_path": "package-lock.json",
+ "severity": "high",
+ "identifiers": [{"type": "GHSA", "value": "GHSA-35jh-r3h4-6jhm"},
+                 {"type": "CVE", "value": "CVE-2021-23337"}],
+ "summary": "Command Injection in lodash", "description": "...",
+ "affected_versions": "< 4.17.21", "patched_version": "4.17.21",
+ "created_at": "2026-10-20T08:00:00.000Z", "updated_at": "2026-10-21T09:30:00.000Z"}
+```
+
+`id` is the host's number of the alert, a decimal string. Every field but
+`id`, `state`, and `identifiers` may be `null`; `patched_version` is `null`
+when no version fixes it. `state` is the host's state in these three words
+(GitHub: `fixed` is `resolved`, `auto_dismissed` is `dismissed`).
+
+A failure is never an empty list:
+
+| HTTP | `code` | When |
+| --- | --- | --- |
+| 422 | `unsupported` | The repository has no upstream. |
+| 409 | `no_account` | The reader has no account on the host, or its credential is not on this machine. |
+| 404 | `not_found` | No alert of that `id`, or the host answered "not found" for the repository: the reader's account cannot see it, or the host keeps no alerts of it. |
+| 409 | `upstream_refused` | The host refused the reader's request (its token, its permissions, or the request itself). |
+| 503 | `unavailable` | The host could not be reached, failed, or its rate limit for the account is used up. |
+
+A host's answer seldom says which of its causes it is, so the message says
+what the host said and what to check rather than guessing. On GitHub the
+reader's account needs, for a GitHub App, Repository permissions →
+Dependabot alerts: Read-only and access to the repository, with the added
+permission approved on the installation (GitHub asks the account that
+installed the app to approve it); for a fine-grained token the same
+permission; for a classic token the `security_events` (or `repo`) scope.
+Dependabot alerts must be enabled for the repository.
 
 ## Tickets and the board
 
@@ -710,8 +765,9 @@ is not the full sha of a commit of the repository.
   is the last `tail_bytes` bytes (default 65536, at most 4194304; decoded as
   UTF-8 with replacement), `truncated` says the log is longer than that,
   `pruned` that retention deleted it. For an upstream check (`github-<id>`) the
-  log is read from the host with the upstream's reader (`404` when the host has
-  none for it).
+  log is read from the host with the upstream's reader: `404` when the host
+  has none for it, and `409 no_account`, `409 upstream_refused`, or `503
+  unavailable` as for dependency alerts ("Dependency alerts").
 - `POST /api/v1/repos/{repo}/jobs/{attempt_id}/retry` → the new
   attempt (`200`, `status: "queued"`, the job's next `attempt` number, the
   same job definition). Only the latest attempt of its job as the commit's

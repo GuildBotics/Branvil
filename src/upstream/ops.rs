@@ -1,17 +1,18 @@
 //! The operations of the upstream (`docs/api.md`, "Upstream"): a
 //! repository's upstream, members' accounts, publishing a pull request, and
-//! the host's check logs.
+//! what Branvil reads of the host for clients: check logs and dependency
+//! alerts.
 
 use serde::{Deserialize, Serialize};
 
-use super::host::{As, Credential};
+use super::host::{AlertState, As, Credential, DependencyAlert, Host, HostError};
 use super::{Place, Pushed, follow_once, open_on_host, push_branch, token_of};
 use crate::app::App;
 use crate::auth::Caller;
 use crate::domain::members::{MemberView, member_view};
 use crate::domain::pulls::{self, MergeInput, PullView, check_landable, load_pull};
 use crate::domain::repos::{self, RepoView, repo_view};
-use crate::domain::{member_by_name, repo_by_id};
+use crate::domain::{Page, PageReq, member_by_name, repo_by_id};
 use crate::error::{AppError, AppResult};
 use crate::model::{Account, Member, MemberKind, Published, Reader, Repo, Upstream as Setting};
 use crate::store::{self, Rd};
@@ -522,7 +523,26 @@ pub async fn publish_pull(
     pulls::pull_view(app, &repo, &stored, &tips).await
 }
 
-// ---------------------------------------------------------------- check logs
+// ---------------------------------------------------------------- reads for clients
+
+/// The upstream's reader, as whom Branvil reads the host for a client: its
+/// account only, never another one's.
+async fn reader_token(app: &App, setting: &Setting, host: &Host) -> AppResult<(String, String)> {
+    let member = reader_of(app, setting).await?;
+    let token = token_of(app, &member, host)
+        .await
+        .map_err(|why| AppError::conflict_code("no_account", why))?;
+    Ok((member.name, token))
+}
+
+/// A failure reading the host, in the API's words.
+fn host_failure(e: HostError) -> AppError {
+    match e.status {
+        Some(404) => AppError::not_found(e.message),
+        Some(400..=428 | 430..=499) => AppError::conflict_code("upstream_refused", e.message),
+        _ => AppError::unavailable(e.message),
+    }
+}
 
 /// The log of one of the host's check runs (`<provider>-<id>`, as the checks
 /// name it), or `None` when `id` does not name one.
@@ -541,14 +561,11 @@ pub async fn check_log(
         return Ok(None);
     };
     let host = app.upstream.hosts.get(&setting.provider)?;
-    let reader_member = reader_of(app, setting).await?;
-    let token = token_of(app, &reader_member, host)
-        .await
-        .map_err(AppError::unavailable)?;
+    let (member, token) = reader_token(app, setting, host).await?;
     let (log, size) = host
         .check_log(
             As {
-                member: &reader_member.name,
+                member: &member,
                 token: &token,
             },
             &setting.repository,
@@ -556,14 +573,80 @@ pub async fn check_log(
             tail as usize,
         )
         .await
-        .map_err(|e| match e.status {
-            Some(404) => AppError::not_found(e.message),
-            _ => AppError::unavailable(e.message),
-        })?;
+        .map_err(host_failure)?;
     Ok(Some(serde_json::json!({
         "log": String::from_utf8_lossy(&log),
         "log_bytes": size,
         "truncated": size > tail,
         "pruned": false,
     })))
+}
+
+/// The upstream of a repository the caller sees, its host, and its reader's
+/// account, to read dependency alerts with.
+async fn alerts_upstream<'a>(
+    app: &'a App,
+    caller: &Caller,
+    path: &str,
+) -> AppResult<(Setting, &'a Host, String, String)> {
+    let repo = repos::visible(app, caller, path).await?;
+    let setting = repo.upstream.ok_or_else(|| {
+        AppError::unsupported(format!(
+            "{} has no upstream, so Branvil has no dependency alerts of it.",
+            repo.path
+        ))
+    })?;
+    let host = app.upstream.hosts.get(&setting.provider)?;
+    let (member, token) = reader_token(app, &setting, host).await?;
+    Ok((setting, host, member, token))
+}
+
+/// A page of the dependency alerts the upstream host reports, in `state`.
+/// The cursor carries the host's own, bound to the upstream it came from.
+pub async fn dependency_alerts(
+    app: &App,
+    caller: &Caller,
+    path: &str,
+    state: AlertState,
+    page: PageReq,
+) -> AppResult<Page<DependencyAlert>> {
+    let (setting, host, member, token) = alerts_upstream(app, caller, path).await?;
+    let place = format!("{}\n{}\n", setting.provider, setting.repository);
+    let after = match &page.after {
+        Some(position) => Some(
+            std::str::from_utf8(position)
+                .ok()
+                .and_then(|p| p.strip_prefix(place.as_str()))
+                .ok_or_else(AppError::invalid_cursor)?,
+        ),
+        None => None,
+    };
+    let who = As {
+        member: &member,
+        token: &token,
+    };
+    let (items, next) = host
+        .dependency_alerts(who, &setting.repository, state, page.limit, after)
+        .await
+        .map_err(host_failure)?;
+    Ok(Page {
+        items,
+        next_cursor: next.map(|n| page.cursor(format!("{place}{n}").as_bytes())),
+    })
+}
+
+pub async fn dependency_alert(
+    app: &App,
+    caller: &Caller,
+    path: &str,
+    id: &str,
+) -> AppResult<DependencyAlert> {
+    let (setting, host, member, token) = alerts_upstream(app, caller, path).await?;
+    let who = As {
+        member: &member,
+        token: &token,
+    };
+    host.dependency_alert(who, &setting.repository, id)
+        .await
+        .map_err(host_failure)
 }

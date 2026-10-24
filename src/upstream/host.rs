@@ -61,6 +61,44 @@ pub struct HostPull {
     pub merge_sha: Option<String>,
 }
 
+/// Where a dependency alert stands, in Branvil's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertState {
+    Open,
+    Resolved,
+    Dismissed,
+}
+
+/// A dependency vulnerability the host reports for a repository
+/// (`docs/api.md`, "Dependency alerts").
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DependencyAlert {
+    pub id: String,
+    pub state: AlertState,
+    pub url: Option<String>,
+    pub package: Option<String>,
+    pub ecosystem: Option<String>,
+    pub manifest_path: Option<String>,
+    pub severity: Option<String>,
+    pub identifiers: Vec<AdvisoryId>,
+    pub summary: Option<String>,
+    pub description: Option<String>,
+    pub affected_versions: Option<String>,
+    /// `None` when no version fixes it.
+    pub patched_version: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// An identifier of the advisory (`GHSA`, `CVE`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AdvisoryId {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub value: String,
+}
+
 /// The parts of a pull request Branvil sends; `None` leaves one unchanged.
 #[derive(Debug, Clone, Default)]
 pub struct PullChange {
@@ -283,6 +321,28 @@ impl Host {
         tail: usize,
     ) -> HostResult<(Vec<u8>, u64)> {
         each!(self, h => h.check_log(who, repository, id, tail).await)
+    }
+
+    /// At most `limit` of the repository's alerts in `state`, from where the
+    /// host's cursor `after` points, and the host's cursor of the rest.
+    pub async fn dependency_alerts(
+        &self,
+        who: As<'_>,
+        repository: &str,
+        state: AlertState,
+        limit: usize,
+        after: Option<&str>,
+    ) -> HostResult<(Vec<DependencyAlert>, Option<String>)> {
+        each!(self, h => h.dependency_alerts(who, repository, state, limit, after).await)
+    }
+
+    pub async fn dependency_alert(
+        &self,
+        who: As<'_>,
+        repository: &str,
+        id: &str,
+    ) -> HostResult<DependencyAlert> {
+        each!(self, h => h.dependency_alert(who, repository, id).await)
     }
 }
 

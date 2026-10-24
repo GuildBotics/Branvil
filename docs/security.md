@@ -251,10 +251,13 @@ user profile's ACL.
   it. Writes to the host (the published branch, the pull request) use the
   account of the Branvil pull request's author, so the host shows who did the
   work and a person can approve it there; reads (following the default branch,
-  polling, logs) use the upstream's reader, an agent's account unless no agent
+  polling, logs, dependency alerts) use the upstream's reader, an agent's account unless no agent
   has one or the owner names another, so the owner's own token is never
   required [`tests/upstream.rs`
   `the_reader_is_picked_once_and_changes_only_when_the_owner_or_a_removal_says_so`].
+  A read the host refuses to the reader is reported, never tried again with
+  another member's account [`tests/upstream.rs`
+  `a_failed_read_of_dependency_alerts_is_never_an_empty_list`].
 - **Where.** A credential (a token, or a GitHub App's private key with its ids)
   is a `0600` file under `<data>/secrets/accounts/`, not the OS keychain. The service runs headless under launchd, systemd, or the Task
   Scheduler, often without a login session: the macOS Keychain may then prompt

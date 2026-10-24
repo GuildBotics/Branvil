@@ -115,6 +115,19 @@ pub struct State_ {
     pub refuse_create: bool,
     /// Create the next pull request but answer `502` (the answer is lost).
     pub lose_next_create: bool,
+    /// Dependabot alerts (GitHub's JSON), in GitHub's order.
+    pub alerts: Vec<Value>,
+    /// What every read of Dependabot alerts or a job log is answered with
+    /// instead.
+    pub refusal: Option<Refusal>,
+}
+
+/// A refusal GitHub answers with: its status, headers, and message.
+#[derive(Clone)]
+pub struct Refusal {
+    pub status: u16,
+    pub headers: Vec<(&'static str, String)>,
+    pub message: &'static str,
 }
 
 pub struct FakeGitHub {
@@ -469,12 +482,107 @@ async fn job_log(
 ) -> Response {
     let mut st = state.lock().unwrap();
     let path = format!("/repos/{owner}/{name}/actions/jobs/{id}/logs");
-    if record(&mut st, "GET", &path, &headers).is_none() {
-        return unauthorized();
+    if let Some(refused) = refused_read(&mut st, &path, &headers) {
+        return refused;
     }
     match st.logs.get(&id) {
         Some(log) => log.clone().into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// The `after` cursor of the alert at `index`: base64-like, so it has
+/// characters a URL must encode.
+fn alerts_cursor(index: usize) -> String {
+    format!("c+/{index}=")
+}
+
+/// The refusal of a read that `State_::refusal` refuses, once recorded.
+fn refused_read(st: &mut State_, path: &str, headers: &HeaderMap) -> Option<Response> {
+    if record(st, "GET", path, headers).is_none() {
+        return Some(unauthorized());
+    }
+    let refusal = st.refusal.clone()?;
+    let mut response = (
+        StatusCode::from_u16(refusal.status).unwrap(),
+        axum::Json(json!({"message": refusal.message})),
+    )
+        .into_response();
+    for (name, value) in refusal.headers {
+        response.headers_mut().insert(name, value.parse().unwrap());
+    }
+    Some(response)
+}
+
+async fn alerts_list(
+    State((state, _)): State<S>,
+    UrlPath((owner, name)): UrlPath<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let mut st = state.lock().unwrap();
+    let path = format!("/repos/{owner}/{name}/dependabot/alerts");
+    if let Some(refused) = refused_read(&mut st, &path, &headers) {
+        return refused;
+    }
+    let states: Vec<&str> = q["state"].split(',').collect();
+    let matching: Vec<&Value> = st
+        .alerts
+        .iter()
+        .filter(|a| states.contains(&a["state"].as_str().unwrap()))
+        .collect();
+    let per_page: usize = q["per_page"].parse().unwrap();
+    let from = match q.get("after") {
+        None => 0,
+        Some(after) => match (0..=matching.len()).find(|i| alerts_cursor(*i) == *after) {
+            Some(i) => i,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"message": "Invalid cursor"})),
+                )
+                    .into_response();
+            }
+        },
+    };
+    let page: Vec<Value> = matching
+        .iter()
+        .skip(from)
+        .take(per_page)
+        .map(|a| (*a).clone())
+        .collect();
+    let mut response = axum::Json(Value::Array(page)).into_response();
+    if from + per_page < matching.len() {
+        // GitHub spells its links with the repository's id, not its name.
+        let cursor = alerts_cursor(from + per_page)
+            .replace('+', "%2B")
+            .replace('/', "%2F")
+            .replace('=', "%3D");
+        let link = format!(
+            "<https://api.github.test/repositories/99/dependabot/alerts?per_page={per_page}&after={cursor}>; rel=\"next\""
+        );
+        response.headers_mut().insert("Link", link.parse().unwrap());
+    }
+    response
+}
+
+async fn alert_get(
+    State((state, _)): State<S>,
+    UrlPath((owner, name, n)): UrlPath<(String, String, u64)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut st = state.lock().unwrap();
+    let path = format!("/repos/{owner}/{name}/dependabot/alerts/{n}");
+    if let Some(refused) = refused_read(&mut st, &path, &headers) {
+        return refused;
+    }
+    match st.alerts.iter().find(|a| a["number"] == n) {
+        Some(a) => axum::Json(a.clone()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"message": "Not Found"})),
+        )
+            .into_response(),
     }
 }
 
@@ -502,6 +610,11 @@ impl FakeGitHub {
                 get(check_runs),
             )
             .route("/repos/{owner}/{name}/actions/jobs/{id}/logs", get(job_log))
+            .route("/repos/{owner}/{name}/dependabot/alerts", get(alerts_list))
+            .route(
+                "/repos/{owner}/{name}/dependabot/alerts/{n}",
+                get(alert_get),
+            )
             .with_state((state.clone(), root.to_path_buf()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -718,6 +831,39 @@ impl FakeGitHub {
             .find(|p| p.repo == "octo/demo" && p.number == number)
             .unwrap()
             .open = open;
+    }
+
+    /// Adds a Dependabot alert in GitHub's shape: `state` is GitHub's
+    /// (`open`, `fixed`, `dismissed`, `auto_dismissed`).
+    pub fn alert(&self, number: u64, state: &str, patched: Option<&str>) {
+        self.state.lock().unwrap().alerts.push(json!({
+            "number": number,
+            "state": state,
+            "html_url": format!("https://github.test/octo/demo/security/dependabot/{number}"),
+            "dependency": {
+                "package": {"ecosystem": "npm", "name": format!("pkg-{number}")},
+                "manifest_path": "package-lock.json",
+                "scope": "runtime",
+            },
+            "security_advisory": {
+                "ghsa_id": format!("GHSA-0000-0000-{number:04}"),
+                "summary": format!("Advisory {number}"),
+                "description": "What goes wrong.",
+                "severity": "moderate",
+                "identifiers": [
+                    {"type": "GHSA", "value": format!("GHSA-0000-0000-{number:04}")},
+                    {"type": "CVE", "value": format!("CVE-2026-{number:04}")},
+                ],
+            },
+            "security_vulnerability": {
+                "package": {"ecosystem": "npm", "name": format!("pkg-{number}")},
+                "severity": "high",
+                "vulnerable_version_range": "< 2.0.0",
+                "first_patched_version": patched.map(|v| json!({"identifier": v})),
+            },
+            "created_at": "2026-10-20T08:00:00Z",
+            "updated_at": "2026-10-21T09:30:00Z",
+        }));
     }
 
     pub fn check(&self, sha: &str, id: u64, name: &str, conclusion: &str, log: &str) {
