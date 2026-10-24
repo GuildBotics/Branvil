@@ -23,7 +23,7 @@ pub mod settings;
 pub mod supervise;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -123,6 +123,8 @@ struct Inner {
     settings: settings::Control,
     started: Instant,
     runners: Mutex<BTreeMap<String, RunnerSeen>>,
+    /// Set by `stop`: when the wait for the running jobs ends.
+    stopping: OnceLock<String>,
     /// Serializes log appends (one file per attempt, small writes).
     log_lock: tokio::sync::Mutex<()>,
 }
@@ -148,6 +150,7 @@ impl Ci {
                 config,
                 started: Instant::now(),
                 runners: Mutex::new(BTreeMap::new()),
+                stopping: OnceLock::new(),
                 log_lock: tokio::sync::Mutex::new(()),
             }),
         }
@@ -535,6 +538,60 @@ impl Ci {
         Ok(())
     }
 
+    /// Whether the service is stopping (`stop`): it gives out no job.
+    pub fn stopping(&self) -> bool {
+        self.inner.stopping.get().is_some()
+    }
+
+    /// The first part of a stop (SIGTERM, an update): gives out no more jobs
+    /// and waits until none runs, at most `ci.stop_wait_secs`. The jobs
+    /// still running then are interrupted and queued again in their place,
+    /// ahead of the jobs queued meanwhile (which run after the next start);
+    /// it returns how many.
+    pub async fn stop(&self) -> AppResult<usize> {
+        let wait = self.inner.config.stop_wait_secs;
+        let deadline = Instant::now() + Duration::from_secs(wait);
+        let _ = self.inner.stopping.set(queue::later(&util::now(), wait));
+        // The first count is a write, so it comes after every claim that did
+        // not see the service stopping; no claim succeeds after it.
+        let store = &self.inner.store;
+        let mut running = store.write(|w| Ok(queue::counts(w)?.1)).await?;
+        let mut told = 0;
+        while running > 0 {
+            if Instant::now() >= deadline {
+                let why = format!(
+                    "Branvil stopped (an update or a restart) before it finished, {wait} s after it stopped giving out jobs"
+                );
+                let now = util::now();
+                let changed = store
+                    .write(move |w| queue::interrupt_running(w, None, &why, &now))
+                    .await?;
+                self.publish(&changed);
+                return Ok(changed.len());
+            }
+            if running != told {
+                // scripts/serve.sh reads the first one, as it reads the line
+                // that says the service is ready; nobody may read it now.
+                if told == 0 {
+                    use std::io::Write;
+                    let mut out = std::io::stdout().lock();
+                    let _ = writeln!(
+                        out,
+                        "branvil stopping: waiting for {running} running CI job(s) to finish, at most {wait} s"
+                    )
+                    .and_then(|_| out.flush());
+                }
+                tracing::info!(
+                    "stopping: waiting for {running} running CI job(s) to finish, at most {wait} s after the stop began; new jobs wait for the next start"
+                );
+                told = running;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            running = store.read(|r| Ok(queue::counts(r)?.1)).await?;
+        }
+        Ok(0)
+    }
+
     /// Forgets a runner that was stopped, so the diagnostics stop counting it.
     pub fn forget_runner(&self, name: &str) {
         self.inner.runners.lock().unwrap().remove(&util::fold(name));
@@ -578,7 +635,14 @@ impl Ci {
             .iter()
             .filter(|r| r.seen.is_some_and(|s| s.elapsed() <= absent))
             .collect();
-        let (state, detail) = if live.is_empty() {
+        let (state, detail) = if let Some(until) = self.inner.stopping.get() {
+            (
+                "stopping",
+                format!(
+                    "Branvil is stopping (an update or a restart): it gives out no job and waits until the running ones finish, at most until {until}; queued jobs run after it starts again."
+                ),
+            )
+        } else if live.is_empty() {
             (
                 "no_runner",
                 format!(

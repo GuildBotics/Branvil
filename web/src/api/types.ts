@@ -396,7 +396,7 @@ export interface JobLog {
 
 /** What `/admin/diagnostics` says that the warnings use; the rest is for people reading the API. */
 export interface Diagnostics {
-  runner?: { state: "ready" | "no_runner" | "executor_unavailable" | string; detail: string; mode: string };
+  runner?: { state: "ready" | "no_runner" | "executor_unavailable" | "stopping" | string; detail: string; mode: string };
   upstream?: { state: string; problems?: { repository: string; problem: string }[] };
 }
 
@@ -405,7 +405,7 @@ export interface CiSettings {
   runner: {
     /** The `[ci] runner` setting as it applies now. */
     mode: "auto" | "off";
-    state: "ready" | "no_runner" | "executor_unavailable";
+    state: "ready" | "no_runner" | "executor_unavailable" | "stopping";
     detail: string;
     runners: CiRunner[];
   };

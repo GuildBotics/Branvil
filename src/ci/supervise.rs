@@ -11,17 +11,25 @@ use std::time::Duration;
 
 use crate::app::Shared;
 use crate::ci::config::RunnerMode;
+use crate::ci::queue;
 use crate::domain::members::{NewMember, insert_member};
 use crate::error::{AppError, AppResult};
 use crate::model::{Member, MemberKind};
 use crate::runner::executor::Executor;
 use crate::store::{self, Rd};
+use crate::util;
 
 pub const AUTO_RUNNER: &str = "branvil-runner";
 
+/// Mints the token of the next child. The previous child is gone (it ends with
+/// its service, or before the next start): the jobs it held are interrupted
+/// now, and queued again in their place ahead of the others, rather than when
+/// their leases run out, after the next child took others.
 async fn mint_token(app: &Shared) -> AppResult<String> {
-    app.store
-        .write(|w| {
+    let now = util::now();
+    let (token, changed) = app
+        .store
+        .write(move |w| {
             match w.get::<Member>(store::MEMBERS, &Member::key(AUTO_RUNNER))? {
                 Some(m) if m.kind != MemberKind::Runner => {
                     return Err(AppError::conflict(format!(
@@ -40,9 +48,22 @@ async fn mint_token(app: &Shared) -> AppResult<String> {
                     )?;
                 }
             }
-            Ok(crate::auth::replace_token(w, AUTO_RUNNER, crate::auth::AUTO_LABEL)?.1)
+            let changed = queue::interrupt_running(
+                w,
+                Some(AUTO_RUNNER),
+                "the automatic runner stopped before it finished (Branvil stopped, or the runner exited)",
+                &now,
+            )?;
+            Ok((
+                crate::auth::replace_token(w, AUTO_RUNNER, crate::auth::AUTO_LABEL)?.1,
+                changed,
+            ))
         })
-        .await
+        .await?;
+    for (path, sha) in changed {
+        app.events.publish("check", &path, sha);
+    }
+    Ok(token)
 }
 
 /// Supervises the runner child for the lifetime of the service: runs one

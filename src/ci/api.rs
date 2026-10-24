@@ -310,9 +310,17 @@ async fn claim(State(app): State<Shared>, c: Caller, body: axum::body::Bytes) ->
         chrono::Utc::now(),
     );
     let at = util::format_time(now);
+    // Checked in the write: `Ci::stop` counts the running jobs in a write
+    // too, so a claim it does not see gives out nothing.
+    let ci = app.ci.clone();
     let claimed = app
         .store
-        .write(move |w| queue::claim(w, &runner, lease_secs, &at))
+        .write(move |w| {
+            if ci.stopping() {
+                return Ok(None);
+            }
+            queue::claim(w, &runner, lease_secs, &at)
+        })
         .await?;
     let Some(cl) = claimed else {
         return Ok(StatusCode::NO_CONTENT.into_response());
