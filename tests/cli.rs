@@ -187,7 +187,7 @@ async fn bootstrap_and_admin_commands() {
         .unwrap();
     assert!(!out.status.success());
     assert!(text(&out).contains("already open"), "{}", text(&out));
-    server.stop();
+    server.stop_for_admin();
     let out = std::process::Command::new(BIN)
         .args(["admin", "reindex", "--data-dir"])
         .arg(&server.data)
@@ -209,7 +209,7 @@ async fn bootstrap_and_admin_commands() {
 async fn an_upgraded_database_serves_only_after_a_successful_check() {
     let mut w = World::new().await;
     w.ticket("Check upgrade").await;
-    w.server.stop();
+    w.server.stop_for_admin();
     let data = w.server.data.clone();
     let db = data.join("branvil.redb");
     as_schema_18(&db);

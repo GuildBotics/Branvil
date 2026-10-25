@@ -27,7 +27,7 @@ async fn schema_18_upgrade_preserves_attempts_and_indexes_pending_failure_notice
     let attempt = runner.claim().await.unwrap();
     set_required(&w, &["test"]).await;
     assert_eq!(runner.finish(&attempt, "startup_failure").await.0, 200);
-    w.server.stop();
+    w.server.stop_for_admin();
     let data = w.server.data.clone();
     let db = data.join("branvil.redb");
     let attempts = records(&db, "ci_attempts");
@@ -281,7 +281,7 @@ async fn cache_refresh_never_changes_main_checks_or_required_readiness() {
         "Cache refresh attempts cannot be manually retried."
     );
     // Preserve both purposes and their association across the previous-schema upgrade.
-    w.server.stop();
+    w.server.stop_for_admin();
     let db = w.server.data.join("branvil.redb");
     let before_attempts = records(&db, "ci_attempts");
     assert!(
@@ -1337,7 +1337,7 @@ async fn an_expired_lease_requeues_once_and_a_restart_handles_orphans() {
     assert_eq!(runner.finish(&second, "success").await.0, 409);
     assert!(runner.claim().await.is_none());
     // The indexes still match the records after all of it.
-    w.server.stop();
+    w.server.stop_for_admin();
     let out = std::process::Command::new(BIN)
         .args(["admin", "check", "--data-dir"])
         .arg(&w.server.data)

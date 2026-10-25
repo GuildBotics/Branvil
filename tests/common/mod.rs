@@ -109,6 +109,25 @@ impl Server {
         }
     }
 
+    /// Stop normally before offline database access. Crash/restart tests keep
+    /// using stop(): killing only the service can leave its pre-exec Git child
+    /// holding an inherited database descriptor.
+    pub fn stop_for_admin(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            self.signal("INT");
+            let status = self
+                .exit_within(std::time::Duration::from_secs(10))
+                .expect("service did not finish normal shutdown");
+            assert!(status.success(), "normal shutdown failed: {status}");
+        }
+        #[cfg(not(unix))]
+        self.stop();
+    }
+
     /// Sends SIGTERM and waits up to `limit` for the process to exit.
     /// Returns its status and how long it took, or `None` (after killing it)
     /// when it was still running at `limit`.
