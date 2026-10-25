@@ -14,8 +14,11 @@ backs the running service up into ~/branvil-backups,
 fast-forwards the checkout's main, installs the commit as builds/<commit>, and
 rehearses the upgrade on a copy restored from that backup; then it records
 the update in builds/update, which scripts/serve.sh carries out.
-Failed checks are read again each round. After an hour, unavailable API,
-unregistered CI, and unfinished checks are each told once per commit.
+Failed checks are read again each round. After fetching a candidate, an hour
+of unavailable API (connection failure, timeout, or HTTP 5xx), unregistered CI,
+or unfinished checks is told once per commit and reason. Authentication,
+HTTP 4xx, invalid responses, and failures before the fetch are told at once;
+their diagnostics are kept in the log.
 Failures go to the configured webhook and the desktop, even with no service. See "Upgrading" in docs/backup-restore.md.
 EOF
 }
@@ -65,27 +68,55 @@ checks_of() {
   BRANVIL_REPO_URL="${BASH_REMATCH[1]}/api/v1/repos/${BASH_REMATCH[2]//\//%2F}" \
     BRANVIL_CHECKS_SHA="$1" BRANVIL_CHECKS_TOKEN="$(<"$2")" node --input-type=module -e '
       const read = async (what, url) => {
-        const answer = await fetch(url, {
-          signal: AbortSignal.timeout(10000),
-          headers: { authorization: `Bearer ${process.env.BRANVIL_CHECKS_TOKEN}` },
-        }).catch(() => null);
-        // A 404 too: the repository is origin, whose commit was just fetched.
-        if (answer && !answer.ok) return null;
-        return answer && answer.json().catch(() => null);
+        let answer;
+        try {
+          answer = await fetch(url, {
+            signal: AbortSignal.timeout(10000),
+            headers: { authorization: `Bearer ${process.env.BRANVIL_CHECKS_TOKEN}` },
+          });
+        } catch (error) {
+          console.error(`reading ${what}: ${error.name === "TimeoutError" ? "timed out" : "connection failed"}`);
+          return undefined;
+        }
+        if (!answer.ok) {
+          const message = `reading ${what}: HTTP ${answer.status}`;
+          if (answer.status < 500) throw new Error(message);
+          console.error(message);
+          return undefined;
+        }
+        try {
+          return await answer.json();
+        } catch (error) {
+          if (error instanceof SyntaxError) throw new Error(`reading ${what}: invalid JSON response`);
+          console.error(`reading ${what}: response interrupted or timed out`);
+          return undefined;
+        }
       };
       const repo = process.env.BRANVIL_REPO_URL;
       const settings = await read("the repository", repo);
-      const report = settings && (await read("the checks", `${repo}/commits/${process.env.BRANVIL_CHECKS_SHA}/checks`));
-      let state = "unreachable"; // asked again in the next round
-      if (report && Array.isArray(report.checks) && Array.isArray(settings.required_checks)
-          && typeof report.run_registered === "boolean" && typeof report.checks_expected === "boolean") {
-        const { checks, checks_expected } = report;
-        if (!report.run_registered && checks_expected) state = "unregistered";
-        else if (checks.some((c) => c.status !== "completed")) state = "running";
-        else if (!checks.length) state = checks_expected ? "running" : "ready";
-        else {
-          const passed = (name) => checks.some((c) => c.name === name && c.conclusion === "success");
-          state = settings.required_checks.every(passed) ? "ready" : "failed";
+      let state = "unreachable";
+      if (settings !== undefined) {
+        if (!settings || !Array.isArray(settings.required_checks)
+            || !settings.required_checks.every((name) => typeof name === "string"))
+          throw new Error("reading the repository: invalid response shape");
+        const report = await read("the checks", `${repo}/commits/${process.env.BRANVIL_CHECKS_SHA}/checks`);
+        if (report !== undefined) {
+          if (!report || !Array.isArray(report.checks)
+              || typeof report.run_registered !== "boolean" || typeof report.checks_expected !== "boolean"
+              || !report.checks.every((c) => c && typeof c.name === "string"
+                && ["queued", "in_progress", "completed"].includes(c.status)
+                && (c.status === "completed"
+                  ? ["success", "failure", "cancelled", "timed_out", "skipped", "startup_failure"].includes(c.conclusion)
+                  : c.conclusion === null)))
+            throw new Error("reading the checks: invalid response shape");
+          const { checks, checks_expected } = report;
+          if (!report.run_registered && checks_expected) state = "unregistered";
+          else if (checks.some((c) => c.status !== "completed")) state = "running";
+          else if (!checks.length) state = checks_expected ? "running" : "ready";
+          else {
+            const passed = (name) => checks.some((c) => c.name === name && c.conclusion === "success");
+            state = settings.required_checks.every(passed) ? "ready" : "failed";
+          }
         }
       }
       console.log(state);
@@ -115,7 +146,7 @@ waiting() {
   key="$target $reason"
   if grep -Fxq -- "$key" "$builds/told" 2>/dev/null; then return; fi
   case "$reason" in
-    unreachable) message="the API is unreachable or did not return a usable response" ;;
+    unreachable) message="the API is unavailable (connection failure, timeout, or HTTP 5xx)" ;;
     unregistered) message="no CI run is registered" ;;
     *) message="the checks are still queued or running" ;;
   esac
@@ -188,24 +219,23 @@ main() {
 
   stage="reaching the running service"
   local owner token="$data_dir/secrets/owner.token"
-  target="$(git rev-parse --verify origin/main 2>/dev/null || true)"
-  target="${target:-origin/main}"
-  if ! owner="$(node -e '
+  owner="$(node -e '
     const env = { ...process.env };
     delete env.BRANVIL_TOKEN;
     delete env.BRANVIL_URL;
     try {
       const reply = require("child_process").execFileSync(process.argv[1],
         ["member", "list", "--data-dir", process.argv[2]],
-        { env, timeout: 10000, stdio: ["ignore", "pipe", "ignore"] });
+        { env, timeout: 10000, stdio: ["ignore", "pipe", "inherit"] });
       const owner = JSON.parse(reply).items.find((m) => m.kind === "owner");
-      if (!owner) throw new Error();
+      if (!owner || typeof owner.name !== "string" || !owner.name) throw new Error();
       console.log(owner.name);
-    } catch { process.exit(1); }
-  ' "$builds/$previous/branvil" "$data_dir")"; then
-    waiting unreachable
-    exit 0
-  fi
+    } catch (error) {
+      if (error.code === "ETIMEDOUT") console.error("member list: timed out");
+      else if (!Number.isInteger(error.status)) console.error("member list: invalid response or executable unavailable");
+      process.exit(1);
+    }
+  ' "$builds/$previous/branvil" "$data_dir")"
   stage="fetching origin"
   fetch_as "$owner" "$token"
   target="$(git rev-parse origin/main)"

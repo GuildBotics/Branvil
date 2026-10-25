@@ -1129,6 +1129,10 @@ Ordinary supersession does not send a failure notice. Missing required jobs,
 absent pipelines, and invalid pipelines do: they include a commit-page link
 when no attempt/log exists. Script notices have their own persistent delivery
 queue under `builds/`, so they can be sent even while the service is stopped.
+Queued script webhook notices, including their first attempt, wait for the
+next delivery round, normally within `scripts/serve.sh --interval` seconds.
+Slow deliveries or service transitions can delay them. Unsuccessful deliveries
+are retried each interval; desktop notifications do not wait for this round.
 
 ### CI settings
 

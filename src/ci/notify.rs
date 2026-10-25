@@ -309,6 +309,13 @@ mod tests {
         let first = repo("one");
         let second = repo("two");
         register(&app, &first, "failed", jobs(), true, "failure");
+        assert_eq!(
+            app.store
+                .read_sync(|r| Ok(r.prefix_keys(store::IX_CI_UNNOTIFIED, &[])?.len()))
+                .unwrap(),
+            1,
+            "finishing a required attempt indexes the failure before any run or branch change"
+        );
         register(
             &app,
             &first,

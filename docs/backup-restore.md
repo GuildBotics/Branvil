@@ -222,8 +222,11 @@ While checks are unfinished or failed, it reads them again in the next round;
 a later successful retry allows the update. Required-check failures are told
 by the service, for every repository's protected-branch run, rather than by
 `update.sh`. After an hour from the first observation of a commit, the updater
-tells each waiting reason once: unavailable API, no registered CI run, or
-queued/running checks. An update:
+tells each waiting reason once: unavailable API (connection failure, timeout,
+or HTTP 5xx), no registered CI run, or queued/running checks. Authentication
+failures, HTTP 4xx, invalid responses, and failures before a candidate is
+fetched stop that round and queue a notice at once; their diagnostics stay in
+the log. A pre-fetch failure never uses an installed commit's old waiting time. An update:
 
 1. backs the running service up with the running build into
    `~/branvil-backups/branvil-update-<UTC time>` (keeping the newest three of
@@ -272,7 +275,7 @@ the disk, and renamed. Write them by hand the same way, for instance
 | `builds/notified` | The last update/activation failure queued for notification. |
 | `builds/checks-seen` | Commit and first-observed Unix time, retained across updater and service restarts. |
 | `builds/told` | Commit/reason pairs already queued for a long-wait notice; successful waiting rounds do not clear it. |
-| `builds/*.notice` | Pending script webhook notices, including the installed build that can send each one (updated before its old build is retired); removed after successful delivery and retried each interval even while the service is stopped. |
+| `builds/*.notice` | Pending script webhook notices, including the installed build that can send each one (updated before its old build is retired); first sent at the next delivery round (normally within `--interval` seconds; slow deliveries or service transitions can delay it), removed after successful delivery, and retried each interval even while the service is stopped. |
 | `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line, and `branvil stopping: …` while a stop waits for its running CI jobs). |
 | `builds/rehearsal`, `builds/*.new`, `builds/*.tmp`, `<data>/branvil-schema-*.redb.partial` | Left only by something cut off; removed at the next start. |
 | `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's required checks; the service handles their webhook notice), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. A stop that waited for running CI jobs logs "branvil serve of … stopped N seconds after TERM; it waited for its running CI jobs"; one that had to interrupt jobs logs and notifies "branvil serve of … stopped while CI jobs still ran". |

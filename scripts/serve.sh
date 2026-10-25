@@ -9,9 +9,10 @@ Usage: scripts/serve.sh [--data-dir PATH] [--interval SECONDS] [--plist]
 Run the installed build that builds/current names, and keep it up to date with
 origin/main. Meant to run as a launchd user agent (--plist); it is the only
 process that starts or stops branvil, and TERM stops it all. Failure notices
-also go to the configured webhook without needing the service. Failed webhook
-deliveries are queued under builds/ and retried each interval, including while
-Branvil is stopped.
+also go to the configured webhook without needing the service. Queued webhook notices are first sent at the next delivery round, normally
+within --interval seconds; slow deliveries or service transitions can delay
+them. Failed deliveries are retried each interval, including while Branvil
+is stopped.
   --data-dir PATH     Data directory (default: BRANVIL_DATA_DIR or <repo>/data).
                       Relative paths are resolved from the repository root.
   --interval SECONDS  Time between update checks, the first at the start

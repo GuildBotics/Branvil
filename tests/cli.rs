@@ -66,7 +66,7 @@ async fn admin_notify_needs_neither_a_running_service_nor_a_readable_database() 
     server.abort();
     let out = notify();
     assert!(!out.status.success());
-    assert!(text(&out).contains("webhook request failed"));
+    assert!(text(&out).contains("could not connect to the webhook"));
     assert!(!text(&out).contains(&url));
     assert!(!text(&out).contains("secret-hook"));
     std::fs::write(

@@ -246,6 +246,9 @@ pub fn put_run(w: &Wtx, new: &Run) -> AppResult<()> {
     let old = get_run(w, &new.repo, &new.sha)?;
     let mut new = new.clone();
     refresh_failure(w, &mut new)?;
+    if old.as_ref() == Some(&new) {
+        return Ok(());
+    }
     put_indexed(
         w,
         store::CI_RUNS,

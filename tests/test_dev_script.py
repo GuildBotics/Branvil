@@ -175,6 +175,15 @@ if tool == "branvil":
             time.sleep(0.01)
         stop()
     elif command == "member":
+        try:
+            token = (data / "secrets/owner.token").read_text().strip()
+        except OSError:
+            print("a token is needed: owner.token was not readable", file=sys.stderr)
+            sys.exit(1)
+        if token != "test-owner-token":
+            print("invalid token (401)", file=sys.stderr)
+            sys.exit(1)
+        hold("MEMBER")
         if not alive(serving):
             print("Branvil is not reachable", file=sys.stderr)
             sys.exit(1)
@@ -662,6 +671,7 @@ class GitServer:
         self.required = ["test"]  # an int: that error status
         self.notices = []
         self.notice_status = 200
+        self.body_modes = {}
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -691,12 +701,32 @@ class GitServer:
                 self.end_headers()
                 self.wfile.write(payload)
 
+            def api_reply(self, what, answer):
+                mode = server.body_modes.get(what)
+                if mode:
+                    if mode == "connection":
+                        self.close_connection = True
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Length", "1000")
+                    self.end_headers()
+                    self.wfile.write(b"{")
+                    self.wfile.flush()
+                    if mode == "timeout":
+                        threading.Event().wait(12)
+                    self.close_connection = True
+                    return
+                if isinstance(answer, int):
+                    return self.answer(answer, b'{"error": {"code": "test"}}')
+                self.answer(200, answer if isinstance(answer, bytes) else json.dumps(answer).encode())
+
             def repo(self):
                 if self.headers.get("Authorization") != bearer:
                     return self.answer(401)
-                if isinstance(server.required, int):
-                    return self.answer(server.required, b'{"error": {"code": "test"}}')
-                self.answer(200, json.dumps({"required_checks": server.required}).encode())
+                answer = server.required
+                if isinstance(answer, list):
+                    answer = {"required_checks": answer}
+                self.api_reply("repository", answer)
 
             def checks(self):
                 sha = self.path[len(server.CHECKS):].removesuffix("/checks")
@@ -704,11 +734,9 @@ class GitServer:
                 if self.headers.get("Authorization") != bearer:
                     return self.answer(401)
                 answer = server.checks.get(sha, 404)
-                if isinstance(answer, int):  # an error status
-                    return self.answer(answer, b'{"error": {"code": "test"}}')
-                if "checks" in answer:
+                if isinstance(answer, dict) and "checks" in answer:
                     answer = {"run_registered": bool(answer["checks"]), **answer}
-                self.answer(200, json.dumps(answer).encode())
+                self.api_reply("checks", answer)
 
             def backend(self):
                 given = self.headers.get("Authorization")
@@ -1323,9 +1351,9 @@ class ServeScriptTests(ScriptTestCase):
         (self.builds / "checks-seen").write_text(f"{new} {int(time.time()) - 3601}\n")
         for report, reason, text in [
             (RUNNING, "unregistered", "no CI run is registered"),
-            ({"run_registered": True, "checks": [{"name": "test", "status": "queued"}], "checks_expected": True},
+            ({"run_registered": True, "checks": [{"name": "test", "status": "queued", "conclusion": None}], "checks_expected": True},
              "running", "still queued or running"),
-            (503, "unreachable", "API is unreachable"),
+            (503, "unreachable", "API is unavailable"),
         ]:
             self.server.checks[new] = report
             self.rounds_pass()
@@ -1464,34 +1492,18 @@ class ServeScriptTests(ScriptTestCase):
         self.finished(proc, output, previous)
         self.assert_runs(previous)
         new = self.merge(500)
-        for answer in [500, 401, 404, {"checks_expected": True}]:
-            self.server.checks[new] = answer
-            self.rounds_pass()
-        self.server.required = 503
-        self.server.checks[new] = SUCCESS
         self.rounds_pass()
-        self.assertEqual(self.notifications(), [], "Unavailable checks wait an hour")
+        self.assertEqual(self.notifications(), [], "5xx waits an hour")
+        self.server.checks[new] = 401
+        self.wait_until(lambda: len(self.notifications()) == 1, proc)
+        self.assertIn("stopped while reading the checks", self.notifications()[0])
+        self.assertIn("reading the checks: HTTP 401", output.read_text())
         self.assertEqual(self.steps(), self.BOOT + self.UPDATE)
         self.assertIsNone(self.attempted(), "Read again in the next round")
-        # Keep the next update pending until authentication has recovered.
         self.server.checks[new] = RUNNING
-        self.server.required = ["test"]
-        token = self.data / "secrets/owner.token"
-        token.unlink()
-        self.wait_until(lambda: len(self.notifications()) == 1, proc)
-        self.assertIn("stopped while fetching origin", self.notifications()[0])
-        self.assertIn(f"Branvil still runs {previous}", self.notifications()[0])
-        # Observe repeated failed rounds, rather than merely the first notice.
-        self.wait_until(
-            lambda: output.read_text(encoding="utf-8").count("stopped while fetching origin") >= 3,
-            proc,
-        )
-        self.assertEqual(len(self.notifications()), 1)
-        self.assertTrue((self.builds / "notified").exists())
-        token.write_text("test-owner-token\n", encoding="utf-8")
         self.rounds_pass()
+        self.wait_until(lambda: not (self.builds / "notified").exists(), proc)
         self.assert_runs(previous)
-        self.assertFalse((self.builds / "notified").exists())
         # The old completion must not satisfy the wait for the pending build.
         with self.assertRaisesRegex(AssertionError, "did not reach the expected event"):
             self.finished(proc, output, new, timeout=0.1)
@@ -1500,6 +1512,111 @@ class ServeScriptTests(ScriptTestCase):
         self.assert_runs(new)
         self.assertEqual(len(self.notifications()), 1)
         self.assertFalse((self.builds / "notified").exists())
+
+    def test_prefetch_authentication_failure_never_uses_a_past_candidate_time(self):
+        proc, output = self.watch()
+        self.rounds_pass()
+        seen = f"{self.base} {int(time.time()) - 7200}\n"
+        (self.builds / "checks-seen").write_text(seen)
+        token = self.data / "secrets/owner.token"
+        for bad, diagnostic in [(None, "owner.token was not readable"), ("", "invalid token (401)"),
+                                ("invalid-test-token", "invalid token (401)")]:
+            with self.subTest(token_state="missing" if bad is None else "invalid"):
+                if bad is None:
+                    token.unlink()
+                else:
+                    token.write_text(bad)
+                before = len(self.notifications())
+                fetches = self.server.fetches
+                self.wait_until(lambda: len(self.notifications()) == before + 1, proc)
+                self.assertIn("stopped while reaching the running service", self.notifications()[-1])
+                self.assertNotIn("waited over an hour", self.notifications()[-1])
+                self.assertEqual(self.server.fetches, fetches, "Cannot fetch without authenticating")
+                self.assertEqual((self.builds / "checks-seen").read_text(), seen)
+                self.assertFalse((self.builds / "told").exists())
+                self.assertIn(diagnostic, output.read_text())
+                self.assertNotIn("invalid-test-token", output.read_text())
+                token.write_text("test-owner-token\n")
+                self.rounds_pass()
+                self.wait_until(lambda: not (self.builds / "notified").exists(), proc)
+
+    def test_prefetch_timeout_is_an_update_check_failure_not_a_commit_wait(self):
+        proc, output = self.watch()
+        self.rounds_pass()
+        hold = self.root / "hold-member"
+        hold.touch()
+        self.control(DEV_TEST_HOLD_MEMBER=str(hold))
+        self.wait_until(lambda: len(self.notifications()) == 1, proc)
+        self.assertIn("member list: timed out", output.read_text())
+        self.assertIn("stopped while reaching the running service", self.notifications()[0])
+        self.assertFalse((self.builds / "checks-seen").exists())
+        self.assertFalse((self.builds / "told").exists())
+        self.control()
+        hold.unlink()
+        self.rounds_pass()
+
+    def test_both_api_reads_preserve_diagnostics_and_reject_invalid_responses(self):
+        new = self.merge(RUNNING)
+        proc, output = self.watch()
+        self.rounds_pass()
+        for what in ["repository", "checks"]:
+            before = len(self.notifications())
+            if what == "repository": self.server.required = 503
+            else: self.server.checks[new] = 503
+            self.rounds_pass()
+            self.assertEqual(len(self.notifications()), before)
+            self.assertIn(f"reading the {what}: HTTP 503", output.read_text())
+            self.server.required = ["test"]
+            self.server.checks[new] = RUNNING
+            cases = [(401, "HTTP 401"), (403, "HTTP 403"), (404, "HTTP 404"),
+                     (b"not JSON: test-body-secret", "invalid JSON response"),
+                     ({}, "invalid response shape"),
+                     ({"required_checks": [1]} if what == "repository" else
+                      {"checks": [{}], "run_registered": True, "checks_expected": True}, "invalid response shape")]
+            if what == "checks":
+                cases.extend(({
+                    "checks": [check], "run_registered": True, "checks_expected": True,
+                }, "invalid response shape") for check in [
+                    {"name": 1, "status": "queued", "conclusion": None},
+                    {"name": "test", "status": "unknown", "conclusion": None},
+                    {"name": "test", "status": "completed", "conclusion": "unknown"},
+                    {"name": "test", "status": "queued", "conclusion": "success"},
+                ])
+            for reply, diagnostic in cases:
+                with self.subTest(endpoint=what, diagnostic=diagnostic):
+                    before = len(self.notifications())
+                    if what == "repository": self.server.required = reply
+                    else: self.server.checks[new] = reply
+                    self.wait_until(lambda: len(self.notifications()) == before + 1, proc)
+                    self.assertIn(f"reading the {'repository' if what == 'repository' else 'checks'}: {diagnostic}", output.read_text())
+                    self.assertNotIn("test-body-secret", output.read_text())
+                    self.assertIsNone(self.attempted())
+                    self.assertFalse((self.builds / "told").exists())
+                    self.server.required = ["test"]
+                    self.server.checks[new] = RUNNING
+                    self.rounds_pass()
+                    self.wait_until(lambda: not (self.builds / "notified").exists(), proc)
+        self.server.checks[new] = SUCCESS
+        self.finished(proc, output, new)
+
+    def test_body_transport_failures_remain_temporary_for_both_api_reads(self):
+        new = self.merge(RUNNING)
+        proc, output = self.watch()
+        self.rounds_pass()
+        for what in ["repository", "checks"]:
+            for mode in ["connection", "disconnect", "timeout"]:
+                with self.subTest(endpoint=what, mode=mode):
+                    self.server.body_modes[what] = mode
+                    diagnostic = f"reading the {what}: " + ("connection failed" if mode == "connection" else "response interrupted or timed out")
+                    before = output.read_text().count(diagnostic)
+                    self.wait_until(lambda: output.read_text().count(diagnostic) > before, proc)
+                    self.assertEqual(self.notifications(), [], "Transport errors wait before alerting")
+                    self.assertFalse((self.builds / "notified").exists())
+                    self.assertIsNone(self.attempted())
+                    self.server.body_modes.clear()
+                    self.rounds_pass()
+        self.server.checks[new] = SUCCESS
+        self.finished(proc, output, new)
 
     def check_checkout(self, change):
         """A checkout the update cannot fast-forward to origin/main."""
