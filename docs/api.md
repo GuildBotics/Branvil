@@ -896,7 +896,9 @@ is not the full sha of a commit of the repository.
   pipeline defines it, once completed, can be retried (`409 conflict`
   otherwise, also for an attempt of another definition); a full queue is
   `503 unavailable`. The new attempt always executes; it never reuses a
-  result, including when requeued after interruption.
+  result, including when requeued after interruption. Retry waits for ongoing
+  repository ref changes, including a departing gate's cleanup, before it
+  queues the new attempt.
 - `POST /api/v1/repos/{repo}/jobs/{attempt_id}/cancel` → the attempt: a
   queued one is `completed`/`cancelled` at once, a running one gets
   `cancel_requested: true` and is concluded `cancelled` when its runner stops

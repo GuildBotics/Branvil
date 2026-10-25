@@ -274,7 +274,9 @@ No runner, no executor:
 Cancel and retry: `POST …/jobs/{id}/cancel` concludes a queued attempt
 `cancelled` at once and asks a running one to stop; `POST …/jobs/{id}/retry`
 queues attempt n+1 of the latest completed attempt, with the same job
-definition (the pipeline is not read again).
+definition (the pipeline is not read again). Retry takes the repository lock
+used for ref changes. If a landing gate has just left its queue, its ref cleanup
+finishes before the new attempt is queued, so it cannot cancel that retry.
 
 ## Limits
 

@@ -24,13 +24,39 @@ async fn landing(w: &World, number: u64, state: &str) -> Value {
     }
 }
 
-async fn claim(runner: &Runner) -> Value {
+async fn claim(
+    w: &World,
+    runner: &Runner,
+    phase: &str,
+    sha: &str,
+    attempt_id: Option<&str>,
+) -> Value {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(claim) = runner.claim().await {
+            assert_eq!(claim["sha"], sha, "claim phase: {phase}");
+            if let Some(id) = attempt_id {
+                assert_eq!(claim["attempt_id"], id, "claim phase: {phase}");
+            }
             return claim;
         }
-        assert!(Instant::now() < deadline, "no queued job appeared");
+        if Instant::now() >= deadline {
+            let checks = w
+                .server
+                .get(&format!("{}/commits/{sha}/checks", w.repo_path()), &w.owner)
+                .await;
+            let attempt = match attempt_id {
+                Some(id) => Some(
+                    w.server
+                        .get(&format!("{}/jobs/{id}", w.repo_path()), &w.owner)
+                        .await,
+                ),
+                None => None,
+            };
+            panic!(
+                "no queued job appeared during {phase}; sha={sha}; checks={checks:?}; attempt={attempt:?}"
+            );
+        }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 }
@@ -274,16 +300,16 @@ async fn a_failed_gate_reports_its_jobs_and_main_adopts_its_successful_run_with_
     runner.drain("success").await;
     settings(&w, json!({"required_checks":["build","lint"]})).await;
     w.open_pull("feature", json!([])).await;
-    for _ in 0..2 {
-        let job = claim(&runner).await;
+    for index in 1..=2 {
+        let job = claim(&w, &runner, &format!("head job {index}"), &head, None).await;
         assert_eq!(job["sha"], head);
         assert_eq!(runner.finish(&job, "success").await.0, 200);
     }
     let gating = landing(&w, 3, "gating").await;
     let gate = gating["landing"]["gate"].as_str().unwrap();
     assert_ne!(gate, head);
-    let build = claim(&runner).await;
-    let lint = claim(&runner).await;
+    let build = claim(&w, &runner, "gate build", gate, None).await;
+    let lint = claim(&w, &runner, "gate lint", gate, None).await;
     assert_eq!(build["job"]["name"], "build");
     assert_eq!(lint["job"]["name"], "lint");
     for job in [&build, &lint] {
@@ -323,7 +349,14 @@ async fn a_failed_gate_reports_its_jobs_and_main_adopts_its_successful_run_with_
         )
         .await;
     assert_eq!(st, 200, "{result}");
-    let retry = claim(&runner).await;
+    let retry = claim(
+        &w,
+        &runner,
+        "failed gate build retry",
+        gate,
+        Some(result["id"].as_str().unwrap()),
+    )
+    .await;
     assert_eq!(retry["sha"], gate);
     assert_eq!(runner.finish(&retry, "success").await.0, 200);
     let passed = landing(&w, 3, "passed").await;
@@ -335,7 +368,7 @@ async fn a_failed_gate_reports_its_jobs_and_main_adopts_its_successful_run_with_
     // Only the cache-writing job reruns as protected. The no-cache job's
     // original gate attempt remains the same; deleting the hidden gate ref
     // cannot supersede the run that main now owns.
-    let protected = claim(&runner).await;
+    let protected = claim(&w, &runner, "protected main build", gate, None).await;
     assert_eq!(protected["sha"], gate);
     assert_eq!(protected["job"]["name"], "build");
     assert_eq!(protected["cache_scope"], "protected");
