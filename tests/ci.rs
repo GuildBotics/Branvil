@@ -14,7 +14,7 @@ const IMAGE: &str = "docker.io/library/alpine:3.22";
 const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
 #[tokio::test]
-async fn schema_17_upgrade_preserves_runs_and_indexes_pending_failure_notices() {
+async fn schema_18_upgrade_preserves_attempts_and_indexes_pending_failure_notices() {
     let mut w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;
     let head = land(
@@ -26,13 +26,13 @@ async fn schema_17_upgrade_preserves_runs_and_indexes_pending_failure_notices() 
     .await;
     let attempt = runner.claim().await.unwrap();
     set_required(&w, &["test"]).await;
-    assert_eq!(runner.finish(&attempt, "failure").await.0, 200);
+    assert_eq!(runner.finish(&attempt, "startup_failure").await.0, 200);
     w.server.stop();
     let data = w.server.data.clone();
     let db = data.join("branvil.redb");
     let attempts = records(&db, "ci_attempts");
     let pulls = records(&db, "pulls");
-    as_schema_17(&db);
+    as_schema_18(&db);
     let before = tables(&db);
     let admin = |what: &str| {
         let out = std::process::Command::new(BIN)
@@ -52,7 +52,7 @@ async fn schema_17_upgrade_preserves_runs_and_indexes_pending_failure_notices() 
     assert!(admin("check").1.contains("branvil admin upgrade"));
     let (code, output) = admin("upgrade");
     assert_eq!(code, 3, "{output}");
-    assert!(output.contains("from schema version 17 to 18"), "{output}");
+    assert!(output.contains("from schema version 18 to 19"), "{output}");
     assert_eq!(records(&db, "ci_attempts"), attempts);
     assert_eq!(records(&db, "pulls"), pulls);
     let runs = records(&db, "ci_runs");
@@ -67,7 +67,7 @@ async fn schema_17_upgrade_preserves_runs_and_indexes_pending_failure_notices() 
             p.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("branvil-schema-17-")
+                .starts_with("branvil-schema-18-")
         })
         .unwrap();
     assert_eq!(tables(&backup), before);
@@ -77,6 +77,77 @@ async fn schema_17_upgrade_preserves_runs_and_indexes_pending_failure_notices() 
     let upgraded = tables(&db);
     assert_eq!(admin("upgrade").0, 0);
     assert_eq!(tables(&db), upgraded);
+}
+
+#[tokio::test]
+async fn protected_required_retries_are_visible_as_queued_checks_until_exhausted() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    let head = land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test"]))],
+        None,
+    )
+    .await;
+    set_required(&w, &["test"]).await;
+    let root = runner.claim().await.unwrap();
+    let mut current = root.clone();
+    for n in 1..=4 {
+        let (st, result) = runner.finish(&current, "failure").await;
+        assert_eq!(st, 200, "{result}");
+        let report = w
+            .server
+            .ok(
+                &format!("{}/commits/{head}/checks", w.repo_path()),
+                &w.owner,
+            )
+            .await;
+        let check = check(&report, "test");
+        if n <= 3 {
+            assert_eq!(check["status"], "queued", "{report}");
+            assert!(check["conclusion"].is_null(), "{report}");
+            let label = format!(
+                "Automatic retry {n}/3 of {}",
+                root["attempt_id"].as_str().unwrap()
+            );
+            assert!(check["details"].as_str().unwrap().contains(&label));
+            current = runner.claim().await.unwrap();
+            assert!(current["reuse"].is_null());
+            let view = w
+                .server
+                .ok(
+                    &format!(
+                        "{}/jobs/{}",
+                        w.repo_path(),
+                        current["attempt_id"].as_str().unwrap()
+                    ),
+                    &w.owner,
+                )
+                .await;
+            assert!(view["details"].as_str().unwrap().contains(&label));
+        } else {
+            assert_eq!(check["conclusion"], "failure", "{report}");
+            assert!(runner.claim().await.is_none());
+        }
+    }
+    let (st, manual) = w
+        .server
+        .post(
+            &format!(
+                "{}/jobs/{}/retry",
+                w.repo_path(),
+                current["attempt_id"].as_str().unwrap()
+            ),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, 200, "{manual}");
+    assert!(
+        manual["details"].is_null(),
+        "manual retry has its own budget"
+    );
 }
 
 pub(crate) fn pipeline(jobs: &[&str]) -> String {
@@ -142,7 +213,7 @@ async fn a_reused_success_counts_for_required_checks_and_not_for_duration_estima
 
 #[tokio::test]
 async fn cache_refresh_never_changes_main_checks_or_required_readiness() {
-    let w = World::new().await;
+    let mut w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;
     let cached_pipeline =
         pipeline(&["test"]).replace("commands =", "cache = { paths = [\"target\"] }\ncommands =");
@@ -209,6 +280,35 @@ async fn cache_refresh_never_changes_main_checks_or_required_readiness() {
         refused["error"]["message"],
         "Cache refresh attempts cannot be manually retried."
     );
+    // Preserve both purposes and their association across the previous-schema upgrade.
+    w.server.stop();
+    let db = w.server.data.join("branvil.redb");
+    let before_attempts = records(&db, "ci_attempts");
+    assert!(
+        before_attempts
+            .iter()
+            .any(|a| a["purpose"] == "cache_refresh")
+    );
+    assert!(
+        before_attempts
+            .iter()
+            .any(|a| a["cache_refresh"] == refresh_id)
+    );
+    as_schema_18(&db);
+    for (command, expected) in [("upgrade", 3), ("check", 0)] {
+        let out = std::process::Command::new(BIN)
+            .args(["admin", command, "--data-dir"])
+            .arg(&w.server.data)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(records(&db, "ci_attempts"), before_attempts);
 }
 
 /// A scripted runner talking to the runner API.

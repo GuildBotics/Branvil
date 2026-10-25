@@ -8,6 +8,9 @@ use crate::error::AppResult;
 use crate::store::{self, Rd};
 
 pub async fn sweep(app: &App) -> AppResult<()> {
+    if !recoveries(app).await? {
+        return Ok(());
+    }
     let candidates = app
         .store
         .read(|r| {
@@ -111,6 +114,72 @@ pub async fn sweep(app: &App) -> AppResult<()> {
     Ok(())
 }
 
+/// Success is a historical event: a later retry or branch move must not erase it.
+async fn recoveries(app: &App) -> AppResult<bool> {
+    let candidates = app
+        .store
+        .read(|r| r.prefix_raw(store::IX_CI_RECOVERED, &[], None, usize::MAX))
+        .await?;
+    for (_, id) in candidates {
+        let id = String::from_utf8_lossy(&id).into_owned();
+        let notice = app
+            .store
+            .read(move |r| {
+                let Some(a) = queue::get_attempt(r, &id)? else {
+                    return Ok(None);
+                };
+                if a.recovery_notified_at.is_some() {
+                    return Ok(None);
+                }
+                let Some(retry) = &a.auto_retry else {
+                    return Ok(None);
+                };
+                let failed = queue::attempts_of(r, &a.repo, &a.sha)?
+                    .into_iter()
+                    .filter(|x| {
+                        x.id == retry.root_attempt
+                            || (x
+                                .auto_retry
+                                .as_ref()
+                                .is_some_and(|r| r.root_attempt == retry.root_attempt)
+                                && x.job == a.job
+                                && x.number < a.number
+                                && x.conclusion.as_deref().is_some_and(|c| c != "success"))
+                    })
+                    .collect::<Vec<_>>();
+                Ok(Some((a, failed)))
+            })
+            .await?;
+        let Some((a, failed)) = notice else {
+            continue;
+        };
+        let mut text = format!(
+            "Intermittent CI failure recovered: {} {} {}\n{}",
+            a.repo_path,
+            a.sha,
+            a.job.name,
+            a.display_details().unwrap_or_default()
+        );
+        for failed in failed {
+            text.push_str(&format!(
+                "\nFailed attempt: {}/{}/-/jobs/{}",
+                app.base_url, a.repo_path, failed.id
+            ));
+        }
+        text.push_str(&format!(
+            "\nSuccessful attempt: {}/{}/-/jobs/{}",
+            app.base_url, a.repo_path, a.id
+        ));
+        if !app.autoland.send(&app.layout, &text).await {
+            return Ok(false);
+        }
+        app.store
+            .write(move |w| queue::mark_recovery_notified(w, &a.id, &crate::util::now()))
+            .await?;
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +276,131 @@ mod tests {
                 cache: None,
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn automatic_recovery_notifies_once_with_both_logs_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let repo = repo("recovery");
+        let received = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let copy = received.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/webhook", listener.local_addr().unwrap());
+        let router = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post(move |axum::Json(v): axum::Json<serde_json::Value>| {
+                let copy = copy.clone();
+                async move {
+                    let mut items = copy.lock().unwrap();
+                    items.push(v);
+                    if items.len() == 1 {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        std::fs::write(app.layout.webhook(), url).unwrap();
+        let now = crate::util::now();
+        let first = app
+            .store
+            .write_sync(|w| {
+                w.put(store::REPOS, &Repo::key(&repo.id), &repo)?;
+                queue::register(
+                    w,
+                    queue::Registration {
+                        repo: repo.id.clone(),
+                        repo_path: repo.path.clone(),
+                        sha: "sha".into(),
+                        tree: None,
+                        branch: "main".into(),
+                        protected: true,
+                        pipeline: jobs(),
+                        network: false,
+                    },
+                    10,
+                    &now,
+                )?;
+                let c = queue::claim(w, "runner1", 60, &now)?.unwrap();
+                queue::finish(
+                    w,
+                    &c.attempt.id,
+                    &c.lease,
+                    "failure",
+                    None,
+                    queue::ResultInfo::default(),
+                    10,
+                    &now,
+                )?;
+                Ok(c.attempt.id)
+            })
+            .unwrap();
+        sweep(&app).await.unwrap();
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "retry suppresses final failure"
+        );
+        let success = app
+            .store
+            .write_sync(|w| {
+                let c = queue::claim(w, "runner1", 60, &now)?.unwrap();
+                queue::finish(
+                    w,
+                    &c.attempt.id,
+                    &c.lease,
+                    "success",
+                    None,
+                    queue::ResultInfo::default(),
+                    10,
+                    &now,
+                )?;
+                queue::retry(w, &c.attempt.id, 10, &now)?;
+                queue::branch_left(w, &repo.id, "sha", "main", "next", &now)?;
+                Ok(c.attempt.id)
+            })
+            .unwrap();
+        sweep(&app).await.unwrap();
+        assert_eq!(received.lock().unwrap().len(), 1);
+        assert_eq!(
+            app.store
+                .read_sync(|r| Ok(r.prefix_keys(store::IX_CI_RECOVERED, &[])?.len()))
+                .unwrap(),
+            1
+        );
+        drop(app);
+        let app = self::app(dir.path());
+        sweep(&app).await.unwrap();
+        sweep(&app).await.unwrap();
+        let messages = received.lock().unwrap().clone();
+        assert_eq!(messages.len(), 2);
+        let text = messages[1]["text"].as_str().unwrap();
+        for part in [
+            "Intermittent CI failure recovered",
+            "acme/recovery",
+            "sha",
+            "test",
+            &format!("/-/jobs/{first}"),
+            &format!("/-/jobs/{success}"),
+        ] {
+            assert!(text.contains(part), "{text}");
+        }
+        assert_eq!(
+            app.store
+                .read_sync(|r| Ok(r.prefix_keys(store::IX_CI_RECOVERED, &[])?.len()))
+                .unwrap(),
+            0
+        );
+        app.store.write_sync(crate::model::rebuild_indexes).unwrap();
+        assert_eq!(
+            app.store
+                .read_sync(|r| Ok(r.prefix_keys(store::IX_CI_RECOVERED, &[])?.len()))
+                .unwrap(),
+            0
+        );
+        task.abort();
     }
 
     #[test]

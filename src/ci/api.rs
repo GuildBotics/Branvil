@@ -82,7 +82,7 @@ async fn view(app: &Shared, a: &Attempt) -> AppResult<AttemptView> {
         reused_from: app.ci.reused_from(a, &source),
         status: a.status.clone(),
         conclusion: a.conclusion.clone(),
-        details: a.details.clone(),
+        details: a.display_details(),
         cancel_requested: a.cancel_requested,
         created_at: a.created_at.clone(),
         started_at: a.started_at.clone(),

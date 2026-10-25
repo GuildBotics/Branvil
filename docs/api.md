@@ -888,6 +888,8 @@ is not the full sha of a commit of the repository.
   `{"attempt_id","url","sha"}` of its source execution. Its own log explains
   the reuse; the source URL leads to the execution log. `artifact_names` are
   the source's artifacts, empty after the source's retention expires.
+  For automatic retries, `details` includes `Automatic retry 1/3 of att_…`
+  and the attempt's own reason. Check `details` carries the same text.
   `404 not_found` for an id of another repository.
 - `GET /api/v1/repos/{repo}/jobs/{attempt_id}/log?tail_bytes={n}` →
   `{"log": "...", "log_bytes": 12345, "truncated": true, "pruned": false}`; `log`
@@ -905,7 +907,8 @@ is not the full sha of a commit of the repository.
   always return `409 conflict` with "Cache refresh attempts cannot be manually
   retried.", whatever their status; a full queue is
   `503 unavailable`. The new attempt always executes; it never reuses a
-  result, including when requeued after interruption. Retry waits for ongoing
+  result, including when requeued after interruption. A manual retry starts
+  a fresh automatic retry budget. Retry waits for ongoing
   repository ref changes, including a departing gate's cleanup, before it
   queues the new attempt.
 - `POST /api/v1/repos/{repo}/jobs/{attempt_id}/cancel` → the attempt: a
@@ -940,7 +943,8 @@ kind `runner` (created by `branvil runner register`); any other member gets
   of the latest finished actual successful execution whose files have not
   been pruned, with the same repository,
   tree, job definition, and network. `cache_key` is present for cached jobs,
-  otherwise `null`. Manual retries and refresh attempts receive no reuse offer.
+  otherwise `null`. Manual retries, automatic retries, and refresh attempts
+  receive no reuse offer.
   The runner compares the current image digest before fetching source. A match
   succeeds without a VM. Protected cached jobs set `refresh_cache: true` at
   finish if the save is absent, unreadable, or older than 24 hours. The executor
@@ -1136,9 +1140,20 @@ after a failed schema upgrade. With no webhook it exits successfully without
 sending anything. It exits nonzero on delivery failure; errors omit the URL
 and response body. Requests time out after 10 seconds and do not follow redirects.
 
+Required protected checks automatically retry command failures, timeouts,
+runner absence, and second interruptions up to three times, keeping the same
+commit and definition. Other startup failures, requested cancellation,
+supersession, optional jobs, PR/gate runs, and cache refreshes are excluded.
+The failed attempt and queued retry commit atomically; commit checks show
+the retry as queued. Retries caused by runner absence wait until claimed.
+
 The service records successful CI failure delivery on the run. Undelivered
 failures are indexed and retried on relevant events, startup, and every minute.
-A crash between delivery and recording may repeat a notice (at least once).
+A successful automatic retry sends an intermittent-failure recovery notice
+with links to the failed and successful attempts. Delivery is recorded on that
+successful attempt and retained after branch moves. Final-failure notices wait
+until automatic retries are exhausted. A crash between delivery and recording
+may repeat a notice (at least once).
 Ordinary supersession does not send a failure notice. Missing required jobs,
 absent pipelines, and invalid pipelines do: they include a commit-page link
 when no attempt/log exists. Script notices have their own persistent delivery

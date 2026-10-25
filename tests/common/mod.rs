@@ -582,20 +582,23 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Recreates the immediately preceding schema in a stopped database.
-pub fn as_schema_17(db: &Path) {
+pub fn as_schema_18(db: &Path) {
     edit_records(db, "ci_attempts", |a| {
-        a.as_object_mut().unwrap().remove("purpose");
-        a.as_object_mut().unwrap().remove("cache_refresh");
+        a.as_object_mut().unwrap().remove("wait_for_runner");
+        a.as_object_mut().unwrap().remove("auto_retry");
+        a.as_object_mut().unwrap().remove("recovery_notified_at");
     });
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(17);
+            *v = json!(18);
         }
     });
     let database = redb::Database::open(db).unwrap();
     let txn = database.begin_write().unwrap();
-    txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new("ix_ci_refresh"))
-        .unwrap();
+    txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new(
+        "ix_ci_recovered",
+    ))
+    .unwrap();
     txn.commit().unwrap();
 }
 

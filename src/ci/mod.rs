@@ -245,7 +245,7 @@ impl Ci {
                         self.job_url(&a.repo_path, id)
                     )
                 })
-                .or_else(|| a.details.clone()),
+                .or_else(|| a.display_details()),
             artifact_names: if source.files_pruned {
                 Vec::new()
             } else {

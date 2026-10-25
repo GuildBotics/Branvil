@@ -30,7 +30,7 @@ branvil-2026-10-14/          (0700)
 `manifest.json` (abridged):
 
 ```json
-{"format": 1, "service": "branvil", "branvil_version": "0.1.0", "schema_version": 17,
+{"format": 1, "service": "branvil", "branvil_version": "0.1.0", "schema_version": 19,
  "git_version": "git version 2.54.0", "created_at": "2026-10-14T10:41:20.123Z",
  "base_url": "http://127.0.0.1:7878",
  "tables": {"tickets": 12, "pulls": 3, "reviews": 4, "...": 0},
@@ -82,6 +82,9 @@ file written later is an orphan the restored service removes at start. A log
 copied while a job runs may hold a few more lines than the database snapshot
 knows of. An attempt that was in progress at backup time is interrupted by
 the restored service when its lease runs out (`docs/ci.md`).
+Queued automatic retries retain their retry number. Eligible protected required
+checks may queue another automatic retry after a second interruption, within
+the three-retry budget. Restore does not restart completed failures on its own.
 
 ## Restore
 
@@ -126,7 +129,7 @@ GuildBotics stays valid. Two services on the same base URL cannot both listen.
 | The owner's token (`secrets/owner.token`) | No | The first start of the restored service writes a new one and revokes the old. |
 | GUI sessions | Their records, but they do not survive | The new owner token's start deletes every session. |
 | Members' upstream credentials (`secrets/accounts/`: tokens, GitHub App keys) | **No** | A credential for GitHub is a secret of another system; a backup copied to another disk or machine should not carry it. After a restore the accounts (provider, kind, and login) are there, but polling reports that the credential is not on this machine and nothing is read or sent until it is set again (`PUT …/members/{name}/accounts/{provider}`). `branvil backup` and `branvil restore` list these accounts. |
-| The notification webhook's URL (`secrets/webhook.url`) | **No** | Like an upstream credential, it is a secret of another system. After a restore nothing is told until the owner sets it again (Settings → Notifications, `PUT /api/v1/admin/webhook`); it is then told of pending CI failures and passed-gate notices for pull requests still open on the host. |
+| The notification webhook's URL (`secrets/webhook.url`) | **No** | Like an upstream credential, it is a secret of another system. After a restore nothing is told until the owner sets it again (Settings → Notifications, `PUT /api/v1/admin/webhook`); it is then told of pending CI failures, automatic-retry recoveries, and passed-gate notices for pull requests still open on the host. |
 | `secrets/cursor.key` | No | A new key is made at the first start; list cursors handed out before become `invalid_cursor`, which clients recover from by starting the list again. |
 | The hook secret | No | It is made per process. |
 
@@ -188,12 +191,11 @@ new data directory; when the upgrade fails, the restored directory is left
 at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
 it once the cause is fixed).
 
-Version 16 → 17 (`src/upgrade.rs`): CI runs gain protected-branch names,
-a pending-failure flag, and the successful delivery time of their required-check
-failure notice. The upgrade initializes notices for the protected branches
-still recorded on each run and rebuilds indexes. Historical runs whose branches
-already moved away are left without notification intent: the old format did
-not retain their branch names. Attempts, logs, and landing records are preserved.
+Version 18 → 19 (`src/upgrade.rs`): CI attempts gain automatic-retry lineage,
+runner-wait state, and the delivery time of their recovery notice. Existing
+attempts keep their purpose, result, logs, and cache-refresh associations and
+start without automatic-retry metadata or pending recovery notices. The
+upgrade rebuilds indexes. It does not schedule retries of historical failures.
 
 ### The service run by scripts/serve.sh
 

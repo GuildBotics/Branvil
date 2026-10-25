@@ -221,7 +221,17 @@ async fn protected_required_failure_is_sent_on_check_event_and_not_repeated_afte
     )
     .await;
     settings(&w, json!({"required_checks": ["test"]})).await;
-    let c = runner.claim().await.unwrap();
+    let barrier = other_repo(&w, OTHER, true).await;
+    let mut c = runner.claim().await.unwrap();
+    for _ in 0..3 {
+        assert_eq!(runner.finish(&c, "failure").await.0, 200);
+        swept(&w, &barrier).await;
+        assert!(
+            hook.received().is_empty(),
+            "automatic retry defers final failure notice"
+        );
+        c = runner.claim().await.unwrap();
+    }
     assert_eq!(runner.finish(&c, "failure").await.0, 200);
     eventually("required-check failure notification", || async {
         hook.received().len() == 1
@@ -231,7 +241,6 @@ async fn protected_required_failure_is_sent_on_check_event_and_not_repeated_afte
     assert!(text.contains("acme/demo [main]"), "{text}");
     assert!(text.contains(c["sha"].as_str().unwrap()), "{text}");
     assert!(text.contains(c["attempt_id"].as_str().unwrap()), "{text}");
-    let barrier = other_repo(&w, OTHER, true).await;
     swept(&w, &barrier).await;
     w.restart(&[]);
     swept(&w, &barrier).await;

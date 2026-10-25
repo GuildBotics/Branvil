@@ -31,6 +31,8 @@ pub const CONCLUSIONS: [&str; 6] = [
     "startup_failure",
 ];
 
+pub const MAX_AUTO_RETRIES: u64 = 3;
+
 const MAX_DETAILS: usize = 4 << 10;
 
 /// What the run's pipeline turned out to be.
@@ -105,6 +107,13 @@ impl Purpose {
     }
 }
 
+/// An automatic retry belongs to the first failed attempt's retry budget.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AutoRetry {
+    pub root_attempt: String,
+    pub number: u64,
+}
+
 /// One try of one job.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Attempt {
@@ -112,6 +121,10 @@ pub struct Attempt {
     pub purpose: Purpose,
     /// The refresh requested by this reused check, including an existing one.
     pub cache_refresh: Option<String>,
+    pub auto_retry: Option<AutoRetry>,
+    pub recovery_notified_at: Option<String>,
+    /// An absence retry stays queued until a runner claims it.
+    pub wait_for_runner: bool,
     pub repo: String,
     pub repo_path: String,
     pub sha: String,
@@ -124,7 +137,7 @@ pub struct Attempt {
     /// The computed dependency-cache key; while a refresh is unfinished,
     /// the key whose save it was requested to refresh.
     pub cache_key: Option<String>,
-    /// Manual retries (including their interruption requeues) must execute.
+    /// Manual and automatic retries (including interruption requeues) must execute.
     pub allow_reuse: bool,
     pub number: u64,
     pub seq: u64,
@@ -152,6 +165,21 @@ pub struct Attempt {
 }
 
 impl Attempt {
+    pub fn display_details(&self) -> Option<String> {
+        match &self.auto_retry {
+            Some(retry) => Some(format!(
+                "Automatic retry {}/{MAX_AUTO_RETRIES} of {}.{}",
+                retry.number,
+                retry.root_attempt,
+                self.details
+                    .as_ref()
+                    .map(|d| format!(" {d}"))
+                    .unwrap_or_default()
+            )),
+            None => self.details.clone(),
+        }
+    }
+
     pub fn key(id: &str) -> Vec<u8> {
         Key::new().s(id).bytes()
     }
@@ -198,6 +226,16 @@ pub fn attempt_index(a: &Attempt) -> Vec<IxEntry> {
             .bytes(),
         value: a.id.as_bytes().to_vec(),
     }];
+    if a.auto_retry.is_some()
+        && a.conclusion.as_deref() == Some("success")
+        && a.recovery_notified_at.is_none()
+    {
+        out.push(IxEntry {
+            table: store::IX_CI_RECOVERED,
+            key: Attempt::key(&a.id),
+            value: a.id.as_bytes().to_vec(),
+        });
+    }
     if a.purpose == Purpose::CacheRefresh
         && a.status != "completed"
         && let Some(key) = &a.cache_key
@@ -411,6 +449,9 @@ fn new_attempt(w: &Wtx, run: &Run, job: &JobDef, network: bool, now: &str) -> Ap
         id: util::new_id("att"),
         purpose: Purpose::Check,
         cache_refresh: None,
+        auto_retry: None,
+        recovery_notified_at: None,
+        wait_for_runner: false,
         repo: run.repo.clone(),
         repo_path: run.repo_path.clone(),
         sha: run.sha.clone(),
@@ -781,6 +822,7 @@ pub fn claim(w: &Wtx, runner: &str, lease_secs: u64, now: &str) -> AppResult<Opt
         a.cache_scope = run.cache_scope;
     }
     a.status = "in_progress".into();
+    a.wait_for_runner = false;
     a.lease_hash = Some(lease_hash(&lease));
     a.lease_expires_at = Some(later(now, lease_secs));
     a.runner = Some(runner.to_string());
@@ -929,7 +971,61 @@ pub fn finish(
         }
     }
     put_attempt(w, Some(&old), &a)?;
+    if matches!(a.conclusion.as_deref(), Some("failure" | "timed_out")) {
+        enqueue_auto_retry(w, &a, false, now)?;
+    }
     Ok(a)
+}
+
+/// Replace a failed check in the same transaction. Like interruption recovery,
+/// this reserves its old queue place even when new admissions filled the queue.
+fn enqueue_auto_retry(w: &Wtx, old: &Attempt, wait_for_runner: bool, now: &str) -> AppResult<()> {
+    if old.purpose != Purpose::Check || old.cancel_requested || old.superseded {
+        return Ok(());
+    }
+    let Some(run) = get_run(w, &old.repo, &old.sha)? else {
+        return Ok(());
+    };
+    let number = old.auto_retry.as_ref().map_or(1, |r| r.number + 1);
+    if run.cache_scope != "protected" || run.superseded_by.is_some() || number > MAX_AUTO_RETRIES {
+        return Ok(());
+    }
+    let Some(repo) =
+        w.get::<crate::model::Repo>(store::REPOS, &crate::model::Repo::key(&old.repo))?
+    else {
+        return Ok(());
+    };
+    let PipelineState::Jobs { jobs } = &run.pipeline else {
+        return Ok(());
+    };
+    if !repo.required_checks.contains(&old.job.name)
+        || !current_attempts(w, &old.repo, &old.sha, jobs)?
+            .iter()
+            .any(|a| a.id == old.id)
+    {
+        return Ok(());
+    }
+    let mut next = new_attempt(w, &run, &old.job, old.network, now)?;
+    next.seq = old.seq;
+    next.auto_retry = Some(AutoRetry {
+        root_attempt: old
+            .auto_retry
+            .as_ref()
+            .map_or_else(|| old.id.clone(), |r| r.root_attempt.clone()),
+        number,
+    });
+    next.allow_reuse = false;
+    next.wait_for_runner = wait_for_runner;
+    put_attempt(w, None, &next)
+}
+
+pub fn mark_recovery_notified(w: &Wtx, id: &str, now: &str) -> AppResult<()> {
+    if let Some(old) = get_attempt(w, id)? {
+        let mut next = old.clone();
+        next.recovery_notified_at = Some(now.into());
+        put_attempt(w, Some(&old), &next)?;
+    }
+    Ok(())
 }
 
 /// One unfinished refresh per repository, job name, and cache key. Refreshes
@@ -1108,7 +1204,8 @@ pub fn interrupt_refreshes(w: &Wtx, now: &str) -> AppResult<Vec<(String, String)
 /// Concludes the in-progress attempt `old` `cancelled` as interrupted
 /// (`why`); the first interruption of a job that was not cancelled or
 /// superseded is queued again as a new attempt in the place `old` had in the
-/// queue, ahead of what was queued after it.
+/// queue, ahead of what was queued after it. A second interruption may use
+/// the automatic retry budget of a protected required check.
 fn interrupt(w: &Wtx, old: &Attempt, why: &str, now: &str) -> AppResult<()> {
     let mut a = old.clone();
     let requeue = !old.cancel_requested && !old.superseded && !old.after_interrupt;
@@ -1131,16 +1228,19 @@ fn interrupt(w: &Wtx, old: &Attempt, why: &str, now: &str) -> AppResult<()> {
         next.seq = old.seq;
         next.after_interrupt = true;
         next.allow_reuse = old.allow_reuse;
+        next.auto_retry = old.auto_retry.clone();
         next.purpose = old.purpose;
         next.cache_key = old.cache_key.clone();
         next.cache_scope = old.cache_scope.clone();
         put_attempt(w, None, &next)?;
+    } else if old.after_interrupt {
+        enqueue_auto_retry(w, &a, false, now)?;
     }
     Ok(())
 }
 
-/// Concludes `startup_failure` for every queued attempt created before
-/// `before` (no runner took it in time).
+/// Concludes `startup_failure` for queued attempts created before `before`
+/// (no runner took them in time), except retries already waiting for a runner.
 pub fn fail_queued(
     w: &Wtx,
     before: &str,
@@ -1153,7 +1253,9 @@ pub fn fail_queued(
         let Some(old) = get_attempt(w, &id)? else {
             continue;
         };
-        if old.created_at.as_str() >= before {
+        // Automatic retries wait for a runner instead of exhausting their
+        // entire budget while no runner is available.
+        if old.wait_for_runner || old.created_at.as_str() >= before {
             continue;
         }
         let mut a = old.clone();
@@ -1164,6 +1266,7 @@ pub fn fail_queued(
             now,
         );
         put_attempt(w, Some(&old), &a)?;
+        enqueue_auto_retry(w, &a, true, now)?;
         changed.push((old.repo_path.clone(), old.sha.clone()));
     }
     Ok(changed)
@@ -1211,6 +1314,263 @@ pub fn counts(r: &impl Rd) -> AppResult<(usize, usize, usize)> {
 mod tests {
     use super::*;
     use crate::store::Store;
+
+    fn require_test(w: &Wtx) -> AppResult<()> {
+        let repo = crate::model::Repo {
+            id: "repo_1".into(),
+            path: "acme/demo".into(),
+            workspace: "ws".into(),
+            default_branch: "main".into(),
+            protected_branches: vec![],
+            required_checks: vec!["test".into()],
+            required_approvals: 0,
+            auto_land: false,
+            ci_network: false,
+            labels: vec![],
+            upstream: None,
+            revision: 1,
+            created_at: T0.into(),
+        };
+        w.put(store::REPOS, &crate::model::Repo::key(&repo.id), &repo)
+    }
+
+    #[test]
+    fn automatic_retries_are_atomic_bounded_and_execute_even_with_a_full_queue() {
+        let (_dir, s) = store();
+        let root = s
+            .write_sync(|w| {
+                require_test(w)?;
+                register(w, reg("sha", "main", &["test"]), 1, T0)?;
+                let first = claim(w, "r", 60, T0)?.unwrap();
+                register(w, reg("other", "feature", &["other"]), 1, T0)?;
+                Ok(first)
+            })
+            .unwrap();
+        let mut current_claim = root;
+        let root_id = current_claim.attempt.id.clone();
+        let root_seq = current_claim.attempt.seq;
+        for n in 1..=4 {
+            let result = s
+                .write_sync(|w| {
+                    let done = finish(
+                        w,
+                        &current_claim.attempt.id,
+                        &current_claim.lease,
+                        if n % 2 == 0 { "timed_out" } else { "failure" },
+                        Some("exit 1".into()),
+                        ResultInfo::default(),
+                        1,
+                        T0,
+                    )?;
+                    let current = latest_attempts(w, "repo_1", "sha")?.remove(0);
+                    let run = get_run(w, "repo_1", "sha")?.unwrap();
+                    if n <= MAX_AUTO_RETRIES {
+                        assert_eq!(
+                            current.status, "queued",
+                            "failure must never be the current check"
+                        );
+                        assert!(!run.failure_pending);
+                        assert!(w.prefix_keys(store::IX_CI_UNNOTIFIED, &[])?.is_empty());
+                        assert_eq!(
+                            current.auto_retry.as_ref().unwrap(),
+                            &AutoRetry {
+                                root_attempt: root_id.clone(),
+                                number: n,
+                            }
+                        );
+                        assert!(!current.allow_reuse);
+                        assert_eq!(current.seq, root_seq);
+                        let next = claim(w, "r", 60, T0)?.unwrap();
+                        assert_eq!(next.attempt.id, current.id);
+                        assert!(next.reuse.is_none());
+                        Ok(Some(next))
+                    } else {
+                        assert_eq!(done.id, current.id);
+                        assert!(run.failure_pending);
+                        assert_eq!(w.prefix_keys(store::IX_CI_UNNOTIFIED, &[])?.len(), 1);
+                        Ok(None)
+                    }
+                })
+                .unwrap();
+            if let Some(next) = result {
+                current_claim = next;
+            }
+        }
+        assert_eq!(
+            s.read_sync(|r| attempts_of(r, "repo_1", "sha"))
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn automatic_retry_targets_only_required_protected_checks_and_retryable_endings() {
+        for case in [
+            "pr",
+            "optional",
+            "refresh",
+            "startup",
+            "cancelled",
+            "skipped",
+            "success",
+            "cancel_request",
+            "superseded",
+            "definition",
+        ] {
+            let (_dir, s) = store();
+            s.write_sync(|w| {
+                require_test(w)?;
+                let branch = if case == "pr" { "feature" } else { "main" };
+                let name = if case == "optional" {
+                    "optional"
+                } else {
+                    "test"
+                };
+                register(w, reg("sha", branch, &[name]), 10, T0)?;
+                let c = claim(w, "r", 60, T0)?.unwrap();
+                if case == "refresh" {
+                    let mut a = c.attempt.clone();
+                    a.purpose = Purpose::CacheRefresh;
+                    put_attempt(w, Some(&c.attempt), &a)?;
+                }
+                match case {
+                    "cancel_request" => {
+                        cancel(w, &c.attempt.id, "owner", T0)?;
+                    }
+                    "superseded" => {
+                        branch_left(w, "repo_1", "sha", branch, "new", T0)?;
+                    }
+                    "definition" => {
+                        register(w, reg("sha", branch, &["other"]), 10, T0)?;
+                    }
+                    _ => {}
+                }
+                let conclusion = match case {
+                    "startup" => "startup_failure",
+                    "cancelled" => "cancelled",
+                    "skipped" => "skipped",
+                    "success" => "success",
+                    _ => "failure",
+                };
+                finish(
+                    w,
+                    &c.attempt.id,
+                    &c.lease,
+                    conclusion,
+                    None,
+                    ResultInfo::default(),
+                    10,
+                    T0,
+                )?;
+                assert_eq!(
+                    attempts_of(w, "repo_1", "sha")?
+                        .iter()
+                        .filter(|a| a.auto_retry.is_some())
+                        .count(),
+                    0,
+                    "{case}"
+                );
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn absent_runner_retry_waits_then_interruptions_preserve_its_budget() {
+        let (_dir, s) = store();
+        s.write_sync(|w| {
+            require_test(w)?;
+            register(w, reg("sha", "main", &["test"]), 10, T0)?;
+            fail_queued(w, T1, "No runner", T1)?;
+            let root = attempts_of(w, "repo_1", "sha")?.remove(0);
+            for _ in 0..5 {
+                fail_queued(w, T3, "Still no runner", T3)?;
+            }
+            let waiting = latest_attempts(w, "repo_1", "sha")?.remove(0);
+            assert!(waiting.wait_for_runner);
+            assert_eq!(waiting.auto_retry.as_ref().unwrap().number, 1);
+            assert_eq!(attempts_of(w, "repo_1", "sha")?.len(), 2);
+            let claimed = claim(w, "returned", 60, T3)?.unwrap();
+            assert!(!claimed.attempt.wait_for_runner);
+            assert!(claimed.reuse.is_none());
+            interrupt_running(w, None, "stopped", T3)?;
+            let requeued = claim(w, "returned", 60, T3)?.unwrap();
+            assert_eq!(requeued.attempt.auto_retry, waiting.auto_retry);
+            assert!(requeued.attempt.after_interrupt);
+            assert!(!requeued.attempt.allow_reuse);
+            interrupt_running(w, None, "stopped again", T3)?;
+            let next = latest_attempts(w, "repo_1", "sha")?.remove(0);
+            assert_eq!(next.status, "queued");
+            assert!(!next.after_interrupt);
+            assert_eq!(
+                next.auto_retry.unwrap(),
+                AutoRetry {
+                    root_attempt: root.id,
+                    number: 2,
+                }
+            );
+            assert!(!get_run(w, "repo_1", "sha")?.unwrap().failure_pending);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn second_interruption_starts_a_retry_and_manual_retry_starts_a_new_budget() {
+        let (_dir, s) = store();
+        s.write_sync(|w| {
+            require_test(w)?;
+            register(w, reg("sha", "main", &["test"]), 10, T0)?;
+            claim(w, "r", 1, T0)?;
+            expire(w, T1)?;
+            let interrupted = claim(w, "r", 1, T1)?.unwrap();
+            expire(w, T2)?;
+            let auto = claim(w, "r", 60, T2)?.unwrap();
+            assert_eq!(
+                auto.attempt.auto_retry.as_ref().unwrap(),
+                &AutoRetry {
+                    root_attempt: interrupted.attempt.id,
+                    number: 1,
+                }
+            );
+            let success = finish(
+                w,
+                &auto.attempt.id,
+                &auto.lease,
+                "success",
+                None,
+                ResultInfo::default(),
+                10,
+                T2,
+            )?;
+            assert_eq!(w.prefix_keys(store::IX_CI_RECOVERED, &[])?.len(), 1);
+            let manual = retry(w, &success.id, 10, T2)?;
+            assert!(manual.auto_retry.is_none());
+            let c = claim(w, "r", 60, T2)?.unwrap();
+            finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "failure",
+                None,
+                ResultInfo::default(),
+                10,
+                T2,
+            )?;
+            let auto = latest_attempts(w, "repo_1", "sha")?.remove(0);
+            assert_eq!(
+                auto.auto_retry.unwrap(),
+                AutoRetry {
+                    root_attempt: manual.id,
+                    number: 1,
+                }
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
 
     fn job(name: &str) -> JobDef {
         JobDef {
