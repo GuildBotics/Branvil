@@ -96,17 +96,6 @@ pub enum Purpose {
     CacheRefresh,
 }
 
-impl Purpose {
-    fn recovery_hint(self) -> &'static str {
-        match self {
-            Self::Check => "retry the job",
-            Self::CacheRefresh => {
-                "no manual retry is needed; a later check will request a new refresh if needed"
-            }
-        }
-    }
-}
-
 /// An automatic retry belongs to the first failed attempt's retry budget.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AutoRetry {
@@ -165,6 +154,24 @@ pub struct Attempt {
 }
 
 impl Attempt {
+    fn recovery_hint(&self, next: Option<&Attempt>) -> String {
+        if let Some(next) = next
+            && let Some(retry) = &next.auto_retry
+        {
+            return format!(
+                "Automatic retry {}/{MAX_AUTO_RETRIES} queued as {}",
+                retry.number, next.id
+            );
+        }
+        match self.purpose {
+            Purpose::Check => "retry the job",
+            Purpose::CacheRefresh => {
+                "no manual retry is needed; a later check will request a new refresh if needed"
+            }
+        }
+        .into()
+    }
+
     pub fn display_details(&self) -> Option<String> {
         match &self.auto_retry {
             Some(retry) => Some(format!(
@@ -970,40 +977,51 @@ pub fn finish(
             a.cache_refresh = enqueue_refresh(w, &a, &key, queue_max, now)?;
         }
     }
+    let next = if matches!(a.conclusion.as_deref(), Some("failure" | "timed_out")) {
+        prepare_auto_retry(w, &a, false, now)?
+    } else {
+        None
+    };
     put_attempt(w, Some(&old), &a)?;
-    if matches!(a.conclusion.as_deref(), Some("failure" | "timed_out")) {
-        enqueue_auto_retry(w, &a, false, now)?;
+    if let Some(next) = next {
+        put_attempt(w, None, &next)?;
     }
     Ok(a)
 }
 
-/// Replace a failed check in the same transaction. Like interruption recovery,
-/// this reserves its old queue place even when new admissions filled the queue.
-fn enqueue_auto_retry(w: &Wtx, old: &Attempt, wait_for_runner: bool, now: &str) -> AppResult<()> {
+/// Prepare the replacement before choosing the finished attempt's guidance.
+/// Save the finished attempt first: both use its old queue position, even
+/// when new admissions have filled the queue.
+fn prepare_auto_retry(
+    w: &Wtx,
+    old: &Attempt,
+    wait_for_runner: bool,
+    now: &str,
+) -> AppResult<Option<Attempt>> {
     if old.purpose != Purpose::Check || old.cancel_requested || old.superseded {
-        return Ok(());
+        return Ok(None);
     }
     let Some(run) = get_run(w, &old.repo, &old.sha)? else {
-        return Ok(());
+        return Ok(None);
     };
     let number = old.auto_retry.as_ref().map_or(1, |r| r.number + 1);
     if run.cache_scope != "protected" || run.superseded_by.is_some() || number > MAX_AUTO_RETRIES {
-        return Ok(());
+        return Ok(None);
     }
     let Some(repo) =
         w.get::<crate::model::Repo>(store::REPOS, &crate::model::Repo::key(&old.repo))?
     else {
-        return Ok(());
+        return Ok(None);
     };
     let PipelineState::Jobs { jobs } = &run.pipeline else {
-        return Ok(());
+        return Ok(None);
     };
     if !repo.required_checks.contains(&old.job.name)
         || !current_attempts(w, &old.repo, &old.sha, jobs)?
             .iter()
             .any(|a| a.id == old.id)
     {
-        return Ok(());
+        return Ok(None);
     }
     let mut next = new_attempt(w, &run, &old.job, old.network, now)?;
     next.seq = old.seq;
@@ -1016,7 +1034,7 @@ fn enqueue_auto_retry(w: &Wtx, old: &Attempt, wait_for_runner: bool, now: &str) 
     });
     next.allow_reuse = false;
     next.wait_for_runner = wait_for_runner;
-    put_attempt(w, None, &next)
+    Ok(Some(next))
 }
 
 pub fn mark_recovery_notified(w: &Wtx, id: &str, now: &str) -> AppResult<()> {
@@ -1209,21 +1227,9 @@ pub fn interrupt_refreshes(w: &Wtx, now: &str) -> AppResult<Vec<(String, String)
 fn interrupt(w: &Wtx, old: &Attempt, why: &str, now: &str) -> AppResult<()> {
     let mut a = old.clone();
     let requeue = !old.cancel_requested && !old.superseded && !old.after_interrupt;
-    let details = if old.cancel_requested {
-        format!(
-            "{} It ended unfinished: {why}.",
-            old.details.clone().unwrap_or_else(|| "Cancelled.".into())
-        )
-    } else if requeue {
-        format!("Interrupted: {why}; queued again in its place.")
-    } else {
-        format!("Interrupted twice: {why}; {}.", old.purpose.recovery_hint())
-    };
-    conclude(&mut a, "cancelled", Some(details), now);
-    put_attempt(w, Some(old), &a)?;
-    // Its definition is the run's: an unfinished attempt of another one
-    // was asked to stop when the run took its pipeline (`take_pipeline`).
-    if requeue && let Some(run) = get_run(w, &old.repo, &old.sha)? {
+    // Its definition is the run's: taking another pipeline stops unfinished
+    // attempts of definitions it does not have.
+    let next = if requeue && let Some(run) = get_run(w, &old.repo, &old.sha)? {
         let mut next = new_attempt(w, &run, &old.job, old.network, now)?;
         next.seq = old.seq;
         next.after_interrupt = true;
@@ -1232,9 +1238,29 @@ fn interrupt(w: &Wtx, old: &Attempt, why: &str, now: &str) -> AppResult<()> {
         next.purpose = old.purpose;
         next.cache_key = old.cache_key.clone();
         next.cache_scope = old.cache_scope.clone();
-        put_attempt(w, None, &next)?;
+        Some(next)
     } else if old.after_interrupt {
-        enqueue_auto_retry(w, &a, false, now)?;
+        prepare_auto_retry(w, old, false, now)?
+    } else {
+        None
+    };
+    let details = if old.cancel_requested {
+        format!(
+            "{} It ended unfinished: {why}.",
+            old.details.clone().unwrap_or_else(|| "Cancelled.".into())
+        )
+    } else if requeue {
+        format!("Interrupted: {why}; queued again in its place.")
+    } else {
+        format!(
+            "Interrupted twice: {why}; {}.",
+            old.recovery_hint(next.as_ref())
+        )
+    };
+    conclude(&mut a, "cancelled", Some(details), now);
+    put_attempt(w, Some(old), &a)?;
+    if let Some(next) = next {
+        put_attempt(w, None, &next)?;
     }
     Ok(())
 }
@@ -1258,15 +1284,18 @@ pub fn fail_queued(
         if old.wait_for_runner || old.created_at.as_str() >= before {
             continue;
         }
+        let next = prepare_auto_retry(w, &old, true, now)?;
         let mut a = old.clone();
         conclude(
             &mut a,
             "startup_failure",
-            Some(format!("{details}; {}.", old.purpose.recovery_hint())),
+            Some(format!("{details}; {}.", old.recovery_hint(next.as_ref()))),
             now,
         );
         put_attempt(w, Some(&old), &a)?;
-        enqueue_auto_retry(w, &a, true, now)?;
+        if let Some(next) = next {
+            put_attempt(w, None, &next)?;
+        }
         changed.push((old.repo_path.clone(), old.sha.clone()));
     }
     Ok(changed)
@@ -1471,6 +1500,76 @@ mod tests {
                     0,
                     "{case}"
                 );
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_guidance_follows_queued_retries_and_returns_to_manual_after_the_budget() {
+        for cause in ["lease", "stop", "no_runner"] {
+            let (_dir, s) = store();
+            s.write_sync(|w| {
+                require_test(w)?;
+                register(w, reg("sha", "main", &["test"]), 10, T0)?;
+                for number in 1..=4 {
+                    let start = later(T0, number * 300);
+                    let first_end = later(&start, 61);
+                    let second_end = later(&start, 122);
+                    let ended = if cause == "no_runner" {
+                        // A retry waiting for a runner cannot fail for absence
+                        // again until it was claimed and requeued by an interruption.
+                        let queued = latest_attempts(w, "repo_1", "sha")?.remove(0);
+                        if queued.wait_for_runner {
+                            claim(w, "runner", 60, &start)?.unwrap();
+                            interrupt_running(w, None, "service stopped", &start)?;
+                        }
+                        let id = latest_attempts(w, "repo_1", "sha")?.remove(0).id;
+                        fail_queued(w, &first_end, "Start the runner", &first_end)?;
+                        get_attempt(w, &id)?.unwrap()
+                    } else {
+                        claim(w, "runner", 60, &start)?.unwrap();
+                        if cause == "lease" {
+                            expire(w, &first_end)?;
+                        } else {
+                            interrupt_running(w, None, "service stopped", &first_end)?;
+                        }
+                        let second = claim(w, "runner", 60, &first_end)?.unwrap();
+                        if cause == "lease" {
+                            expire(w, &second_end)?;
+                        } else {
+                            interrupt_running(w, None, "service stopped", &second_end)?;
+                        }
+                        get_attempt(w, &second.attempt.id)?.unwrap()
+                    };
+                    let details = ended.details.as_deref().unwrap();
+                    let current = latest_attempts(w, "repo_1", "sha")?.remove(0);
+                    if number <= MAX_AUTO_RETRIES {
+                        assert_eq!(current.status, "queued", "{cause}");
+                        assert!(
+                            details.contains(&format!(
+                                "Automatic retry {number}/3 queued as {}",
+                                current.id
+                            )),
+                            "{cause}: {details}"
+                        );
+                        assert!(!details.contains("retry the job"), "{cause}: {details}");
+                        assert!(retry(w, &ended.id, 10, &second_end).is_err());
+                        assert!(!get_run(w, "repo_1", "sha")?.unwrap().failure_pending);
+                    } else {
+                        assert_eq!(current.id, ended.id, "{cause}");
+                        assert!(details.contains("retry the job"), "{cause}: {details}");
+                        assert!(!details.contains("queued as"), "{cause}: {details}");
+                        assert!(get_run(w, "repo_1", "sha")?.unwrap().failure_pending);
+                        let manual = retry(w, &ended.id, 10, &second_end)?;
+                        assert!(manual.auto_retry.is_none());
+                        assert_eq!(
+                            claim(w, "runner", 60, &second_end)?.unwrap().attempt.id,
+                            manual.id
+                        );
+                    }
+                }
                 Ok(())
             })
             .unwrap();

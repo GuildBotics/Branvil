@@ -308,6 +308,10 @@ automatic retry number. An interruption requeue preserves that record and
 number; a manual retry starts a new budget. Job pages and check details show
 “Automatic retry 1/3 of att_…”, followed by the attempt's own reason.
 
+After runner absence or a second interruption, the finished attempt names the
+automatic retry queued after it. It asks for a manual retry only when none is
+queued, including when the automatic retry budget is exhausted.
+
 A retry queued because no runner was available stays queued until a runner
 claims it. Once all three retries fail, the existing final-failure notice
 becomes pending. A successful retry queues a recovery notice with the
@@ -605,8 +609,10 @@ notices pending. This applies to CI runs registered by the existing triggers;
 it does not add CI triggers for other protected branches.
 
 Successful automatic retries maintain an index of undelivered recovery notices.
-The same task and delivery rules apply, with delivery recorded on the successful
-attempt. A later branch move or manual retry does not discard the notice.
+Recovery notices include the retained protected-branch names, as final-failure
+notices do. The same task and delivery rules apply, with delivery recorded on
+the successful attempt. A later branch move or manual retry does not discard
+the notice.
 Final-failure delivery remains once per run; recovery delivery is once per
 successful automatic retry. Neither is repeated on ordinary restart; a crash
 between delivery and recording may repeat either notice.

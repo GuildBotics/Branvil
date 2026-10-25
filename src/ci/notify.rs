@@ -147,15 +147,18 @@ async fn recoveries(app: &App) -> AppResult<bool> {
                                 && x.conclusion.as_deref().is_some_and(|c| c != "success"))
                     })
                     .collect::<Vec<_>>();
-                Ok(Some((a, failed)))
+                let run = queue::get_run(r, &a.repo, &a.sha)?
+                    .ok_or_else(|| crate::error::AppError::internal("attempt without a run"))?;
+                Ok(Some((a, failed, run.protected_branches)))
             })
             .await?;
-        let Some((a, failed)) = notice else {
+        let Some((a, failed, branches)) = notice else {
             continue;
         };
         let mut text = format!(
-            "Intermittent CI failure recovered: {} {} {}\n{}",
+            "Intermittent CI failure recovered: {} [{}] {} {}\n{}",
             a.repo_path,
+            branches.join(", "),
             a.sha,
             a.job.name,
             a.display_details().unwrap_or_default()
@@ -379,7 +382,7 @@ mod tests {
         let text = messages[1]["text"].as_str().unwrap();
         for part in [
             "Intermittent CI failure recovered",
-            "acme/recovery",
+            "acme/recovery [main] sha test",
             "sha",
             "test",
             &format!("/-/jobs/{first}"),
