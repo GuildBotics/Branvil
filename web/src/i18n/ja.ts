@@ -187,7 +187,7 @@ export const ja: Record<MessageKey, string> = {
   "landing.queuedAt": "並んだ時刻",
   "landing.failedJobs": "失敗したジョブ：{jobs}",
   "landing.conflicts": "衝突したファイル：{files}",
-  "landing.retryGate": "失敗した関門のジョブを再試行し、成功すると列の最後に戻ります。headかbaseが動いた場合も並び直します。",
+  "landing.retryGate": "失敗またはキャンセルされた関門の必須ジョブを再試行してください。必須ジョブがすべて成功すると列の最後に戻ります。headかbaseが動いた場合も並び直します。",
   "landing.retryHost": "ホストのチェックが成功すると列の最後に戻ります。headかbaseが動いた場合も並び直します。",
   "landing.publishAgain": "「着地の列に戻す」で列の最後に並び直します。新しい関門を通過したら、もう一度公開してホストのブランチを置き換えてください。",
   "landing.rejoin": "上の理由を解消すると列の最後に戻ります。headかbaseが動いた場合も並び直します。",

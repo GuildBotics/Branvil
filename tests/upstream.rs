@@ -361,12 +361,12 @@ async fn a_pull_request_is_published_as_its_author_and_follows_the_host_to_the_m
     // The author has no GitHub account yet.
     let (st, v) = publish(&w, n).await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
-    assert_eq!(v["error"]["code"], "not_mergeable");
+    assert_eq!(v["error"]["code"], "no_account");
     assert!(
         v["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("landing gate"),
+            .contains("has no GitHub account"),
         "{v}"
     );
     assert_eq!(gh.tip(GH, "ticket/1"), None);
@@ -906,6 +906,98 @@ async fn a_pull_request_stays_with_the_repository_it_was_published_to() {
         .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["upstream"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retained_publication_problems_apply_only_to_the_current_upstream() {
+    for condition in ["healthy", "stopped", "failed"] {
+        for destination in ["current", "different", "absent"] {
+            let (w, gh) = followed().await;
+            with_aiko_account(&w).await;
+            gh.repository("octo/other", &w.work);
+            let mut head = w.push_change("feature", "f.txt", "one\n");
+            let p = w.open_pull("feature", json!([])).await;
+            let n = p["number"].as_u64().unwrap();
+            let pull = format!("{}/pulls/{n}", w.repo_path());
+            let (st, v) = publish(&w, n).await;
+            assert_eq!(st, StatusCode::OK, "{condition}/{destination}: {v}");
+            match condition {
+                "stopped" => {
+                    commit_on_github(&gh, "feature", "Host-side suggestion");
+                    head = w.push_change("feature", "f.txt", "two\n");
+                }
+                "failed" => gh.check(&head, 51, "host-test", "failure", "failed\n"),
+                _ => {}
+            }
+            refresh(&w).await;
+            let expected = match condition {
+                "stopped" => Some("publish_stopped"),
+                "failed" => Some("host_failed"),
+                _ => None,
+            };
+            eventually(
+                &format!("{condition}/{destination}: the current publication controls admission"),
+                || async {
+                    let got = w.server.ok(&pull, &w.owner).await;
+                    match expected {
+                        Some(code) => {
+                            got["landing"]["state"] == "left"
+                                && got["landing"]["reason"]["code"] == code
+                        }
+                        None => got["landing"]["state"] == "passed",
+                    }
+                },
+            )
+            .await;
+            match destination {
+                "current" => continue,
+                "different" => {
+                    let (st, v) = w
+                        .server
+                        .put(
+                            &format!("{}/upstream", w.repo_path()),
+                            &w.owner,
+                            json!({"provider":"github", "repository":"octo/other"}),
+                        )
+                        .await;
+                    assert_eq!(st, StatusCode::OK, "{v}");
+                }
+                _ => {
+                    let (st, v) = w
+                        .server
+                        .delete(&format!("{}/upstream", w.repo_path()), &w.owner)
+                        .await;
+                    assert_eq!(st, StatusCode::OK, "{v}");
+                }
+            }
+            eventually(
+                &format!("{condition}/{destination}: an old publication cannot exclude the new destination"),
+                || async { w.server.ok(&pull, &w.owner).await["landing"]["state"] == "passed" },
+            )
+            .await;
+            let got = w.server.ok(&pull, &w.owner).await;
+            assert_eq!(got["upstream"]["repository"], GH);
+            assert_eq!(got["head_sha"], head);
+            if destination == "different" {
+                let (st, v) = publish(&w, n).await;
+                assert_eq!(st, StatusCode::OK, "{condition}/{destination}: {v}");
+                assert_eq!(v["upstream"]["repository"], "octo/other");
+                assert_eq!(gh.pulls("octo/other").len(), 1);
+            } else {
+                let (st, v) = w
+                    .server
+                    .post(
+                        &format!("{pull}/merge"),
+                        &w.owner,
+                        json!({"expected_head":head, "expected_base":got["base_sha"]}),
+                    )
+                    .await;
+                assert_eq!(st, StatusCode::OK, "{condition}/{destination}: {v}");
+                assert_eq!(v["head_sha"], head);
+                assert_eq!(v["merged"], true);
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -368,7 +368,13 @@ impl Git {
     /// A head already containing the base needs no new commit. Otherwise,
     /// creates the merge result with base first in its parent list. Identity
     /// is explicit because service Git inherits no author configuration.
-    pub async fn gate_commit(&self, dir: &Path, base: &str, head: &str) -> AppResult<GateCommit> {
+    pub async fn gate_commit(
+        &self,
+        dir: &Path,
+        base: &str,
+        head: &str,
+        number: u64,
+    ) -> AppResult<GateCommit> {
         if self.is_ancestor(dir, base, head).await? {
             let tree = self
                 .run_ok(Some(dir), &["rev-parse", &format!("{head}^{{tree}}")])
@@ -393,7 +399,7 @@ impl Git {
                     "-p",
                     head,
                     "-m",
-                    "Branvil landing gate",
+                    &format!("Branvil landing gate !{number}"),
                 ],
                 &[
                     ("GIT_AUTHOR_NAME", "Branvil"),
@@ -718,7 +724,8 @@ mod tests {
         let initial = commit_file(&git, &work, "conflicted file\n.txt", "initial\n").await;
         let dir = work.join(".git");
         let head = commit_file(&git, &work, "feature.txt", "feature\n").await;
-        let GateCommit::Ready { sha, .. } = git.gate_commit(&dir, &initial, &head).await.unwrap()
+        let GateCommit::Ready { sha, .. } =
+            git.gate_commit(&dir, &initial, &head, 7).await.unwrap()
         else {
             panic!("fast-forward head conflicts");
         };
@@ -733,13 +740,19 @@ mod tests {
         .await
         .unwrap();
         let base = commit_file(&git, &work, "main.txt", "main\n").await;
-        let GateCommit::Ready { sha, tree } = git.gate_commit(&dir, &base, &head).await.unwrap()
+        let GateCommit::Ready { sha, tree } = git.gate_commit(&dir, &base, &head, 7).await.unwrap()
         else {
             panic!("independent changes conflict");
         };
         assert_ne!(sha, head);
         let (_, author, _, parents, _) = git.commit_info(&dir, &sha).await.unwrap().unwrap();
         assert_eq!(author, "Branvil");
+        assert_eq!(
+            git.run_ok(Some(&dir), &["show", "-s", "--format=%s", &sha])
+                .await
+                .unwrap(),
+            "Branvil landing gate !7"
+        );
         assert_eq!(parents, vec![base.clone(), head]);
         let identities = git
             .run_ok(
@@ -769,7 +782,7 @@ mod tests {
         .unwrap();
         let head = commit_file(&git, &work, "conflicted file\n.txt", "head\n").await;
         assert_eq!(
-            git.gate_commit(&dir, &base, &head).await.unwrap(),
+            git.gate_commit(&dir, &base, &head, 7).await.unwrap(),
             GateCommit::Conflicts {
                 files: vec!["conflicted file\n.txt".into()]
             }

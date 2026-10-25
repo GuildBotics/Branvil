@@ -187,9 +187,7 @@ fn remove_credential(app: &App, member: &str, provider: &str) {
     let _ = std::fs::remove_file(credential_path(app, member, provider));
 }
 
-/// A token of a member's account on a host, or why there is none. Every use
-/// of an account (reads, pushes, API calls) gets its token here.
-async fn token_of(app: &App, member: &Member, host: &Host) -> Result<String, String> {
+fn require_account(member: &Member, host: &Host) -> Result<(), String> {
     if !member.accounts.iter().any(|a| a.provider == host.name()) {
         return Err(format!(
             "{} has no {} account in Branvil.",
@@ -197,6 +195,13 @@ async fn token_of(app: &App, member: &Member, host: &Host) -> Result<String, Str
             host.display_name()
         ));
     }
+    Ok(())
+}
+
+/// A token of a member's account on a host, or why there is none. Every use
+/// of an account (reads, pushes, API calls) gets its token here.
+async fn token_of(app: &App, member: &Member, host: &Host) -> Result<String, String> {
+    require_account(member, host)?;
     let credential: Credential =
         std::fs::read(credential_path(app, &member.name, host.name()))
             .ok()
@@ -863,11 +868,14 @@ async fn sync_pull(
             }
         }
     }
-    let r2 = repo.clone();
-    let changed = app
-        .store
-        .write(move |w| pulls::store_published(w, &r2, number, x, open))
-        .await?;
+    let changed = {
+        let lock = app.repo_lock(&repo.id);
+        let _guard = lock.lock().await;
+        let r2 = repo.clone();
+        app.store
+            .write(move |w| pulls::store_published(w, &r2, number, x, open))
+            .await?
+    };
     if changed.is_some() {
         app.events.publish("pull", &repo.path, number.to_string());
     }

@@ -19,8 +19,8 @@ use crate::domain::pulls::{self, MergeInput, load_pull};
 use crate::error::{AppError, AppResult};
 use crate::events::Notice;
 use crate::http::J;
-use crate::model::{Landing, Pull, Repo};
-use crate::store::{self, Key, Rd};
+use crate::model::{Landing, Repo};
+use crate::store::{self, Rd};
 use crate::util;
 
 /// Every repository is looked at again this often, whatever changed.
@@ -136,7 +136,7 @@ async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<
         .store
         .read(move |r| {
             let mut candidates = Vec::new();
-            for p in open_pulls(r, &r2)? {
+            for p in pulls::open_pulls(r, &r2)? {
                 let passed = crate::landing::current(r, &r2.id, p.number)?
                     .is_some_and(|l| l.state == "passed");
                 if r2.auto_land && passed && (r2.upstream.is_none() || p.upstream.is_none()) {
@@ -208,18 +208,6 @@ async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<
     Ok(())
 }
 
-fn open_pulls(r: &impl Rd, repo: &Repo) -> AppResult<Vec<Pull>> {
-    let prefix = Key::new().s(&repo.id).bytes();
-    let mut out = Vec::new();
-    for (_, n) in r.prefix_raw(store::IX_OPEN_PULLS, &prefix, None, usize::MAX)? {
-        let n = String::from_utf8_lossy(&n)
-            .parse()
-            .map_err(AppError::internal)?;
-        out.push(load_pull(r, repo, n)?);
-    }
-    Ok(out)
-}
-
 // ---------------------------------------------------------------- the webhook
 
 /// Tells the webhook, once per gate pass, that pull request `number` can merge.
@@ -232,22 +220,23 @@ async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<bool> {
     };
     // The poller rewrites the record under the same lock.
     let _guard = app.upstream.pull_lock(&repo.id, number).await;
-    let r2 = repo.clone();
-    let (p, landing) = app
+    let id = repo.id.clone();
+    let (p, landing, repo) = app
         .store
         .read(move |r| {
+            let repo = crate::domain::repo_by_id(r, &id)?;
             Ok((
-                load_pull(r, &r2, number)?,
-                crate::landing::current(r, &r2.id, number)?,
+                load_pull(r, &repo, number)?,
+                crate::landing::current(r, &id, number)?,
+                repo,
             ))
         })
         .await?;
     let Some(landing) = landing.filter(awaits_notice) else {
         return Ok(true);
     };
-    let Some(x) = p
-        .upstream
-        .filter(|x| x.number.is_some() && x.stopped.is_none())
+    let Some(x) =
+        crate::landing::published(&repo, &p).filter(|x| x.number.is_some() && x.stopped.is_none())
     else {
         return Ok(true);
     };

@@ -12,8 +12,8 @@ use crate::auth::Caller;
 use crate::ci::Check;
 use crate::domain::{self, pulls};
 use crate::error::AppResult;
-use crate::git::{GateCommit, ZERO_SHA};
-use crate::model::{Landing, LandingReason, Pull, Repo};
+use crate::git::GateCommit;
+use crate::model::{Landing, LandingReason, Published, Pull, Repo};
 use crate::store::{self, Key, Rd, Wtx};
 use crate::util;
 
@@ -28,10 +28,22 @@ fn all(r: &impl Rd, repo: &str) -> AppResult<Vec<Landing>> {
 }
 
 pub fn active(r: &impl Rd, repo: &str) -> AppResult<Vec<Landing>> {
-    Ok(all(r, repo)?
-        .into_iter()
-        .filter(|e| e.state != "left")
-        .collect())
+    let mut entries = Vec::new();
+    for (_, n) in r.prefix_raw(
+        store::IX_OPEN_PULLS,
+        &Key::new().s(repo).bytes(),
+        None,
+        usize::MAX,
+    )? {
+        let n = String::from_utf8_lossy(&n)
+            .parse()
+            .map_err(crate::error::AppError::internal)?;
+        if let Some(e) = current(r, repo, n)?.filter(|e| e.state != "left") {
+            entries.push(e);
+        }
+    }
+    entries.sort_by_key(|e| e.sequence);
+    Ok(entries)
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -53,40 +65,58 @@ pub struct LandingView {
 
 fn views(r: &impl Rd, repo: &Repo) -> AppResult<Vec<LandingView>> {
     let entries = all(r, &repo.id)?;
+    let mut queues = std::collections::BTreeMap::new();
+    for entry in entries.iter().filter(|e| e.state != "left") {
+        queues.entry(&entry.base).or_insert_with(|| first(entry));
+    }
+    let mut positions = std::collections::BTreeMap::new();
     entries
         .iter()
         .map(|entry| {
-            let queue: Vec<_> = entries
-                .iter()
-                .filter(|e| e.base == entry.base && e.state != "left")
-                .collect();
-            let position = queue
-                .iter()
-                .position(|e| e.number == entry.number)
-                .map(|i| i as u64 + 1);
-            let first = queue.first().map(|e| LandingFirst {
-                number: e.number,
-                state: e.state.clone(),
-                state_at: e.state_at.clone(),
-                published: e.published,
-                error: e.error.clone(),
+            let position = (entry.state != "left").then(|| {
+                let next = positions.entry(&entry.base).or_insert(0);
+                *next += 1;
+                *next
             });
             Ok(LandingView {
                 entry: entry.clone(),
                 position,
-                first,
+                first: queues.get(&entry.base).cloned(),
             })
         })
         .collect()
+}
+
+fn first(e: &Landing) -> LandingFirst {
+    LandingFirst {
+        number: e.number,
+        state: e.state.clone(),
+        state_at: e.state_at.clone(),
+        published: e.published,
+        error: e.error.clone(),
+    }
 }
 
 pub async fn view(app: &App, repo: &Repo, number: u64) -> AppResult<Option<LandingView>> {
     let repo = repo.clone();
     app.store
         .read(move |r| {
-            Ok(views(r, &repo)?
+            let Some(entry) = current(r, &repo.id, number)? else {
+                return Ok(None);
+            };
+            let queue: Vec<_> = active(r, &repo.id)?
                 .into_iter()
-                .find(|e| e.entry.number == number))
+                .filter(|e| e.base == entry.base)
+                .collect();
+            let position = queue
+                .iter()
+                .position(|e| e.number == number)
+                .map(|i| i as u64 + 1);
+            Ok(Some(LandingView {
+                entry,
+                position,
+                first: queue.first().map(first),
+            }))
         })
         .await
 }
@@ -188,19 +218,23 @@ async fn eligibility(
     Ok(None)
 }
 
-fn publication(repo: &Repo, p: &Pull) -> (bool, Option<String>) {
-    let Some(x) = p.upstream.as_ref().filter(|x| {
+pub(crate) fn published<'a>(repo: &Repo, p: &'a Pull) -> Option<&'a Published> {
+    p.upstream.as_ref().filter(|x| {
         repo.upstream
             .as_ref()
             .is_some_and(|up| up.same_place(&x.provider, &x.repository))
-    }) else {
+    })
+}
+
+fn publication(repo: &Repo, p: &Pull) -> (bool, Option<String>) {
+    let Some(x) = published(repo, p) else {
         return (false, None);
     };
     (x.number.is_some() && x.stopped.is_none(), x.error.clone())
 }
 
-fn published_problem(p: &Pull, head: &str, resume: bool) -> Option<LandingReason> {
-    let x = p.upstream.as_ref()?;
+fn published_problem(repo: &Repo, p: &Pull, head: &str, resume: bool) -> Option<LandingReason> {
+    let x = published(repo, p)?;
     if !resume && let Some(stopped) = &x.stopped {
         return Some(reason("publish_stopped", stopped.clone()));
     }
@@ -243,17 +277,26 @@ async fn save(app: &App, repo: &Repo, e: Landing, comment: Option<String>) -> Ap
 }
 
 pub async fn remove_merged_ref(app: &App, repo: &Repo, number: u64) -> AppResult<()> {
-    app.git
-        .run_ok(
-            Some(&app.git.repo_dir(&repo.path)),
-            &[
-                "update-ref",
-                "-d",
-                &format!("refs/branvil/failed-gate/{number}"),
-            ],
-        )
-        .await?;
-    clear_ref(app, repo, number).await
+    for kind in ["gate", "failed-gate"] {
+        app.git
+            .run_ok(
+                Some(&app.git.repo_dir(&repo.path)),
+                &["update-ref", "-d", &format!("refs/branvil/{kind}/{number}")],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+pub fn mark_closed(w: &Wtx, repo: &str, number: u64) -> AppResult<()> {
+    if let Some(mut e) = current(w, repo, number)? {
+        e.state = "left".into();
+        e.state_at = util::now();
+        e.reason = Some(reason("closed", "The pull request is closed."));
+        e.resume_publish = false;
+        w.put(store::LANDING, &Pull::key(repo, number), &e)?;
+    }
+    Ok(())
 }
 
 pub fn mark_merged(w: &Wtx, repo: &str, number: u64) -> AppResult<()> {
@@ -263,17 +306,6 @@ pub fn mark_merged(w: &Wtx, repo: &str, number: u64) -> AppResult<()> {
         e.reason = Some(reason("merged", "The pull request was merged."));
         w.put(store::LANDING, &Pull::key(repo, number), &e)?;
     }
-    Ok(())
-}
-
-async fn clear_ref(app: &App, repo: &Repo, number: u64) -> AppResult<()> {
-    app.git
-        .run_ok(
-            Some(&app.git.repo_dir(&repo.path)),
-            &["update-ref", "-d", &format!("refs/branvil/gate/{number}")],
-        )
-        .await?;
-    crate::refs::record_refs_locked(app, repo).await?;
     Ok(())
 }
 
@@ -309,7 +341,7 @@ async fn leave(
             why.message,
             details,
             if why.code == "gate_failed" {
-                "\n\nRetry the failed gate jobs. Once the required jobs succeed, this pull request rejoins the end of the landing queue."
+                "\n\nRetry the failed and cancelled required gate jobs. Once all required jobs succeed, this pull request rejoins the end of the landing queue."
             } else {
                 ""
             }
@@ -317,25 +349,12 @@ async fn leave(
     } else {
         None
     };
-    if why.code == "gate_failed"
-        && let Some(gate) = &e.gate
-    {
-        app.git
-            .run_ok(
-                Some(&app.git.repo_dir(&repo.path)),
-                &[
-                    "update-ref",
-                    &format!("refs/branvil/failed-gate/{}", e.number),
-                    gate,
-                ],
-            )
-            .await?;
-    }
     e.state = "left".into();
     e.state_at = util::now();
     e.reason = Some(why);
-    save(app, repo, e.clone(), comment).await?;
-    clear_ref(app, repo, e.number).await
+    save(app, repo, e, comment).await?;
+    repair_refs_locked(app, repo).await?;
+    Ok(())
 }
 
 /// Owner intent to replace a stopped publication is distinct from successfully
@@ -481,11 +500,8 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
     let current_repo = app.store.read(move |r| domain::repo_by_id(r, &id)).await?;
     let repo = &current_repo;
     let tips = pulls::tips(app, repo).await?;
-    let id = repo.id.clone();
-    let pulls = app
-        .store
-        .read(move |r| r.prefix_all::<Pull>(store::PULLS, &Key::new().s(&id).bytes()))
-        .await?;
+    let r2 = repo.clone();
+    let pulls = app.store.read(move |r| pulls::open_pulls(r, &r2)).await?;
     for p in &pulls {
         let (head, base) = (
             tips.get(&p.head).cloned().unwrap_or_default(),
@@ -509,10 +525,10 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
             && p.state == "open"
             && !p.draft
             && !p.merged
-            && repo.upstream.as_ref().is_some_and(|up| {
-                p.upstream.as_ref().is_some_and(|published| {
-                    up.same_place(&published.provider, &published.repository)
-                })
+            && published(repo, p).is_some_and(|x| {
+                x.number.is_some()
+                    && x.pushed.as_deref() == Some(head.as_str())
+                    && x.stopped.is_none()
             })
             && e.state == "passed"
             && e.head_sha == head
@@ -532,13 +548,20 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
             continue;
         }
         let ineligible = eligibility(app, repo, p, &head, &base).await?;
-        let changed = old
+        let identity_changed = old
             .as_ref()
-            .is_some_and(|e| e.head_sha != head || e.base_sha != base || e.base != p.base);
-        let problem = published_problem(p, &head, old.as_ref().is_some_and(|e| e.resume_publish))
-            .or(ineligible);
+            .is_some_and(|e| e.head_sha != head || e.base != p.base);
+        let base_changed = old.as_ref().is_some_and(|e| e.base_sha != base);
+        let changed = identity_changed || base_changed;
+        let problem = published_problem(
+            repo,
+            p,
+            &head,
+            old.as_ref().is_some_and(|e| e.resume_publish),
+        )
+        .or(ineligible);
         if let Some(e) = old.as_ref().filter(|e| e.state != "left") {
-            if changed || problem.is_some() {
+            if identity_changed || problem.is_some() {
                 leave(
                     app,
                     repo,
@@ -557,6 +580,23 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
                 )
                 .await?;
             } else {
+                if base_changed {
+                    // Admission belongs to the reviewed head, not to a gate's
+                    // base snapshot. Rebuild in place, including a retry gate
+                    // which was waiting behind another pull request.
+                    let mut e = e.clone();
+                    e.base_sha = base.clone();
+                    e.gate = None;
+                    if e.state != "waiting" {
+                        e.state_at = util::now();
+                    }
+                    e.state = "waiting".into();
+                    e.notified_at = None;
+                    e.notify = false;
+                    e.published = false;
+                    e.error = None;
+                    save(app, repo, e, None).await?;
+                }
                 continue;
             }
         }
@@ -576,20 +616,16 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
             && e.state == "left"
             && !changed
             && let Some(why) = e.reason.as_ref().filter(|r| r.code == "host_failed")
+            && let Some(x) = published(repo, p)
         {
-            let succeeded = p
-                .upstream
-                .as_ref()
-                .filter(|x| x.pushed.as_deref() == Some(head.as_str()))
-                .is_some_and(|x| {
-                    why.jobs.iter().all(|name| {
-                        x.checks.iter().any(|c| {
-                            &c.name == name
-                                && c.status == "completed"
-                                && c.conclusion
-                                    .as_deref()
-                                    .is_some_and(|v| ["success", "neutral", "skipped"].contains(&v))
-                        })
+            let succeeded = x.pushed.as_deref() == Some(head.as_str())
+                && why.jobs.iter().all(|name| {
+                    x.checks.iter().any(|c| {
+                        &c.name == name
+                            && c.status == "completed"
+                            && c.conclusion
+                                .as_deref()
+                                .is_some_and(|v| ["success", "neutral", "skipped"].contains(&v))
                     })
                 });
             if !succeeded {
@@ -670,7 +706,12 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
                 },
                 None => {
                     app.git
-                        .gate_commit(&app.git.repo_dir(&repo.path), &e.base_sha, &e.head_sha)
+                        .gate_commit(
+                            &app.git.repo_dir(&repo.path),
+                            &e.base_sha,
+                            &e.head_sha,
+                            e.number,
+                        )
                         .await?
                 }
             };
@@ -709,19 +750,8 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
                     e.state_at = util::now();
                     save(app, repo, e.clone(), None).await?;
                     app.failpoint("gate_before_update_ref");
-                    if e.gate.as_deref() != Some(&e.head_sha) {
-                        app.git
-                            .update_ref(
-                                &app.git.repo_dir(&repo.path),
-                                &format!("refs/branvil/gate/{}", e.number),
-                                e.gate.as_deref().unwrap(),
-                                ZERO_SHA,
-                                "branvil: landing gate",
-                            )
-                            .await?;
-                        app.failpoint("gate_after_update_ref");
-                        crate::refs::record_refs_locked(app, repo).await?;
-                    }
+                    repair_refs_locked(app, repo).await?;
+                    app.failpoint("gate_after_update_ref");
                 }
             }
         }
@@ -749,7 +779,7 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
             if e.state != "passed" {
                 e.state = "passed".into();
                 e.state_at = util::now();
-                e.notify = repo.auto_land;
+                e.notify = repo.auto_land && repo.upstream.is_some();
                 if let Some(p) = pulls.iter().find(|p| p.number == e.number) {
                     (e.published, e.error) = publication(repo, p);
                 }
@@ -772,34 +802,64 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
 /// before accepting requests, so even an immediate backup includes their objects.
 /// The caller holds the repository lock; no eligibility or new gates are made.
 pub async fn repair_refs_locked(app: &App, repo: &Repo) -> AppResult<Vec<crate::refs::RefChange>> {
-    let id = repo.id.clone();
-    let entries = app.store.read(move |r| active(r, &id)).await?;
+    let r2 = repo.clone();
+    let entries = app
+        .store
+        .read(move |r| {
+            let mut entries = Vec::new();
+            for p in pulls::open_pulls(r, &r2)? {
+                if let Some(e) = current(r, &r2.id, p.number)? {
+                    entries.push((p, e));
+                }
+            }
+            Ok(entries)
+        })
+        .await?;
     let dir = app.git.repo_dir(&repo.path);
     let actual = app.git.all_refs(&dir).await?;
-    for (name, sha) in actual
+    let tips: std::collections::BTreeMap<_, _> = actual
         .iter()
-        .filter(|(name, _)| name.starts_with("refs/branvil/gate/"))
-    {
-        if !entries.iter().any(|e| {
-            ["gating", "passed"].contains(&e.state.as_str())
-                && name == &format!("refs/branvil/gate/{}", e.number)
-                && e.gate.as_ref() == Some(sha)
-        }) {
+        .filter_map(|(name, sha)| name.strip_prefix("refs/heads/").map(|b| (b, sha)))
+        .collect();
+    let mut expected = std::collections::BTreeMap::new();
+    for (p, e) in &entries {
+        let Some(gate) = &e.gate else { continue };
+        let kind = if ["gating", "passed"].contains(&e.state.as_str()) {
+            if gate == &e.head_sha {
+                continue;
+            }
+            "gate"
+        } else if (e.state == "waiting"
+            || e.reason
+                .as_ref()
+                .is_some_and(|r| e.state == "left" && r.code == "gate_failed"))
+            && !p.draft
+            && e.base == p.base
+            && tips.get(p.head.as_str()).copied() == Some(&e.head_sha)
+            && tips.get(p.base.as_str()).copied() == Some(&e.base_sha)
+        {
+            "failed-gate"
+        } else {
+            continue;
+        };
+        expected.insert(format!("refs/branvil/{kind}/{}", e.number), gate);
+    }
+    // Make the next owner reachable before deleting the previous ref. This
+    // also repairs a crash between saving a failed/retried gate and its refs.
+    for (name, sha) in &expected {
+        if actual.get(name) != Some(*sha) {
             app.git
-                .run_ok(Some(&dir), &["update-ref", "-d", name])
+                .run_ok(Some(&dir), &["update-ref", name, sha])
                 .await?;
         }
     }
-    for e in entries.iter().filter(|e| {
-        ["gating", "passed"].contains(&e.state.as_str()) && e.gate.as_ref() != Some(&e.head_sha)
+    for name in actual.keys().filter(|name| {
+        name.starts_with("refs/branvil/gate/") || name.starts_with("refs/branvil/failed-gate/")
     }) {
-        if let Some(gate) = &e.gate {
-            let name = format!("refs/branvil/gate/{}", e.number);
-            if actual.get(&name) != Some(gate) {
-                app.git
-                    .run_ok(Some(&dir), &["update-ref", &name, gate])
-                    .await?;
-            }
+        if !expected.contains_key(name) {
+            app.git
+                .run_ok(Some(&dir), &["update-ref", "-d", name])
+                .await?;
         }
     }
     crate::refs::record_refs_locked(app, repo).await

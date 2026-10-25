@@ -287,6 +287,19 @@ pub fn load_pull(r: &impl Rd, repo: &Repo, number: u64) -> AppResult<Pull> {
         })
 }
 
+/// Open pull requests from the repository's maintained index.
+pub fn open_pulls(r: &impl Rd, repo: &Repo) -> AppResult<Vec<Pull>> {
+    let prefix = Key::new().s(&repo.id).bytes();
+    let mut out = Vec::new();
+    for (_, n) in r.prefix_raw(store::IX_OPEN_PULLS, &prefix, None, usize::MAX)? {
+        let n = String::from_utf8_lossy(&n)
+            .parse()
+            .map_err(AppError::internal)?;
+        out.push(load_pull(r, repo, n)?);
+    }
+    Ok(out)
+}
+
 fn write_pull(w: &Wtx, old: Option<&Pull>, new: &Pull) -> AppResult<()> {
     model::put_indexed(
         w,
@@ -905,11 +918,14 @@ pub async fn set_open(
     open: bool,
 ) -> AppResult<PullView> {
     let (repo, _) = visible(app, caller, repo_path, number).await?;
-    let r2 = repo.clone();
-    let p = app
-        .store
-        .write(move |w| set_open_in(w, &r2, number, open))
-        .await?;
+    let p = {
+        let lock = app.repo_lock(&repo.id);
+        let _guard = lock.lock().await;
+        let r2 = repo.clone();
+        app.store
+            .write(move |w| set_open_in(w, &r2, number, open))
+            .await?
+    };
     app.events.publish("pull", &repo.path, number.to_string());
     if open && p.state == "open" {
         app.ci.on_pull_opened(app, &repo, &p.head).await;
@@ -949,6 +965,7 @@ pub fn set_open_in(w: &Wtx, repo: &Repo, number: u64, open: bool) -> AppResult<P
         (false, "open") => {
             p.state = "closed".into();
             p.closed_at = Some(now.clone());
+            crate::landing::mark_closed(w, &repo.id, number)?;
         }
         _ => return Ok(p),
     }
@@ -1651,7 +1668,7 @@ fn not_mergeable(message: impl Into<String>) -> AppError {
 /// base the owner saw, successful required head checks and approvals, and a
 /// passed gate at the front of the current base queue; for one
 /// made by the repository itself (`auto`), that it still lands by itself.
-/// Returns the head and the base. Call under the repository lock with the
+/// Returns the checked head, base, and gate. Call under the repository lock with the
 /// repository and the pull request read under it.
 pub async fn check_landable(
     app: &App,
@@ -1659,7 +1676,7 @@ pub async fn check_landable(
     p: &Pull,
     input: &MergeInput,
     auto: bool,
-) -> AppResult<(String, String)> {
+) -> AppResult<(String, String, String)> {
     let number = p.number;
     if auto && !repo.auto_land {
         return Err(not_mergeable(format!(
@@ -1749,7 +1766,7 @@ pub async fn check_landable(
             "The required landing gate checks have not succeeded.",
         ));
     }
-    Ok((head, base))
+    Ok((head, base, gate))
 }
 
 pub async fn merge(
@@ -1790,13 +1807,7 @@ pub async fn merge_pull(
     let r2 = repo.clone();
     let p = app.store.read(move |r| load_pull(r, &r2, number)).await?;
     crate::landing::reconcile_locked(app, &repo).await?;
-    let (head, base) = check_landable(app, &repo, &p, &input, auto).await?;
-    let id = repo.id.clone();
-    let gate = app
-        .store
-        .read(move |r| Ok(crate::landing::current(r, &id, number)?.and_then(|e| e.gate)))
-        .await?
-        .ok_or_else(|| not_mergeable("The landing gate is missing."))?;
+    let (head, base, gate) = check_landable(app, &repo, &p, &input, auto).await?;
     let dir = app.git.repo_dir(&repo.path);
     keep_merged(app, &repo, number, &head).await?;
     let entry = JournalEntry {
@@ -1979,4 +1990,121 @@ pub fn mark_merged(
         left = open;
     }
     Ok(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::domain::members::{NewMember, insert_member};
+    use crate::domain::repos::{self, NewRepo, NewWorkspace};
+    use crate::model::MemberKind;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn closing_waits_for_queue_work_and_reopening_releases_the_lock_before_ci() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config::load(None, Some(temp.path()), None, None).unwrap();
+        let layout = config.layout();
+        layout.create().unwrap();
+        let store = store::Store::open(&layout.db(), 1 << 20, 2).unwrap();
+        let member = store
+            .write_sync(|w| {
+                insert_member(
+                    w,
+                    &NewMember {
+                        name: "owner1".into(),
+                        display_name: None,
+                        kind: MemberKind::Owner,
+                    },
+                )
+            })
+            .unwrap();
+        let caller = Caller { member };
+        let app = App::new(
+            config,
+            "http://127.0.0.1:7878".into(),
+            store,
+            vec![],
+            "http://127.0.0.1:7878".into(),
+        );
+        repos::create_workspace(
+            &app,
+            &caller,
+            NewWorkspace {
+                name: "acme".into(),
+            },
+        )
+        .await
+        .unwrap();
+        repos::create(
+            &app,
+            &caller,
+            NewRepo {
+                path: "acme/demo".into(),
+                default_branch: None,
+                labels: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let repo = repos::visible(&app, &caller, "acme/demo").await.unwrap();
+        let p = Pull {
+            repo: repo.id.clone(),
+            number: 1,
+            title: "Serialize closing".into(),
+            body: String::new(),
+            state: "open".into(),
+            merged: false,
+            draft: false,
+            author: "owner1".into(),
+            head: "feature".into(),
+            base: "main".into(),
+            reviewers: vec![],
+            tickets: vec![],
+            labels: vec![],
+            reviewed_by: vec![],
+            ready_at: None,
+            created_at: util::now(),
+            updated_at: util::now(),
+            closed_at: None,
+            merged_at: None,
+            merge_sha: None,
+            merged_head: None,
+            merged_base: None,
+            upstream: None,
+            revision: 1,
+        };
+        app.store
+            .write(move |w| write_pull(w, None, &p))
+            .await
+            .unwrap();
+        let lock = app.repo_lock(&repo.id);
+        let held = lock.lock().await;
+        let mut closing = Box::pin(set_open(&app, &caller, &repo.path, 1, false));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), closing.as_mut())
+                .await
+                .is_err(),
+            "closing must wait for the in-flight queue update"
+        );
+        let r2 = repo.clone();
+        assert_eq!(
+            app.store
+                .read(move |r| Ok(load_pull(r, &r2, 1)?.state))
+                .await
+                .unwrap(),
+            "open"
+        );
+        drop(held);
+        assert_eq!(closing.await.unwrap().state, "closed");
+        let reopened = tokio::time::timeout(
+            Duration::from_secs(5),
+            set_open(&app, &caller, &repo.path, 1, true),
+        )
+        .await
+        .expect("reopening must not hold the repository lock while registering CI")
+        .unwrap();
+        assert_eq!(reopened.state, "open");
+    }
 }

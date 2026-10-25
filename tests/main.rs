@@ -13,6 +13,7 @@ mod cli;
 mod git_http;
 mod gui;
 mod landing;
+mod landing_acceptance;
 mod pulls;
 mod real_executor;
 mod recovery;

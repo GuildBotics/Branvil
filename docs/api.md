@@ -712,7 +712,8 @@ merge from one awaiting publication; `error` is the temporary publication error,
 if any. Both are the landing task's last observation of the publication stage.
 `queued_at` records admission, `state_at` records the latest state or publication-stage change,
 and `sequence` orders admissions even when their timestamps match. These
-updates do not change a pull request's `revision` or `updated_at`.
+updates do not change a pull request's `revision` or `updated_at`. Advancing
+base preserves active entries' admission times, sequences, and order.
 
 - `waiting`: admitted and waiting for earlier entries.
 - `gating`: first in the queue, with the combined base/head being checked.
@@ -733,17 +734,22 @@ and when base and head conflict. `base_sha` and `head_sha` identify the inputs
 to that entry's gate; approvals remain on the original head.
 
 Failed required gate checks, conflicts, failed host checks on the published
-head, stopped publication, changed head/base, closing, draft, or lost eligibility
-remove an entry. Temporary publication errors keep its place for retries.
-A changed head/base rejoins at the end if eligible. Without such a change, a
-failed gate rejoins only after retrying its required jobs succeeds; a failed
-host check can rejoin when it succeeds, and other reasons when they clear.
-A conflict requires a head/base change. A passed entry whose changes are already
-in a newly advanced base waits to be recorded merged; other base advances
-require a new gate. If the host confirms that pull request is still open after
-its changes entered base through another integration, it leaves with
-`already_in_base` instead. The next entry stays `waiting` while the first is
-`passed`.
+head, stopped publication, changed head or target base branch, closing, draft,
+or lost eligibility remove an entry. Temporary publication errors keep its
+place for retries. A waiting entry uses the current base when its turn arrives;
+if base advances during a gate, the first entry gets a new gate in the same
+place.
+
+A departed entry rejoins at the end when its head or base changes and it is
+eligible. Without such a change, a failed gate rejoins only after all required
+gate jobs succeed: retry failed jobs and any required jobs cancelled on
+departure. A failed host check can rejoin when it succeeds, and other reasons
+when they clear. A conflict requires a head/base change. A passed entry
+published to the repository's current upstream whose changes are already in a
+newly advanced base waits to be recorded merged. If the host confirms that
+pull request is still open, the changes arrived through another integration:
+it leaves with `already_in_base`. The next entry stays `waiting` while the
+first is `passed`.
 
 Gate failures and conflicts add a comment by the service author `branvil`,
 including the gate inputs and failed jobs with log links or conflicting files.
@@ -752,7 +758,8 @@ The entry retains its gate SHA, reason, and timestamps after departure so
 clients can inspect the attempt and the time spent waiting. Rejoining replaces
 that entry with a new admission and sequence.
 
-`notify` records that this gate passed with automatic landing enabled.
+`notify` records that this gate passed with automatic landing and an upstream
+enabled.
 `notified_at` records when the webhook acknowledged that gate's notice.
 `resume_publish` records the owner's request to return a stopped publication
 to the queue. It lets the gate run while retaining `upstream.stopped`; it does
@@ -762,11 +769,12 @@ not authorize automatic replacement of the host branch.
   `{"expected_head": "<sha>", "expected_base": "<sha>"}` → pull request.
   Use this before publishing again after sending stopped. The current head and
   base must match (`409 head_moved` / `base_moved`); publication must be stopped,
-  the pull request must have a landing entry, and the usual head checks,
-  approvals, and other admission conditions must hold (`409 not_mergeable`).
-  It sets `resume_publish: true` and returns the pull request to its queue when
-  eligible, retaining the old `upstream.stopped` reason. After the gate passes
-  at the front, the owner calls `POST .../publish` to replace the host branch.
+  and the usual head checks, approvals, and other admission conditions must hold
+  (`409 not_mergeable`).
+  It creates a landing entry if needed, sets `resume_publish: true`, and returns
+  the pull request to its queue when eligible, retaining the old
+  `upstream.stopped` reason. After the gate passes at the front, the owner calls
+  `POST .../publish` to replace the host branch.
   That publication clears `resume_publish`. Automatic landing never performs
   this replacement.
 
@@ -1049,10 +1057,12 @@ is polled when, and how conflicts are settled: `docs/architecture.md`,
   fails; the branch stays and Branvil tries again). When the host already has
   a branch of that name that Branvil did not push, nothing is pushed: `409
   upstream_refused`, and the pull request's `upstream.stopped` says why.
-  Publishing a pull request published to this upstream changes nothing;
-  publishing one whose sending stopped replaces what the host has on the
-  branch after the owner resumes its landing queue and the new gate passes
-  (`POST .../landing/resume`); one published to an earlier upstream is published anew here.
+  A pull request already published to this upstream still needs a current
+  passed gate at the front; after those checks, publishing it writes nothing
+  to the host. Publishing one whose sending stopped replaces what the host has
+  on the branch after the owner resumes its landing queue and the new gate
+  passes (`POST .../landing/resume`); one published to an earlier upstream is
+  published anew here.
   A repository with `auto_land` publishes by itself, once ("Landing
   automatically").
 - The `upstream` of a pull request:

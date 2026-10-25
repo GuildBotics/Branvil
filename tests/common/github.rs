@@ -18,6 +18,7 @@ use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 use super::git_ok;
 
@@ -120,6 +121,28 @@ pub struct State_ {
     /// What every read of Dependabot alerts or a job log is answered with
     /// instead.
     pub refusal: Option<Refusal>,
+    pull_read_pause: Option<(u64, Arc<PullReadPause>)>,
+}
+
+/// Pauses one pull read after following the host's default branch, so a test
+/// can inspect the interval before the host's merge is recorded locally.
+struct PullReadPause {
+    reached: Notify,
+    release: Notify,
+}
+
+pub struct PausedPullRead(Arc<PullReadPause>);
+
+impl PausedPullRead {
+    pub async fn reached(&self) {
+        self.0.reached.notified().await;
+    }
+}
+
+impl Drop for PausedPullRead {
+    fn drop(&mut self) {
+        self.0.release.notify_one();
+    }
 }
 
 /// A refusal GitHub answers with: its status, headers, and message.
@@ -392,6 +415,22 @@ async fn pull_get(
     UrlPath((owner, name, n)): UrlPath<(String, String, u64)>,
     headers: HeaderMap,
 ) -> Response {
+    let pause = {
+        let mut st = state.lock().unwrap();
+        if st
+            .pull_read_pause
+            .as_ref()
+            .is_some_and(|(number, _)| *number == n)
+        {
+            st.pull_read_pause.take().map(|(_, pause)| pause)
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause.reached.notify_one();
+        pause.release.notified().await;
+    }
     let mut st = state.lock().unwrap();
     let repo = format!("{owner}/{name}");
     if record(
@@ -587,6 +626,15 @@ async fn alert_get(
 }
 
 impl FakeGitHub {
+    pub fn pause_pull_read(&self, number: u64) -> PausedPullRead {
+        let pause = Arc::new(PullReadPause {
+            reached: Notify::new(),
+            release: Notify::new(),
+        });
+        self.state.lock().unwrap().pull_read_pause = Some((number, pause.clone()));
+        PausedPullRead(pause)
+    }
+
     pub async fn start(root: &Path) -> FakeGitHub {
         let state = Arc::new(Mutex::new(State_::default()));
         let app = Router::new()

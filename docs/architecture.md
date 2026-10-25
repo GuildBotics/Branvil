@@ -409,26 +409,30 @@ merge. A local merge fast-forwards the base to the gate commit. Publishing
 sends the original head, and later pushes to a published head are sent as before.
 
 - A failed required gate job, merge conflict, stopped publication, or failed
-  host check on the head used to build the gate removes the first from the queue. Closing,
-  marking draft, moving head/base, or losing the head's checks or approvals
-  also removes it. A temporary publication error keeps its place and shows the
-  error while polling retries. A stopped publication returns through the
+  host check on the head used to build the gate removes the first from the
+  queue. Closing, marking draft, changing the head or target base branch, or
+  losing the head's checks or approvals also removes it. A temporary publication
+  error keeps its place and shows the error while polling retries. A stopped
+  publication returns through the
   owner's `POST /repos/{repo}/pulls/{number}/landing/resume`, with expected
   head/base. Its entry records `resume_publish: true` and keeps the original
   `upstream.stopped` reason while the gate runs. Once passed at the front, the
   owner publishes again to replace the host branch; that action clears the
   intent. Automatic landing never replaces a stopped publication.
-- A changed head or base can rejoin at the end. Otherwise a failed gate stays
-  out until retrying its required jobs succeeds; a failed host check can rejoin
+- A departed entry with a changed head or base can rejoin at the end. Otherwise
+  a failed gate stays out until all its required jobs succeed: retry failed jobs
+  and any required jobs cancelled on departure. A failed host check can rejoin
   when it succeeds, and other exclusions can rejoin when their reason clears.
   Conflicts require a head or base change. This avoids rerunning an unchanged
   failed gate on every sweep.
-- If base moves while the first is `passed`, Branvil combines the new base and
-  head. A tree equal to the new base means the changes already landed: it keeps
-  the gate and waits for the poller to mark the pull request merged. If the
-  host then confirms the pull request is still open, the changes arrived
-  through another integration: it leaves with `already_in_base`. Other base
-  changes require a new gate and a new position at the end.
+- Advancing base preserves active entries' admission times and order. Waiting
+  entries use the current base when their turn arrives. The first entry gets
+  a new gate in the same place when base advances during its gate. For a passed
+  entry published to the repository's current upstream, a combined tree equal
+  to the new base means the changes already landed: it keeps the gate and
+  waits for the poller to mark the pull request merged. If the host then
+  confirms the pull request is still open, the changes arrived through another
+  integration: it leaves with `already_in_base`.
 - Gate failures and conflicts add a comment by the reserved author `branvil`.
   It names the base, head, and gate SHAs, failed jobs and log links or conflicting
   files, and how a successful gate retry returns the pull request to the queue.
@@ -440,7 +444,13 @@ branch cache scope that cannot save dependency caches. Moving or deleting a
 gate ref supersedes its unfinished work when no other CI ref needs the commit.
 Leaving or merging deletes the gate ref. The reconciler registers current gate
 refs at startup and every minute, including after a crash between ref creation
-and CI registration. The queue preserves a failed gate for checks and retries.
+and CI registration. A failed gate stays reachable through
+`refs/branvil/failed-gate/<number>` while the open pull request waits for a retry
+with the same head and base, including after it rejoins behind another entry.
+Once the gate becomes active, its normal gate ref or head branch keeps it
+reachable. Closing the pull request or changing its gate inputs removes the
+failed-gate ref. Startup recovery repairs both namespaces from their owning
+entries.
 
 One task (`autoland::start`, started by `serve` after the poller) advances queues
 for all repositories, including those with `auto_land` off. It subscribes to
@@ -456,9 +466,9 @@ failed or stopped publication, another publication is the owner's action.
 `upstream.auto` records who published it. Queues and new gates continue for
 already published pull requests.
 
-Each gate that passes with `auto_land` on records `notify: true`. Once a host
-pull request exists and sending is not stopped, the owner's webhook receives
-`{"text": …}` saying the gate passed and awaits a merge there. This includes a
+Each gate that passes with `auto_land` on and an upstream records `notify: true`.
+Once a host pull request exists and sending is not stopped, the owner's webhook
+receives `{"text": …}` saying the gate passed and awaits a merge there. This includes a
 new gate for an already published head. `Landing.notified_at` records a `2xx`
 answer for that gate; a later pass has its own notification. Pending notices
 are retried even if automatic landing is later turned off. The URL is kept in

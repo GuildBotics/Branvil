@@ -560,6 +560,70 @@ async fn a_webhook_set_later_is_told_of_an_automatic_publish_whatever_auto_land(
     assert_eq!(hook.received().len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_upstream_never_notifies_the_old_publication_or_republishes_automatically() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    gh.repository("octo/other", &w.work);
+    let other = other_repo(&w, OTHER, true).await;
+    settings(&w, json!({"auto_land": true})).await;
+    w.push_change("feat", "f.txt", "one\n");
+    let n = number(&w.open_pull("feat", json!([])).await);
+    eventually("the automatic publish without a webhook", || async {
+        pull(&w, n).await["upstream"]["number"].is_u64()
+    })
+    .await;
+    let original = pull(&w, n).await;
+    assert_eq!(original["upstream"]["auto"], true);
+    assert!(original["landing"]["notified_at"].is_null());
+    let old_url = original["upstream"]["url"].as_str().unwrap();
+
+    let (st, result) = w
+        .server
+        .put(
+            &format!("{}/upstream", w.repo_path()),
+            &w.owner,
+            json!({"provider":"github","repository":"octo/other"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{result}");
+    let hook = Hook::start(&w, &[]).await;
+    let (st, result) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/comments", w.repo_path()),
+            &w.ken,
+            json!({"body":"The owner will publish to the new destination."}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{result}");
+    swept(&w, &other).await;
+    let retained = pull(&w, n).await;
+    assert_eq!(retained["landing"]["state"], "passed");
+    assert_eq!(retained["landing"]["published"], false);
+    assert_eq!(retained["upstream"]["repository"], GH);
+    assert!(hook.received().is_empty(), "{:?}", hook.received());
+    assert!(retained["landing"]["notified_at"].is_null());
+    assert!(gh.pulls("octo/other").is_empty());
+    assert!(gh.tip("octo/other", "feat").is_none());
+
+    // The pending automatic gate notice can describe only the publication
+    // that the owner explicitly made at the new destination.
+    let (st, published) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{published}");
+    assert_eq!(published["upstream"]["repository"], "octo/other");
+    assert_eq!(published["upstream"]["auto"], false);
+    eventually("the new destination's notice", || async {
+        hook.received().len() == 1
+    })
+    .await;
+    let notices = hook.received();
+    let text = notices[0].1["text"].as_str().unwrap();
+    assert!(text.contains(published["upstream"]["url"].as_str().unwrap()));
+    assert!(!text.contains(old_url), "{text}");
+    assert_eq!(gh.pulls("octo/other").len(), 1);
+}
+
 /// A service started again (now) whose `acme/demo` has a pull request
 /// Branvil published by itself while no webhook was set, and whose
 /// `acme/other` has a pull request that can land, landing by itself from this

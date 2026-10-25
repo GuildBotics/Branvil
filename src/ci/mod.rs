@@ -1068,8 +1068,42 @@ mod tests {
             error: None,
         };
         let saved = entry.clone();
+        let pull = crate::model::Pull {
+            repo: repo.id.clone(),
+            number: entry.number,
+            title: "Gate ownership".into(),
+            body: String::new(),
+            state: "open".into(),
+            merged: false,
+            draft: false,
+            author: "member1".into(),
+            head: "feature".into(),
+            base: entry.base.clone(),
+            reviewers: vec![],
+            tickets: vec![],
+            labels: vec![],
+            reviewed_by: vec![],
+            ready_at: None,
+            created_at: util::now(),
+            updated_at: util::now(),
+            closed_at: None,
+            merged_at: None,
+            merge_sha: None,
+            merged_head: None,
+            merged_base: None,
+            upstream: None,
+            revision: 1,
+        };
         app.store
             .write(move |w| {
+                crate::model::put_indexed(
+                    w,
+                    store::PULLS,
+                    &crate::model::Pull::key(&pull.repo, pull.number),
+                    None,
+                    &pull,
+                    crate::model::pull_index(&pull),
+                )?;
                 w.put(
                     store::LANDING,
                     &crate::model::Pull::key(&saved.repo, saved.number),

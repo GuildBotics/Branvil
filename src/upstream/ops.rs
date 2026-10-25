@@ -394,16 +394,17 @@ pub async fn publish_pull(
     auto: bool,
 ) -> AppResult<PullView> {
     let _guard = app.upstream.pull_lock(&repo.id, number).await;
-    let (repo, setting, p, head) = {
+    let (repo, setting, p, author, head) = {
         let lock = app.repo_lock(&repo.id);
         let _guard = lock.lock().await;
         let id = repo.id.clone();
-        let (repo, p) = app
+        let (repo, p, author) = app
             .store
             .read(move |r| {
                 let repo = repo_by_id(r, &id)?;
                 let p = load_pull(r, &repo, number)?;
-                Ok((repo, p))
+                let author = member_by_name(r, &p.author)?;
+                Ok((repo, p, author))
             })
             .await?;
         let setting = setting_of(&repo)?;
@@ -424,9 +425,12 @@ pub async fn publish_pull(
                 format!("!{number} was published before; only the owner publishes it again."),
             ));
         }
+        let host = app.upstream.hosts.get(&setting.provider)?;
+        super::require_account(&author, host)
+            .map_err(|why| AppError::conflict_code("no_account", why))?;
         crate::landing::reconcile_locked(app, &repo).await?;
-        let (head, _) = check_landable(app, &repo, &p, &input, auto).await?;
-        (repo, setting, p, head)
+        let (head, _, _) = check_landable(app, &repo, &p, &input, auto).await?;
+        (repo, setting, p, author, head)
     };
     let host = app.upstream.hosts.get(&setting.provider)?;
     // A record of another place (the upstream changed since) is replaced.
@@ -443,10 +447,6 @@ pub async fn publish_pull(
         let tips = pulls::tips(app, &repo).await?;
         return pulls::pull_view(app, &repo, &p, &tips).await;
     }
-    let author = {
-        let a = p.author.clone();
-        app.store.read(move |r| member_by_name(r, &a)).await?
-    };
     let token = token_of(app, &author, host)
         .await
         .map_err(|why| AppError::conflict_code("no_account", why))?;

@@ -193,9 +193,12 @@ stores each merged pull request's original reviewed head separately from its
 merge commit. Existing local merges use their `merge_sha` as the reviewed head;
 upstream merges use the pushed head when present. Queue entries are populated
 from eligible pull requests after startup. Old publication notification times
-are removed; each new passed gate records its own notice. The upgrade refuses
-a member named `branvil` (case-insensitively), since that name is now reserved
-for service comments. The refusal leaves the old database unchanged.
+are removed; each new passed gate records its own notice. An open pull request
+already published and notified before the upgrade can therefore send another
+webhook notice when its new gate passes with automatic landing enabled. The
+upgrade refuses a member named `branvil` (case-insensitively), since that name
+is now reserved for service comments. The refusal leaves the old database
+unchanged.
 
 ### The service run by scripts/serve.sh
 

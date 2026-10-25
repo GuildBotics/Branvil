@@ -96,12 +96,17 @@ rewrites a history; a reaction rewrites only its target entry.
 Each pull request has at most one `landing` row. A repository-prefix scan sorts
 active rows by their stored `sequence` and groups them by base; departed rows
 remain available for the failure reason, gate checks, and retries. Rejoining
-replaces the row with a new admission time and sequence. These writes leave
-`Pull.revision` and `Pull.updated_at` unchanged. Gate failures and conflicts
+replaces the row with a new admission time and sequence. Advancing base alone
+keeps active rows' order and admission times; the first rebuilds its gate in
+place. These writes leave `Pull.revision` and `Pull.updated_at` unchanged. Gate failures and conflicts
 write their reserved-author `branvil` comment in the transaction that records
 the departure. The next ref update removes the gate ref; ref recording and CI
 reconciliation supersede work and repair interrupted registration. A failed
-gate remains reachable through `refs/branvil/failed-gate/<number>` for retry.
+gate remains reachable through `refs/branvil/failed-gate/<number>` while the
+open pull request retains those gate inputs for retry. A requeued retry keeps
+that ref until its normal gate ref or head branch takes over; closing the pull
+request or changing the inputs removes it. Startup repairs both namespaces from their
+owning entries.
 
 
 ## Derived indexes
@@ -155,7 +160,7 @@ over the collection, the caller, and every query condition, keyed by
 | reaction | read-modify-write of the target entry, after checking the entry belongs to the item |
 | merge (DB side) | PR merged/closed with original reviewed head and merge commit, landing entry left, closed-at index, `closes` tickets closed and moved to `done`, journal entry removed |
 | landing transition | queue entry and, for a gate failure or conflict, its service comment; does not update PR activity |
-| stopped-publication resume | resume intent on the existing landing entry; original upstream refusal remains until the owner publishes again |
+| stopped-publication resume | create a landing entry if absent and record resume intent; original upstream refusal remains until the owner publishes again |
 | publication result | upstream record and clearing the landing entry's resume intent |
 | gate notification acknowledgment | `notified_at` only if the entry is still the same passed gate and state time |
 | push recording | ref snapshot diff, `updated_at` of open PRs whose head moved |

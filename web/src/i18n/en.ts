@@ -185,7 +185,7 @@ export const en = {
   "landing.queuedAt": "Queued",
   "landing.failedJobs": "Failed jobs: {jobs}",
   "landing.conflicts": "Conflicting files: {files}",
-  "landing.retryGate": "Retry the failed gate jobs. Once they succeed, this pull request joins the end of the queue. A change to the head or base also lets it rejoin.",
+  "landing.retryGate": "Retry failed and cancelled required gate jobs. Once all required gate jobs succeed, this pull request joins the end of the queue. A change to the head or base also lets it rejoin.",
   "landing.retryHost": "Once the host checks succeed, this pull request joins the end of the queue. A change to the head or base also lets it rejoin.",
   "landing.publishAgain": "Choose Resume landing to rejoin the end of the queue. Once the new gate passes, publish again to replace the host branch.",
   "landing.rejoin": "Resolve the reason above to rejoin the end of the queue. A change to the head or base also lets it rejoin.",
