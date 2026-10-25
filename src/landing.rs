@@ -771,7 +771,7 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
 /// Restores only refs implied by committed queue entries. Startup calls this
 /// before accepting requests, so even an immediate backup includes their objects.
 /// The caller holds the repository lock; no eligibility or new gates are made.
-pub async fn repair_refs_locked(app: &App, repo: &Repo) -> AppResult<()> {
+pub async fn repair_refs_locked(app: &App, repo: &Repo) -> AppResult<Vec<crate::refs::RefChange>> {
     let id = repo.id.clone();
     let entries = app.store.read(move |r| active(r, &id)).await?;
     let dir = app.git.repo_dir(&repo.path);
@@ -802,8 +802,7 @@ pub async fn repair_refs_locked(app: &App, repo: &Repo) -> AppResult<()> {
             }
         }
     }
-    crate::refs::record_refs_locked(app, repo).await?;
-    Ok(())
+    crate::refs::record_refs_locked(app, repo).await
 }
 
 /// Gate checks remain visible after departure, including their retry attempts.

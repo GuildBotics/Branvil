@@ -1092,6 +1092,20 @@ mod tests {
         assert_eq!(run.tree, app.git.tree_oid(&dir, &shas[0]).await.unwrap());
         // Register the existing snapshot before moving the ref so branch_left sees both ends.
         crate::refs::record_refs(&app, &repo).await.unwrap();
+        let before =
+            serde_json::to_value(app.ci.head_checks(&repo, &shas[0]).await.unwrap().checks)
+                .unwrap();
+        app.git
+            .run_ok(Some(&dir), &["update-ref", "-d", "refs/branvil/gate/7"])
+            .await
+            .unwrap();
+        crate::refs::recover(&app).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(app.ci.head_checks(&repo, &shas[0]).await.unwrap().checks)
+                .unwrap(),
+            before,
+            "repairing a missing gate ref must not cancel its already registered jobs"
+        );
         entry.gate = Some(shas[1].clone());
         let saved = entry.clone();
         app.store
