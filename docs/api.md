@@ -845,7 +845,9 @@ exists, including a new gate for an already published head ("Webhook").
   successful execution of the same tree, job definition, network setting,
   and image digest (`docs/ci.md`, "Trust"). Such a check includes
   `reused_from: {"attempt_id","url","sha"}` linking its source; its
-  `artifact_names` resolve to the source's unpruned artifacts.
+  `artifact_names` resolve to the source's unpruned artifacts. Cache refresh
+  attempts are excluded from every checks response, including required checks
+  and landing gates, while their actual executions count toward estimates.
 - `checks_expected` is true when the head has a pipeline (valid or not) or
   Branvil cannot read whether it has one, or when the repository has required
   checks: a head without checks is then "not
@@ -876,10 +878,13 @@ is not the full sha of a commit of the repository.
 ### CI attempts
 
 - `GET /api/v1/repos/{repo}/jobs/{attempt_id}` →
-  `{"id","url","repository","job","attempt","sha","image_digest","reused_from","status","conclusion","details","cancel_requested","created_at","started_at","finished_at","artifact_names","log_bytes"}`.
+  `{"id","purpose","cache_refresh","url","repository","job","attempt","sha","image_digest","reused_from","status","conclusion","details","cancel_requested","created_at","started_at","finished_at","artifact_names","log_bytes"}`.
   `image_digest` is the configuration digest (`sha256:…`) of the image the
   job ran on, as its runner reported it; `null` when the job did not get that
-  far. `reused_from` is `null` for an actual execution, otherwise
+  far. `purpose` is `check` or `cache_refresh`. `cache_refresh` is the ID of
+  the refresh requested by a reused check, or `null`. Refreshes never count as
+  checks and cannot be manually retried. `reused_from` is `null` for an actual
+  execution, otherwise
   `{"attempt_id","url","sha"}` of its source execution. Its own log explains
   the reuse; the source URL leads to the execution log. `artifact_names` are
   the source's artifacts, empty after the source's retention expires.
@@ -906,7 +911,7 @@ is not the full sha of a commit of the repository.
   `cancel_requested: true` and is concluded `cancelled` when its runner stops
   (or its lease runs out). A completed attempt is returned unchanged.
 - `GET /api/v1/repos/{repo}/commits/{sha}/artifacts/{name}` →
-  `application/zip` with `Content-Length`; the artifact of the newest attempt
+  `application/zip` with `Content-Length`; the artifact of the newest check attempt
   of that commit that has it, resolving a reused result to its source's file.
   The source's original retention applies. `404 not_found` when there is none.
 
@@ -921,22 +926,23 @@ kind `runner` (created by `branvil runner register`); any other member gets
 - `POST /claim` `{"executor": "microsandbox", "executor_state": "ready"|"unavailable", "executor_detail"?: "..."}`
   → `204` (nothing queued, or the service is stopping: see "Stopping the
   service" in `docs/ci.md`) or
-  `{"attempt_id","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false,"queued_secs","reuse"}`.
+  `{"attempt_id","purpose","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false,"queued_secs","reuse"}`.
   `timeout_secs` is `null` when the pipeline gives none; the runner applies its
   own CPUs, memory, and time limit. `cache_scope` is `protected` for a run a
   protected branch asked for, the only runs that save the dependency cache
   (`docs/ci.md`). `queued_secs` is how long the attempt
   waited in the queue (from its registration to this claim).
+  `purpose` is `check` or `cache_refresh`; refreshes always execute with
+  protected scope and `reuse: null`.
   `reuse` is `null` or `{"attempt_id","sha","image_digest","cache_key"}`
   of the latest finished actual successful execution whose files have not
   been pruned, with the same repository,
-  tree, job definition, and network. `cache_key` may be `null`. Manual retries
-  receive no source. The runner compares the resolved image digest before
-  fetching source. If it matches, jobs without a cache or outside protected
-  scope may reuse; protected cached jobs also require a complete save of that
-  key on the runner within 24 hours. Otherwise the runner executes normally.
-  The executor state is shown in the diagnostics; a runner whose executor is
-  unavailable still claims and concludes `startup_failure`.
+  tree, job definition, and network. `cache_key` is present for cached jobs,
+  otherwise `null`. Manual retries and refresh attempts receive no reuse offer.
+  The runner compares the current image digest before fetching source. A match
+  succeeds without a VM. Protected cached jobs set `refresh_cache: true` at
+  finish if the save is absent, unreadable, or older than 24 hours. The executor
+  state appears in diagnostics; an unavailable executor still claims and concludes `startup_failure`.
 - `GET /attempts/{id}/source` → `application/x-git-bundle`: a v2 Git bundle of
   the commit as `HEAD`, with its history and the tags (`refs/tags/*`) whose
   commits it reaches.
@@ -948,13 +954,19 @@ kind `runner` (created by `branvil runner register`); any other member gets
 - `PUT /attempts/{id}/artifacts/{name}` zip bytes → `{"name","bytes"}`. The name
   must be one the job declares; `400 invalid` for anything not starting like a
   zip archive, `413 too_large` above `ci.artifact_max_mib`.
-- `POST /attempts/{id}/finish` `{"lease","conclusion","details"?,"image_digest"?,"reused_from"?,"cache_key"?}`
+- `POST /attempts/{id}/finish` `{"lease","conclusion","details"?,"image_digest"?,"reused_from"?,"cache_key"?,"refresh_cache"?}`
   → the attempt. `image_digest` is the configuration digest of the image the
   job ran on (`sha256:<64 hex>`, `400 invalid` otherwise), recorded on the
   attempt. An actual execution of a cached job reports its computed
   `cache_key` (64 hex characters); other jobs leave it `null`. A reused success
   reports the source attempt ID as `reused_from` and leaves `cache_key` and
   `details` null; the source is already identified by `reused_from` and the log.
+  `refresh_cache` defaults to false and is allowed only for a reused successful
+  protected job with a cache. When true, the same transaction enqueues a
+  `cache_refresh` attempt, or links the existing unfinished refresh for the
+  repository/job/cache key. A full queue skips it without delaying success.
+  The check includes `cache_refresh` (the attempt ID) and a link in `details`
+  when a refresh exists.
   The service validates that the source is an actual successful execution of
   the same repository, tree, job, network, and image and that reuse is allowed;
   an invalid reuse report is `400 invalid`. When a cancellation was requested

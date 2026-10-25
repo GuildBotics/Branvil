@@ -43,6 +43,8 @@ fn json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> AppResult<T> {
 #[derive(Serialize, Debug)]
 pub struct AttemptView {
     pub id: String,
+    pub purpose: queue::Purpose,
+    pub cache_refresh: Option<String>,
     pub url: String,
     pub repository: String,
     pub job: String,
@@ -69,6 +71,8 @@ async fn view(app: &Shared, a: &Attempt) -> AppResult<AttemptView> {
         .await?;
     Ok(AttemptView {
         id: a.id.clone(),
+        purpose: a.purpose,
+        cache_refresh: a.cache_refresh.clone(),
         url: format!("{}/{}/-/jobs/{}", app.base_url, a.repo_path, a.id),
         repository: a.repo_path.clone(),
         job: a.job.name.clone(),
@@ -292,6 +296,7 @@ struct ClaimInput {
 #[derive(Serialize)]
 pub struct ClaimView {
     pub attempt_id: String,
+    pub purpose: queue::Purpose,
     pub lease: String,
     pub expires_at: String,
     pub lease_secs: u64,
@@ -345,6 +350,7 @@ async fn claim(State(app): State<Shared>, c: Caller, body: axum::body::Bytes) ->
     app.events.publish("check", &a.repo_path, a.sha.clone());
     Ok(ok(ClaimView {
         attempt_id: a.id.clone(),
+        purpose: a.purpose,
         lease: cl.lease.clone(),
         expires_at: a.lease_expires_at.clone().unwrap_or_default(),
         lease_secs,
@@ -629,6 +635,8 @@ struct FinishInput {
     image_digest: Option<String>,
     reused_from: Option<String>,
     cache_key: Option<String>,
+    #[serde(default)]
+    refresh_cache: bool,
 }
 
 async fn finish(
@@ -645,6 +653,7 @@ async fn finish(
         )));
     }
     let now = util::now();
+    let queue_max = app.ci.config().queue_max;
     let a = app
         .store
         .write(move |w| {
@@ -658,7 +667,9 @@ async fn finish(
                     image_digest: input.image_digest,
                     reused_from: input.reused_from,
                     cache_key: input.cache_key,
+                    refresh_cache: input.refresh_cache,
                 },
+                queue_max,
                 &now,
             )
         })
@@ -784,6 +795,7 @@ mod tests {
                         "failure",
                         None,
                         queue::ResultInfo::default(),
+                        10,
                         &now,
                     )
                 })

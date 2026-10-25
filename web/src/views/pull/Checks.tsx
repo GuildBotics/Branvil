@@ -209,6 +209,7 @@ function CheckRow({ check, repo, required, onOpen }: { check: Check; repo: strin
           {t("ci.reason")}: {reason}
         </Text>
       )}
+      {check.cache_refresh && <Link to={href.job(repo, check.cache_refresh)}>{t("ci.cacheRefresh")}</Link>}
       {check.reused_from && (
         <Text size="xs" ml={24} mb={4}>
           <Link to={href.job(repo, check.reused_from.attempt_id)}>
@@ -277,6 +278,7 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
   const j = job.data;
   return (
     <Stack gap="md">
+      {j.purpose === "cache_refresh" && <Text fw={600}>{t("ci.cacheRefresh")}</Text>}
       <dl>
         <dt>{t("ci.commit")}</dt>
         <dd>
@@ -298,6 +300,12 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
                 {j.reused_from.attempt_id} · <Sha value={j.reused_from.sha} />
               </Link>
             </dd>
+          </>
+        )}
+        {j.cache_refresh && (
+          <>
+            <dt>{t("ci.cacheRefresh")}</dt>
+            <dd><Link to={href.job(repo, j.cache_refresh)}>{j.cache_refresh}</Link></dd>
           </>
         )}
         {j.details && (
@@ -329,7 +337,7 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
         attemptId={attemptId}
         action={
           <>
-            <Button size="xs" variant="default" onClick={() => retry.mutate()} disabled={retry.isPending}>
+            <Button size="xs" variant="default" onClick={() => retry.mutate()} disabled={retry.isPending || j.purpose === "cache_refresh"}>
               {t("ci.retry")}
             </Button>
             <Button size="xs" variant="default" onClick={() => cancel.mutate()} disabled={cancel.isPending || j.status === "completed"}>

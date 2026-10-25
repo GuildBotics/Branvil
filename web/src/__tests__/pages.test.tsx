@@ -188,9 +188,9 @@ describe("pages", () => {
       ...SHELL,
       [`GET /api/v1/repos/acme/demo/commits/${sha}`]: json(200, { sha, message: "Same tree", author: "Test", authored_at: "2026-10-14T10:00:00.000Z", parents: [] }),
       [`GET /api/v1/repos/acme/demo/commits/${sha}/checks`]: json(200, { sha, checks_expected: true, checks: [
-        { name: "test", status: "completed", conclusion: "success", attempt_id: "att_reused", attempt: 1, details: null, artifact_names: ["report"], reused_from: source },
+        { name: "test", status: "completed", conclusion: "success", attempt_id: "att_reused", attempt: 1, details: null, artifact_names: ["report"], reused_from: source, cache_refresh: "att_refresh", purpose: "check" },
       ] }),
-      "GET /api/v1/repos/acme/demo/jobs/att_reused": json(200, { id: "att_reused", job: "test", attempt: 1, sha, status: "completed", conclusion: "success", details: null, artifact_names: ["report"], reused_from: source }),
+      "GET /api/v1/repos/acme/demo/jobs/att_reused": json(200, { id: "att_reused", job: "test", attempt: 1, sha, status: "completed", conclusion: "success", details: null, artifact_names: ["report"], reused_from: source, cache_refresh: "att_refresh", purpose: "check" }),
       "GET /api/v1/repos/acme/demo/jobs/att_reused/log": json(200, { log: "reused result of att_original", log_bytes: 28, truncated: false }),
     });
     const user = userEvent.setup();
@@ -198,6 +198,7 @@ describe("pages", () => {
     const label = language === "ja" ? "再利用元" : "Reused from";
     const link = await screen.findByRole("link", { name: new RegExp(label) });
     expect(link).toHaveAttribute("href", "/acme/demo/-/jobs/att_original");
+    expect(screen.getByRole("link", { name: language === "ja" ? "キャッシュの更新" : "Cache refresh" })).toHaveAttribute("href", "/acme/demo/-/jobs/att_refresh");
     const reason = language === "ja" ? "理由" : "Reason";
     expect(screen.queryByText(new RegExp(reason))).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: language === "ja" ? "チェック test を開く" : "Open check test" }));
@@ -207,6 +208,22 @@ describe("pages", () => {
     expect(within(drawer).getByRole("link", { name: /att_original/ })).toHaveAttribute("href", "/acme/demo/-/jobs/att_original");
     expect(within(drawer).getByRole("link", { name: "report" })).toHaveAttribute("href", `/api/v1/repos/acme%2Fdemo/commits/${sha}/artifacts/report`);
     expect(await within(drawer).findByText("reused result of att_original")).toBeInTheDocument();
+  });
+
+  it.each(["en", "ja"] as const)("identifies a cache refresh and disables manual retry (%s)", async (language) => {
+    const sha = "f".repeat(40);
+    fakeApi({
+      ...SHELL,
+      "GET /api/v1/repos/acme/demo/pulls": page([]),
+      [`GET /api/v1/repos/acme/demo/commits/${sha}`]: json(200, { sha, message: "Same tree", author: "Test", parents: [] }),
+      [`GET /api/v1/repos/acme/demo/commits/${sha}/checks`]: json(200, { sha, checks_expected: true, checks: [] }),
+      "GET /api/v1/repos/acme/demo/jobs/att_refresh": json(200, { id: "att_refresh", job: "test", purpose: "cache_refresh", attempt: 2, sha, status: "completed", conclusion: "failure", details: "exit 1", artifact_names: [], reused_from: null }),
+      "GET /api/v1/repos/acme/demo/jobs/att_refresh/log": json(200, { log: "cache refresh failed", log_bytes: 20, truncated: false }),
+    });
+    renderApp("/acme/demo/-/jobs/att_refresh", language);
+    const drawer = await screen.findByRole("dialog", { name: /test/ });
+    expect(await within(drawer).findByText(language === "ja" ? "キャッシュの更新" : "Cache refresh")).toBeInTheDocument();
+    expect(within(drawer).getByRole("button", { name: language === "ja" ? "再実行" : "Retry" })).toBeDisabled();
   });
 
   it("shows the checks of the default branch's tip on a repository's page", async () => {

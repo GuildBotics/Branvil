@@ -132,11 +132,11 @@ with the same Git tree, parsed job definition, and network setting. Reused
 attempts cannot themselves be a source. Retention after claim does not reject
 finish or extend the source's file lifetime. After resolving the image and
 before fetching source, the runner checks that the image's configuration
-digest matches. A job without a cache,
-or an attempt outside the protected cache scope, then succeeds without a VM.
-A protected attempt with a cache also requires a complete save of the source's
-cache key on this runner within 24 hours; otherwise it executes and saves as
-usual. A different digest also executes as usual. Registration, queue order,
+digest matches. A matching attempt succeeds without a VM, including a
+protected job with a missing or old cache. For cached jobs the source must
+have recorded its cache key. A protected attempt requests a separate cache
+refresh when that key has no complete save on this runner within 24 hours.
+A different digest executes as usual. Registration, queue order,
 and commands are unchanged. Manual retries always execute, including after
 their first interruption.
 
@@ -176,8 +176,9 @@ merging or publishing, as with any other change.
 ## Runs, attempts, and states
 
 A **run** is the CI of one commit of one repository; an **attempt** is one try
-of one job (`att_<ULID>`, numbered 1, 2, … per job). Checks show the latest
-attempt of each job: a pull request's page shows its head's, a commit's page
+of one job (`att_<ULID>`, numbered 1, 2, … per job). An attempt's `purpose`
+is `check` or `cache_refresh`. Checks show the latest `check` attempt of each
+job: a pull request's page shows its head's, a commit's page
 that commit's, and a repository's page its default branch's tip
 (`GET …/pulls/{number}/checks`, `GET …/commits/{sha}/checks`).
 
@@ -246,14 +247,17 @@ Stopping the service:
 
 - SIGTERM (what `scripts/serve.sh` sends to switch builds, an update for
   instance) stops CI first: the service gives out no job to any runner and
-  waits until no job runs, at most `ci.stop_wait_secs` (default 3600 s, the
+  waits until no check runs, at most `ci.stop_wait_secs` (default 3600 s, the
   default job time limit), while it serves everything else, the runners'
   heartbeats, logs, and results among it. Jobs queued meanwhile wait and run
   after the next start. The diagnostics' and the CI settings' runner state is
   `stopping` meanwhile, and the GUI shows the owner a warning on every page; the
   service's log says how many jobs it waits for, and its standard output says
   `branvil stopping: waiting for …` (which `scripts/serve.sh` reads).
-- A job still running when that time is up is interrupted ("Interrupted:
+- Cache-refresh attempts are interrupted and requeued immediately when stopping
+  starts; they do not use the wait period. Their purpose and cache key survive
+  the requeue. Checks continue to use the wait period.
+- A check still running when that time is up is interrupted ("Interrupted:
   Branvil stopped …; queued again in its place") and queued again in its place,
   so the next start runs it before the jobs queued after it (one already
   interrupted once ends for good, as above); the service then exits with
@@ -301,7 +305,7 @@ Logs are files `<data>/ci/logs/<attempt id>.log`, artifacts
 artifacts an attempt has (written after the file is in place). Files that
 belong to no attempt are removed at start (orphan collection). An artifact of
 a commit is downloaded with `GET …/commits/{sha}/artifacts/{name}` (the newest
-attempt of the commit that has it).
+check attempt of the commit that has it, resolving reuse to its source).
 
 The runner collects artifact paths from the work directory without following
 symbolic links: a link is skipped and noted in the log, a path through a link
@@ -315,9 +319,22 @@ scope is `protected`). When a protected branch comes to want a commit whose
 jobs ran for a pull request or landing gate, jobs with a cache get
 protected attempts (one still running for the pull request is stopped), and an
 attempt still queued takes its run's scope when a runner claims it. These
-attempts execute only when they cannot reuse a result with a recent cache
-save. When the branch moves on before they end, they are superseded and the
-next commit's run may save the cache.
+check attempts execute only when they cannot reuse a result. Reused protected
+checks request separate cache-refresh attempts when their cache needs a save.
+The service records the successful check and enqueues its refresh in the same
+transaction. At most one queued or running refresh exists per repository,
+job name, and cache key, even across commits. A full queue skips the refresh;
+a later request can enqueue it. The check links to the new or existing refresh.
+
+Refresh attempts always execute in protected scope and save after success.
+They never appear in commit checks, required checks, readiness, or landing gates;
+their waiting, execution, or failure therefore does not delay automatic updates.
+They survive branch movement. Successful refreshes can supply reuse results
+and duration estimates. They share queue limits and file retention with checks.
+Their pages identify them as cache refreshes; manual retry is only for checks.
+If an image tag changes before execution, the refresh computes and saves the
+key for the image it actually runs.
+
 A pull request's run (`branch:<name>`) and a gate's run
 (`branch:gate/<number>`) restore the same entries and save nothing (their logs
 say `cache not saved`): they cannot plant a cache entry that the default branch
@@ -341,9 +358,10 @@ their total keeps both until the pull requests catch up.
 
 Each complete save records its time alongside the cached contents before
 they replace the old entry. Restoring updates the last-use time for eviction
-but never the save time. Reuse of a protected job requires a save no more than
-24 hours old (`CACHE_REFRESH_SECS`); a missing save timestamp, an evicted entry,
-or a future timestamp requires execution. A matching tree and image imply the
+but never the save time. A protected reused job requests a refresh when its
+save is more than 24 hours old (`CACHE_REFRESH_SECS`); a missing save timestamp,
+an evicted entry, a future timestamp, or an unreadable save also requests a
+refresh. A matching tree and image imply the
 same key, so this check uses the source execution's recorded key without
 fetching or checking out the source.
 

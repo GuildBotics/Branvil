@@ -303,7 +303,7 @@ impl Api {
             .post(self.at(&format!("/runner/attempts/{}/finish", c.attempt_id)))
             .bearer_auth(&self.token)
             .json(&serde_json::json!({"lease": c.lease, "conclusion": conclusion, "details": details,
-                "image_digest": info.image_digest, "reused_from": info.reused_from, "cache_key": info.cache_key}))
+                "image_digest": info.image_digest, "reused_from": info.reused_from, "cache_key": info.cache_key, "refresh_cache": info.refresh_cache}))
             .send()
             .await
             .map_err(Self::net)?;
@@ -758,10 +758,15 @@ impl Runner {
                     "image digest differs (source {}, current {digest})",
                     source.image_digest
                 ))
-            } else if job.cache.is_some() && c.cache_scope == "protected" {
-                match source.cache_key.as_deref() {
-                    None => Some("source has no cache key".into()),
-                    Some(key) => match self.cache.saved_age(key, std::time::SystemTime::now()) {
+            } else {
+                if job.cache.is_some()
+                    && c.cache_scope == "protected"
+                    && let Some(key) = &source.cache_key
+                {
+                    info.refresh_cache = match self
+                        .cache
+                        .saved_age(key, std::time::SystemTime::now())
+                    {
                         Ok(Some(age))
                             if age <= Duration::from_secs(workspace::CACHE_REFRESH_SECS) =>
                         {
@@ -771,18 +776,28 @@ impl Runner {
                                 workspace::CACHE_REFRESH_SECS
                             ))
                             .await;
-                            None
+                            false
                         }
-                        Ok(Some(age)) => Some(format!(
-                            "cache {key} last saved {} s ago (older than {} s)",
-                            age.as_secs(),
-                            workspace::CACHE_REFRESH_SECS
-                        )),
-                        Ok(None) => Some(format!("cache {key} has no complete save")),
-                        Err(e) => Some(format!("cache {key} save cannot be checked: {e}")),
-                    },
+                        Ok(Some(age)) => {
+                            say(format!("cache {key} last saved {} s ago (older than {} s); requesting refresh", age.as_secs(), workspace::CACHE_REFRESH_SECS)).await;
+                            true
+                        }
+                        Ok(None) => {
+                            say(format!(
+                                "cache {key} has no complete save; requesting refresh"
+                            ))
+                            .await;
+                            true
+                        }
+                        Err(e) => {
+                            say(format!(
+                                "cache {key} save cannot be checked: {e}; requesting refresh"
+                            ))
+                            .await;
+                            true
+                        }
+                    };
                 }
-            } else {
                 None
             };
             if let Some(reason) = reason {
@@ -1449,7 +1464,8 @@ mod tests {
             .store
             .read(move |r| {
                 Ok(crate::ci::queue::attempts_of(r, &repo, &sha)?
-                    .pop()
+                    .into_iter()
+                    .rfind(|a| a.purpose == crate::ci::queue::Purpose::Check)
                     .unwrap())
             })
             .await
@@ -1627,7 +1643,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn protected_reuse_requires_a_recent_save_not_a_recent_restore() {
+    async fn protected_reuse_refreshes_separately_from_checks() {
         let s = service("[[jobs]]\nname = \"build\"\nimage = \"alpine\"\ncommands = [\"write target/out built\"]\ncache = { paths = [\"target\"] }\n").await;
         let runner = Runner::new(
             Api::new(&s.url, &s.runner_token),
@@ -1665,13 +1681,62 @@ mod tests {
             .unwrap();
         let sha = empty_main(&s, "old save despite fresh restore").await;
         runner.once(&fake).await.unwrap();
-        let refreshed = result_of(&s, &sha).await;
+        let reused = result_of(&s, &sha).await;
+        assert!(reused.reused_from.is_some());
+        assert_eq!(
+            fake.ran.lock().unwrap().len(),
+            1,
+            "reused check starts no VM"
+        );
+        let refresh_id = reused.cache_refresh.unwrap();
+        assert!(
+            s.app
+                .ci
+                .head_checks(&s.repo, &sha)
+                .await
+                .unwrap()
+                .checks
+                .iter()
+                .all(|c| c.succeeded())
+        );
+        runner.once(&fake).await.unwrap();
+        let refreshed = s
+            .app
+            .store
+            .read(move |r| crate::ci::queue::get_attempt(r, &refresh_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.purpose, crate::ci::queue::Purpose::CacheRefresh);
         assert!(refreshed.reused_from.is_none());
         assert_eq!(refreshed.cache_key.as_deref(), Some(key.as_str()));
         let log = s.app.ci.log_tail(&refreshed.id, 1 << 20).await.unwrap().0;
-        assert!(
-            log.contains("older than 86400 s") && log.contains("cache saved"),
-            "{log}"
+        assert!(log.contains("cache saved"), "{log}");
+        let mut timed = refreshed.clone();
+        timed.started_at = Some("2026-10-14T10:00:00.000Z".into());
+        timed.finished_at = Some("2026-10-14T10:00:42.000Z".into());
+        s.app
+            .store
+            .write(move |w| {
+                w.put(
+                    crate::store::CI_ATTEMPTS,
+                    &crate::ci::queue::Attempt::key(&timed.id),
+                    &timed,
+                )
+            })
+            .await
+            .unwrap();
+        let mut estimates = vec![crate::ci::Check {
+            name: "build".into(),
+            status: "in_progress".into(),
+            attempt_id: Some("running".into()),
+            ..Default::default()
+        }];
+        s.app.ci.estimate(&s.repo, &sha, &mut estimates).await;
+        assert_eq!(
+            estimates[0].expected_secs,
+            Some(42),
+            "refresh execution supplies estimates"
         );
         let sha = empty_main(&s, "after refresh").await;
         runner.once(&fake).await.unwrap();
@@ -1682,14 +1747,14 @@ mod tests {
         let sha = empty_main(&s, "missing save").await;
         runner.once(&fake).await.unwrap();
         let missing = result_of(&s, &sha).await;
-        assert!(missing.reused_from.is_none());
-        assert_eq!(fake.ran.lock().unwrap().len(), 3);
+        assert!(missing.reused_from.is_some());
+        assert_eq!(fake.ran.lock().unwrap().len(), 2);
+        assert!(missing.cache_refresh.is_some());
         let log = s.app.ci.log_tail(&missing.id, 1 << 20).await.unwrap().0;
-        assert!(
-            log.contains("has no complete save") && log.contains("cache saved"),
-            "{log}"
-        );
+        assert!(log.contains("has no complete save"), "{log}");
 
+        runner.once(&fake).await.unwrap();
+        assert_eq!(fake.ran.lock().unwrap().len(), 3);
         std::fs::remove_dir_all(&entry).unwrap();
         let sha = empty_main(&s, "branch reuse needs no save").await;
         let (repo, commit) = (s.repo.id.clone(), sha.clone());
