@@ -2,7 +2,7 @@
 // Desktop's are.
 
 import { ActionIcon, Alert, Avatar, Badge, Button, Card, CopyButton as MantineCopy, Group, Menu, Text, Textarea, Tooltip } from "@mantine/core";
-import { Check, Copy, SmilePlus } from "lucide-react";
+import { Anvil, Check, Copy, SmilePlus } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { isApiError } from "../api/client";
 import { REACTIONS, type Comment, type MemberKind, type Reaction, type ReactionEntry } from "../api/types";
@@ -110,7 +110,7 @@ export function MemberAvatar({ name, kind, size = 22 }: { name: string; kind?: M
   const src = useMemberAvatar(name);
   return (
     <Avatar src={src} size={size} radius="xl" color={kind === "agent" ? "teal" : "gray"} variant="light" alt={name}>
-      {name.slice(0, 1).toUpperCase()}
+      {name.toLowerCase() === "branvil" ? <Anvil size={Math.round(size * 0.7)} role="img" aria-label="Branvil" /> : name.slice(0, 1).toUpperCase()}
     </Avatar>
   );
 }

@@ -1,4 +1,4 @@
-import { Card, Group, Select, Text, TextInput } from "@mantine/core";
+import { Card, Group, Select, Stack, Text, TextInput } from "@mantine/core";
 import { useQueries } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -12,6 +12,8 @@ import { keys } from "../query/keys";
 import { Link, navigate } from "../router/Router";
 import { href } from "../router/routes";
 import { rollup, type CiRollup } from "./board/ordering";
+import { LandingBadge } from "./pull/LandingStatus";
+import { LandingQueue } from "./pulls/LandingQueue";
 import { TipChecks } from "./pulls/TipChecks";
 import { ReviewersCell } from "./pulls/ReviewersCell";
 
@@ -41,6 +43,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
   const kindOf = useMemberKinds();
   const [state, setState] = useState<State>("open");
   const [text, setText] = useState("");
+  const repoOf = (path: string) => repos.data?.items.find((r) => r.path === path);
   const paths = useMemo(
     () => (repos.data?.items ?? []).map((r) => r.path).filter((p) => p.startsWith(`${workspace}/`)),
     [repos.data, workspace],
@@ -59,7 +62,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
 
   return (
-    <>
+    <Stack gap="lg">
       <PageHeader
         title={t("pulls.title")}
         meta={
@@ -68,6 +71,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
           </Text>
         }
       />
+      {repo && <LandingQueue repo={repo} />}
       <Card p="lg">
         <Group gap="sm" mb={14} role="search" aria-label={t("pulls.filters")}>
           <TextInput
@@ -132,6 +136,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
                     <Group gap={4} role="cell" wrap="nowrap">
                       <StateBadge tone={s === "closed" ? "neutral" : "success"}>{t(`pull.state.${s}`)}</StateBadge>
                       {p.draft && <StateBadge tone="warning">{t("pull.draft")}</StateBadge>}
+                      {p.state === "open" && p.landing && <LandingBadge landing={p.landing} host={repoOf(p.repository)?.upstream != null} />}
                     </Group>
                     <span role="cell">{p.state === "open" && <CiCell pull={p} load={i < CI_BUDGET} />}</span>
                     <Group gap={6} role="cell" wrap="nowrap">
@@ -159,6 +164,6 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
         )}
         <TipChecks key={repo ?? ALL_REPOS} workspace={workspace} paths={paths} repo={repo} />
       </Card>
-    </>
+    </Stack>
   );
 }

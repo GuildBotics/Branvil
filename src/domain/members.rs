@@ -130,6 +130,9 @@ pub struct NewMember {
 /// the automatic runner).
 pub fn insert_member(w: &Wtx, input: &NewMember) -> AppResult<Member> {
     util::validate_member_name(&input.name)?;
+    if util::fold(&input.name) == "branvil" {
+        return Err(AppError::invalid("The member name branvil is reserved."));
+    }
     let key = Member::key(&input.name);
     if w.exists(store::MEMBERS, &key)? {
         return Err(AppError::conflict(format!(

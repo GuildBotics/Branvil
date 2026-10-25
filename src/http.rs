@@ -1292,6 +1292,7 @@ pub fn router(app: Shared) -> Router {
         .route("/admin/backup", post(crate::backup::http_backup))
         .merge(crate::upstream::http::routes())
         .merge(crate::autoland::routes())
+        .merge(crate::landing::routes())
         .fallback(|| async { AppError::not_found("No such endpoint.") })
         .layer(axum::extract::DefaultBodyLimit::max(body_limit))
         .layer(middleware::from_fn_with_state(app.clone(), idempotency));

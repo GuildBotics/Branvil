@@ -17,12 +17,13 @@ the three paths where the two products meet over HTTP and Git:
 - checks: ``main`` holds a pipeline of one job; the pull request is not ready
   while its head's job is pending, is ready once a runner (this test, through
   the runner API) finishes that commit's job, and is not ready again when its
-  head moves on.
+  head moves on; a head behind the base exposes its gate's queued, successful,
+  failed, or conflicting check through the API and the provider.
 
-Only the owner's setup and merge and the runner's claim and finish go to the
-API directly; every result is read through the provider. Everything else that
-the provider does is covered by GuildBotics' own port contracts and Branvil's
-tests. Run it with ``scripts/guildbotics-smoke.sh``.
+The owner's setup and merge, the runner's claim and finish, and the gate's
+wire checks go to the API directly; provider checks are compared with them.
+Everything else the provider does is covered by GuildBotics' own port
+contracts and Branvil's tests. Run it with ``scripts/guildbotics-smoke.sh``.
 
 Client-side Git never reads the user's configuration: ``GIT_CONFIG_NOSYSTEM``,
 an empty ``GIT_CONFIG_GLOBAL``, ``GIT_TERMINAL_PROMPT=0``, ``credential.helper``
@@ -245,9 +246,9 @@ class World:
             {"expected_head": head, "expected_base": self.main},
         )
 
-    def finish_job(self, sha: str) -> None:
-        """Claim the queued attempts and conclude them ``success`` until the
-        one of ``sha`` is done."""
+    def finish_job(self, sha: str, conclusion: str = "success") -> None:
+        """Finish queued attempts until ``sha`` concludes with ``conclusion``;
+        other commits succeed."""
         while True:
             response = self.service.http.post(
                 "/runner/claim",
@@ -260,7 +261,11 @@ class World:
                 "POST",
                 f"/runner/attempts/{attempt['attempt_id']}/finish",
                 self.runner,
-                {"lease": attempt["lease"], "conclusion": "success", "image_digest": DIGEST},
+                {
+                    "lease": attempt["lease"],
+                    "conclusion": conclusion if attempt["sha"] == sha else "success",
+                    "image_digest": DIGEST,
+                },
             )
             if attempt["sha"] == sha:
                 return
@@ -529,5 +534,104 @@ def test_a_reused_result_is_ready_through_the_provider(world: World) -> None:
         ready = await code.readiness(created.target.url)
         assert (ready.head_sha, ready.rollup, ready.readiness) == (head, "success", "ready")
         assert len(ready.checks) == 1
+
+    world.run(scenario)
+
+
+@pytest.mark.parametrize("conclusion", ["success", "failure", "conflict"])
+def test_a_behind_head_exposes_the_landing_gate_checks(
+    world: World, conclusion: str
+) -> None:
+    async def scenario(code: CodeHostingService, _: TicketService) -> None:
+        repo_api = f"/repos/{world.seg()}"
+        service = world.service
+        repo = service.call("GET", repo_api, service.owner)
+        service.call(
+            "PATCH",
+            repo_api,
+            service.owner,
+            {"revision": repo["revision"], "required_checks": ["test"]},
+        )
+        head = await _push(world, code, world.main, "feature")
+        created = await code.create_pull_request(
+            REPO, "feature", "", "Behind the base", "", draft=False, tickets=[]
+        )
+        world.finish_job(head)
+        # Advance the base without changing or approving the pull request's head.
+        files = (
+            {"a.py": "# a conflicting base change\n"}
+            if conclusion == "conflict"
+            else {"base.txt": "another change\n"}
+        )
+        base = world.git.commit(world.main, files)
+        credential = await code.git_credential()
+        assert credential is not None
+        world.git.push(
+            await code.clone_url(REPO),
+            base,
+            "advance-base",
+            credential.username,
+            credential.password,
+        )
+        other = await code.create_pull_request(
+            REPO, "advance-base", "", "Advance the base", "", draft=False, tickets=[]
+        )
+        world.finish_job(base)
+        world.merge(other.target.url, base)
+        number = created.target.url.rpartition("/-/pulls/")[2]
+        pull_api = f"{repo_api}/pulls/{number}"
+        service.call(
+            "POST",
+            f"{pull_api}/reviews",
+            service.owner,
+            {"verdict": "approve", "commit": head},
+        )
+
+        async def landing(state: str) -> dict[str, Any]:
+            for _ in range(100):
+                pull = service.call("GET", pull_api, service.owner)
+                entry = pull.get("landing")
+                if entry and entry["state"] == state:
+                    return entry
+                await asyncio.sleep(0.1)
+            pytest.fail(f"landing did not become {state}: {pull}")
+
+        async def gate_check(name: str, status: str) -> dict[str, Any]:
+            for _ in range(100):
+                report = service.call("GET", f"{pull_api}/checks", service.owner)
+                for check in report["checks"]:
+                    if check["name"] == name and check["status"] == status:
+                        # A gating entry precedes CI registration. Wait for its
+                        # actual attempt before asking the runner to claim it.
+                        if status != "queued" or check.get("attempt_id"):
+                            return check
+                await asyncio.sleep(0.1)
+            pytest.fail(f"{name} did not become {status}: {report}")
+
+        if conclusion == "conflict":
+            entry = await landing("left")
+            assert entry["reason"]["files"] == ["a.py"]
+        else:
+            entry = await landing("gating")
+            queued = await gate_check("gate/test", "queued")
+            assert queued["conclusion"] is None
+            pending = await code.readiness(created.target.url)
+            assert pending.behind_by == 1 and pending.out_of_date is True
+            [gate] = [c for c in pending.checks if c.name == "gate/test"]
+            assert (gate.status, gate.conclusion) == ("queued", None)
+            world.finish_job(entry["gate"], conclusion)
+            await landing("passed" if conclusion == "success" else "left")
+
+        name = "gate" if conclusion == "conflict" else "gate/test"
+        wire = await gate_check(name, "completed")
+        expected = "success" if conclusion == "success" else "failure"
+        assert wire["conclusion"] == expected
+        if conclusion == "conflict":
+            assert "a.py" in wire["details"]
+        result = await code.readiness(created.target.url)
+        assert result.head_sha == head
+        assert result.behind_by == 1 and result.out_of_date is True
+        [gate] = [c for c in result.checks if c.name == name]
+        assert (gate.status, gate.conclusion) == (wire["status"], wire["conclusion"])
 
     world.run(scenario)

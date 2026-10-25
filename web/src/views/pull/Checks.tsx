@@ -54,7 +54,7 @@ function useDuration() {
  * is shown, so it is shown only once the job started), and while it runs what
  * its estimate leaves: the time remaining, or once that is past, the time the
  * job took before. */
-function RunTime({ startedAt, finishedAt, expectedSecs }: { startedAt: string; finishedAt?: string | null; expectedSecs?: number }) {
+export function RunTime({ startedAt, finishedAt, expectedSecs }: { startedAt: string; finishedAt?: string | null; expectedSecs?: number }) {
   const t = useT();
   const duration = useDuration();
   const running = !finishedAt;
@@ -90,7 +90,7 @@ export function ChecksCard({ repo, number, requiredChecks, onOpen }: { repo: str
   return (
     <CheckList repo={repo} title={t("pull.checks")} query={checks} sha={checks.data?.head_sha} requiredChecks={requiredChecks} onOpen={onOpen}>
       {behind > 0 && (
-        <Text size="sm" c="var(--color-warning-text)" mb="xs">
+        <Text size="sm" c="dimmed" mb="xs">
           {t("pull.behindBy", { count: behind })}
         </Text>
       )}
@@ -160,7 +160,7 @@ function CheckList({
             <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
               {query.data.checks.map((c) => (
                 <li key={`${c.name}#${c.attempt_id ?? "pending"}`}>
-                  <CheckRow check={c} repo={repo} required={requiredChecks.includes(c.name)} onOpen={onOpen} />
+                  <CheckRow check={c} repo={repo} required={requiredChecks.includes(c.name) || (c.name.startsWith("gate/") && requiredChecks.includes(c.name.slice(5)))} onOpen={onOpen} />
                 </li>
               ))}
             </ul>

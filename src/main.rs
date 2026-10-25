@@ -14,6 +14,7 @@ mod events;
 mod git;
 mod hooks;
 mod http;
+mod landing;
 mod model;
 mod rank;
 mod refs;

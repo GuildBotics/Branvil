@@ -581,25 +581,22 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
     txn.commit().unwrap();
 }
 
-/// Recreates schema 14 CI records in a stopped database.
-pub fn as_schema_14(db: &Path) {
-    edit_records(db, "ci_runs", |r| {
-        assert!(r.as_object_mut().unwrap().remove("tree").is_some());
-    });
-    edit_records(db, "ci_attempts", |a| {
-        let a = a.as_object_mut().unwrap();
-        for field in ["reused_from", "cache_key", "allow_reuse"] {
-            assert!(a.remove(field).is_some());
+/// Recreates the immediately preceding schema in a stopped database.
+pub fn as_schema_15(db: &Path) {
+    edit_records(db, "pulls", |p| {
+        p.as_object_mut().unwrap().remove("merged_head");
+        if let Some(up) = p["upstream"].as_object_mut() {
+            up.insert("notified_at".into(), Value::Null);
         }
     });
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(14);
+            *v = json!(15);
         }
     });
     let database = redb::Database::open(db).unwrap();
     let txn = database.begin_write().unwrap();
-    txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new("ix_ci_tree"))
+    txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new("landing"))
         .unwrap();
     txn.commit().unwrap();
 }

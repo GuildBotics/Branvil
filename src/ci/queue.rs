@@ -1302,6 +1302,57 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn a_retry_survives_departure_only_when_it_is_queued_after_the_departure() {
+        for branch in ["gate/3", "feature"] {
+            for departure_first in [false, true] {
+                let (_dir, store) = store();
+                store
+                    .write_sync(|w| {
+                        register(w, reg("s1", branch, &["test"]), 10, T0)?;
+                        let original = claim(w, "runner", 60, T0)?.unwrap();
+                        finish(
+                            w,
+                            &original.attempt.id,
+                            &original.lease,
+                            "failure",
+                            None,
+                            ResultInfo::default(),
+                            T0,
+                        )?;
+                        if departure_first {
+                            branch_left(w, "repo_1", "s1", branch, "deleted", T1)?;
+                        }
+                        let retry = retry(w, &original.attempt.id, 10, T1)?;
+                        assert_eq!(retry.number, 2);
+                        if !departure_first {
+                            branch_left(w, "repo_1", "s1", branch, "deleted", T1)?;
+                        }
+                        let run = get_run(w, "repo_1", "s1")?.unwrap();
+                        assert!(run.branches.is_empty());
+                        assert_eq!(run.superseded_by.as_deref(), Some("deleted"));
+                        let attempt = get_attempt(w, &retry.id)?.unwrap();
+                        if departure_first {
+                            assert_eq!(attempt.status, "queued");
+                            assert!(!attempt.superseded);
+                            assert_eq!(pending_count(w, 10)?, 1);
+                            let claimed = claim(w, "runner", 60, T1)?.unwrap();
+                            assert_eq!(claimed.attempt.id, retry.id);
+                        } else {
+                            assert_eq!(attempt.status, "completed");
+                            assert_eq!(attempt.conclusion.as_deref(), Some("cancelled"));
+                            assert!(attempt.superseded);
+                            assert!(attempt.details.unwrap().starts_with("Superseded:"));
+                            assert_eq!(pending_count(w, 10)?, 0);
+                            assert!(claim(w, "runner", 60, T1)?.is_none());
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+        }
+    }
+
     /// A fast-forward merge: main comes to want a commit whose jobs ran for
     /// the pull request. The jobs with a cache run again, once, as main's.
     #[test]

@@ -82,6 +82,17 @@ async fn publish(
     Ok(ok(ops::publish(&app, &c, &repo, number(&n)?, input).await?))
 }
 
+async fn resume_landing(
+    State(app): State<Shared>,
+    c: Caller,
+    P((repo, n)): P<(String, String)>,
+    J(input): J<MergeInput>,
+) -> R {
+    Ok(ok(
+        ops::resume_landing(&app, &c, &repo, number(&n)?, input).await?
+    ))
+}
+
 async fn alerts(State(app): State<Shared>, c: Caller, P(repo): P<String>, q: Q) -> R {
     let state = match q.0.get("state").map(String::as_str) {
         None | Some("open") => AlertState::Open,
@@ -113,6 +124,10 @@ pub fn routes() -> Router<Shared> {
         .route(
             "/repos/{repo}/pulls/{number}/publish",
             get(preview).post(publish),
+        )
+        .route(
+            "/repos/{repo}/pulls/{number}/landing/resume",
+            post(resume_landing),
         )
         .route(
             "/members/{name}/accounts/{provider}",

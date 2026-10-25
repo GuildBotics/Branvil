@@ -34,6 +34,13 @@ pub struct Output {
     pub truncated: bool,
 }
 
+/// The commit tested before a pull request lands, or the paths preventing it.
+#[derive(Debug, PartialEq)]
+pub enum GateCommit {
+    Ready { sha: String, tree: String },
+    Conflicts { files: Vec<String> },
+}
+
 impl Output {
     pub fn ok(&self) -> bool {
         self.status == 0
@@ -240,6 +247,16 @@ impl Git {
         Ok(out.ok())
     }
 
+    pub async fn tree_oid(&self, dir: &Path, commit: &str) -> AppResult<Option<String>> {
+        let out = self
+            .run(
+                Some(dir),
+                &["rev-parse", "--verify", "-q", &format!("{commit}^{{tree}}")],
+            )
+            .await?;
+        Ok(out.ok().then(|| out.text().trim().to_string()))
+    }
+
     /// `(sha, author name, author date, parents, message)` of a commit.
     pub async fn commit_info(
         &self,
@@ -303,6 +320,105 @@ impl Git {
                 out.stderr.trim()
             ))),
         }
+    }
+
+    /// Merges two commits without a worktree. A conflicted merge's tree is
+    /// deliberately discarded; only its unambiguously NUL-delimited paths
+    /// leave this method.
+    pub async fn merge_tree(
+        &self,
+        dir: &Path,
+        base: &str,
+        head: &str,
+    ) -> AppResult<Result<String, Vec<String>>> {
+        let out = self
+            .run(
+                Some(dir),
+                &[
+                    "merge-tree",
+                    "--write-tree",
+                    "--name-only",
+                    "--no-messages",
+                    "-z",
+                    base,
+                    head,
+                ],
+            )
+            .await?;
+        if out.truncated || !matches!(out.status, 0 | 1) {
+            return Err(AppError::internal(format!(
+                "git merge-tree failed: {}",
+                out.stderr.trim()
+            )));
+        }
+        let mut parts = out.stdout.split(|b| *b == 0);
+        let tree = String::from_utf8_lossy(parts.next().unwrap_or_default()).to_string();
+        if out.ok() {
+            return Ok(Ok(tree.trim().to_string()));
+        }
+        let mut files: Vec<String> = parts
+            .take_while(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect();
+        files.sort();
+        files.dedup();
+        Ok(Err(files))
+    }
+
+    /// A head already containing the base needs no new commit. Otherwise,
+    /// creates the merge result with base first in its parent list. Identity
+    /// is explicit because service Git inherits no author configuration.
+    pub async fn gate_commit(
+        &self,
+        dir: &Path,
+        base: &str,
+        head: &str,
+        number: u64,
+    ) -> AppResult<GateCommit> {
+        if self.is_ancestor(dir, base, head).await? {
+            let tree = self
+                .run_ok(Some(dir), &["rev-parse", &format!("{head}^{{tree}}")])
+                .await?;
+            return Ok(GateCommit::Ready {
+                sha: head.to_string(),
+                tree,
+            });
+        }
+        let tree = match self.merge_tree(dir, base, head).await? {
+            Ok(tree) => tree,
+            Err(files) => return Ok(GateCommit::Conflicts { files }),
+        };
+        let out = self
+            .run_env(
+                Some(dir),
+                &[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    base,
+                    "-p",
+                    head,
+                    "-m",
+                    &format!("Branvil landing gate !{number}"),
+                ],
+                &[
+                    ("GIT_AUTHOR_NAME", "Branvil"),
+                    ("GIT_AUTHOR_EMAIL", "branvil@localhost"),
+                    ("GIT_COMMITTER_NAME", "Branvil"),
+                    ("GIT_COMMITTER_EMAIL", "branvil@localhost"),
+                ],
+            )
+            .await?;
+        if !out.ok() {
+            return Err(AppError::internal(format!(
+                "git commit-tree failed: {}",
+                out.stderr.trim()
+            )));
+        }
+        Ok(GateCommit::Ready {
+            sha: out.text().trim().to_string(),
+            tree,
+        })
     }
 
     /// Commits reachable from `from` and not from `not`.
@@ -572,6 +688,106 @@ pub fn valid_branch(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn commit_file(git: &Git, dir: &Path, file: &str, content: &str) -> String {
+        std::fs::write(dir.join(file), content).unwrap();
+        git.run_ok(None, &["-C", dir.to_str().unwrap(), "add", file])
+            .await
+            .unwrap();
+        git.run_env(
+            None,
+            &["-C", dir.to_str().unwrap(), "commit", "-qm", file],
+            &[
+                ("GIT_AUTHOR_NAME", "Test"),
+                ("GIT_AUTHOR_EMAIL", "test@example.invalid"),
+                ("GIT_COMMITTER_NAME", "Test"),
+                ("GIT_COMMITTER_EMAIL", "test@example.invalid"),
+            ],
+        )
+        .await
+        .unwrap();
+        git.run_ok(None, &["-C", dir.to_str().unwrap(), "rev-parse", "HEAD"])
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gate_commits_preserve_heads_merge_parents_and_report_conflict_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = Layout::new(&temp.path().join("service"));
+        layout.create().unwrap();
+        let git = Git::new(layout, 2, Duration::from_secs(10));
+        let work = temp.path().join("work");
+        git.run_ok(None, &["init", "-q", "-b", "main", work.to_str().unwrap()])
+            .await
+            .unwrap();
+        let initial = commit_file(&git, &work, "conflicted file\n.txt", "initial\n").await;
+        let dir = work.join(".git");
+        let head = commit_file(&git, &work, "feature.txt", "feature\n").await;
+        let GateCommit::Ready { sha, .. } =
+            git.gate_commit(&dir, &initial, &head, 7).await.unwrap()
+        else {
+            panic!("fast-forward head conflicts");
+        };
+        assert_eq!(sha, head, "an up-to-date head creates no commit");
+        git.run_ok(Some(&dir), &["update-ref", "refs/heads/main", &initial])
+            .await
+            .unwrap();
+        git.run_ok(
+            None,
+            &["-C", work.to_str().unwrap(), "reset", "--hard", &initial],
+        )
+        .await
+        .unwrap();
+        let base = commit_file(&git, &work, "main.txt", "main\n").await;
+        let GateCommit::Ready { sha, tree } = git.gate_commit(&dir, &base, &head, 7).await.unwrap()
+        else {
+            panic!("independent changes conflict");
+        };
+        assert_ne!(sha, head);
+        let (_, author, _, parents, _) = git.commit_info(&dir, &sha).await.unwrap().unwrap();
+        assert_eq!(author, "Branvil");
+        assert_eq!(
+            git.run_ok(Some(&dir), &["show", "-s", "--format=%s", &sha])
+                .await
+                .unwrap(),
+            "Branvil landing gate !7"
+        );
+        assert_eq!(parents, vec![base.clone(), head]);
+        let identities = git
+            .run_ok(
+                Some(&dir),
+                &["show", "-s", "--format=%an <%ae>%n%cn <%ce>", &sha],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            identities,
+            "Branvil <branvil@localhost>\nBranvil <branvil@localhost>"
+        );
+        for file in ["feature.txt", "main.txt"] {
+            assert!(
+                git.run(Some(&dir), &["cat-file", "-e", &format!("{tree}:{file}")])
+                    .await
+                    .unwrap()
+                    .ok()
+            );
+        }
+        let base = commit_file(&git, &work, "conflicted file\n.txt", "base\n").await;
+        git.run_ok(
+            None,
+            &["-C", work.to_str().unwrap(), "reset", "--hard", &initial],
+        )
+        .await
+        .unwrap();
+        let head = commit_file(&git, &work, "conflicted file\n.txt", "head\n").await;
+        assert_eq!(
+            git.gate_commit(&dir, &base, &head, 7).await.unwrap(),
+            GateCommit::Conflicts {
+                files: vec!["conflicted file\n.txt".into()]
+            }
+        );
+    }
 
     #[test]
     fn branch_names() {

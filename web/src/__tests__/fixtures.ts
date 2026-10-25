@@ -1,4 +1,4 @@
-import type { Card, PullRequest } from "../api/types";
+import type { Card, Landing, PullRequest } from "../api/types";
 
 /** A card of ticket `key` of `repository` (acme/demo unless `extra` names another). */
 export function card(key: string, lane: Card["lane"], extra: Partial<Card> = {}): Card {
@@ -35,6 +35,16 @@ export const HEAD = "a".repeat(40);
 export const NEW_HEAD = "b".repeat(40);
 export const BASE = "c".repeat(40);
 
+export function landing(extra: Partial<Landing> = {}): Landing {
+  return {
+    number: 3, base: "main", queued_at: "2026-10-14T10:00:00Z", resume_publish: false, published: true, error: null,
+    state: "passed", state_at: "2026-10-14T10:01:00Z", gate: HEAD,
+    base_sha: BASE, head_sha: HEAD, reason: null, position: 1,
+    first: { number: 3, published: true, state: "passed", state_at: "2026-10-14T10:01:00Z", error: null },
+    ...extra,
+  };
+}
+
 export function pull(extra: Partial<PullRequest> = {}): PullRequest {
   return {
     url: `${window.location.origin}/acme/demo/-/pulls/3`,
@@ -65,6 +75,7 @@ export function pull(extra: Partial<PullRequest> = {}): PullRequest {
     merged_at: null,
     merge_sha: null,
     upstream: null,
+    landing: landing(),
     revision: 1,
     ...extra,
   };

@@ -64,6 +64,7 @@ pub struct PullView {
     /// Set once published to the repository's upstream host.
     pub upstream: Option<PublishedView>,
     pub revision: u64,
+    pub landing: Option<crate::landing::LandingView>,
 }
 
 /// A published pull request as the API shows it (`Published` without what
@@ -83,8 +84,6 @@ pub struct PublishedView {
     pub stopped: Option<String>,
     /// Published by Branvil itself, the repository landing automatically.
     pub auto: bool,
-    /// When the webhook was told of that publish.
-    pub notified_at: Option<String>,
 }
 
 fn published_view(x: &Published) -> PublishedView {
@@ -100,7 +99,6 @@ fn published_view(x: &Published) -> PublishedView {
         error: x.error.clone(),
         stopped: x.stopped.clone(),
         auto: x.auto,
-        notified_at: x.notified_at.clone(),
     }
 }
 
@@ -166,7 +164,11 @@ fn review_states(p: &Pull, reviews: &[Review], head: &str) -> Vec<ReviewState> {
 }
 
 /// The review states of `p` with `head` as its current head.
-async fn read_review_states(app: &App, p: &Pull, head: &str) -> AppResult<Vec<ReviewState>> {
+pub(crate) async fn read_review_states(
+    app: &App,
+    p: &Pull,
+    head: &str,
+) -> AppResult<Vec<ReviewState>> {
     let (repo, number) = (p.repo.clone(), p.number);
     let reviews = app
         .store
@@ -175,7 +177,7 @@ async fn read_review_states(app: &App, p: &Pull, head: &str) -> AppResult<Vec<Re
     Ok(review_states(p, &reviews, head))
 }
 
-fn approvals(states: &[ReviewState]) -> u64 {
+pub(crate) fn approvals(states: &[ReviewState]) -> u64 {
     states.iter().filter(|s| s.approves()).count() as u64
 }
 
@@ -195,7 +197,7 @@ fn head_of(p: &Pull, tips: &Tips) -> Option<String> {
     }
     match p.upstream.as_ref().filter(|x| x.state == "merged") {
         Some(x) => x.pushed.clone(),
-        None => p.merge_sha.clone(),
+        None => p.merged_head.clone(),
     }
 }
 
@@ -271,6 +273,7 @@ pub async fn pull_view(app: &App, repo: &Repo, p: &Pull, tips: &Tips) -> AppResu
         merge_sha: p.merge_sha.clone(),
         upstream: p.upstream.as_ref().map(published_view),
         revision: p.revision,
+        landing: crate::landing::view(app, repo, p.number).await?,
     })
 }
 
@@ -282,6 +285,19 @@ pub fn load_pull(r: &impl Rd, repo: &Repo, number: u64) -> AppResult<Pull> {
                 repo.path
             ))
         })
+}
+
+/// Open pull requests from the repository's maintained index.
+pub fn open_pulls(r: &impl Rd, repo: &Repo) -> AppResult<Vec<Pull>> {
+    let prefix = Key::new().s(&repo.id).bytes();
+    let mut out = Vec::new();
+    for (_, n) in r.prefix_raw(store::IX_OPEN_PULLS, &prefix, None, usize::MAX)? {
+        let n = String::from_utf8_lossy(&n)
+            .parse()
+            .map_err(AppError::internal)?;
+        out.push(load_pull(r, repo, n)?);
+    }
+    Ok(out)
 }
 
 fn write_pull(w: &Wtx, old: Option<&Pull>, new: &Pull) -> AppResult<()> {
@@ -469,6 +485,7 @@ pub async fn create(
                 closed_at: None,
                 merged_at: None,
                 merge_sha: None,
+                merged_head: None,
                 merged_base: None,
                 upstream: None,
                 revision: 1,
@@ -901,11 +918,14 @@ pub async fn set_open(
     open: bool,
 ) -> AppResult<PullView> {
     let (repo, _) = visible(app, caller, repo_path, number).await?;
-    let r2 = repo.clone();
-    let p = app
-        .store
-        .write(move |w| set_open_in(w, &r2, number, open))
-        .await?;
+    let p = {
+        let lock = app.repo_lock(&repo.id);
+        let _guard = lock.lock().await;
+        let r2 = repo.clone();
+        app.store
+            .write(move |w| set_open_in(w, &r2, number, open))
+            .await?
+    };
     app.events.publish("pull", &repo.path, number.to_string());
     if open && p.state == "open" {
         app.ci.on_pull_opened(app, &repo, &p.head).await;
@@ -945,6 +965,7 @@ pub fn set_open_in(w: &Wtx, repo: &Repo, number: u64, open: bool) -> AppResult<P
         (false, "open") => {
             p.state = "closed".into();
             p.closed_at = Some(now.clone());
+            crate::landing::mark_closed(w, &repo.id, number)?;
         }
         _ => return Ok(p),
     }
@@ -1054,6 +1075,15 @@ pub async fn add_comment(
         .await?;
     app.events.publish("pull", &repo.path, number.to_string());
     Ok(comment_view(&c, &url))
+}
+
+/// A service-authored conversation entry follows the same activity ordering
+/// as a user's comment, without requiring a member account for Branvil.
+pub(crate) fn system_comment(w: &Wtx, repo: &Repo, number: u64, body: String) -> AppResult<()> {
+    let p = load_pull(w, repo, number)?;
+    let c = tickets::insert_comment(w, &target(&p), "branvil", body, None)?;
+    touch(w, repo, number, By::Nobody, &c.created_at)?;
+    Ok(())
 }
 
 /// Refuses an entry on a commit that is not the pull request's current head.
@@ -1595,6 +1625,7 @@ pub async fn checks(
             .count()
     };
     let mut checks = head.checks;
+    checks.extend(crate::landing::checks(app, &repo, number).await?);
     app.ci.estimate(&repo, &head_sha, &mut checks).await;
     if let Some(published) = &p.upstream
         && published.pushed.as_deref() == Some(head_sha.as_str())
@@ -1634,10 +1665,10 @@ fn not_mergeable(message: impl Into<String>) -> AppError {
 }
 
 /// The checks a merge and a publish share: open, not a draft, the head and
-/// base the owner saw, the head containing the base, the required checks
-/// succeeded on the head, and the required approvals of the head; for one
+/// base the owner saw, successful required head checks and approvals, and a
+/// passed gate at the front of the current base queue; for one
 /// made by the repository itself (`auto`), that it still lands by itself.
-/// Returns the head and the base. Call under the repository lock with the
+/// Returns the checked head, base, and gate. Call under the repository lock with the
 /// repository and the pull request read under it.
 pub async fn check_landable(
     app: &App,
@@ -1645,7 +1676,7 @@ pub async fn check_landable(
     p: &Pull,
     input: &MergeInput,
     auto: bool,
-) -> AppResult<(String, String)> {
+) -> AppResult<(String, String, String)> {
     let number = p.number;
     if auto && !repo.auto_land {
         return Err(not_mergeable(format!(
@@ -1659,7 +1690,6 @@ pub async fn check_landable(
     if p.draft {
         return Err(not_mergeable(format!("!{number} is a draft.")));
     }
-    let dir = app.git.repo_dir(&repo.path);
     let tips = tips(app, repo).await?;
     let head = tips.get(&p.head).cloned().unwrap_or_default();
     let base = tips.get(&p.base).cloned().unwrap_or_default();
@@ -1680,11 +1710,6 @@ pub async fn check_landable(
                 input.expected_base
             ),
         ));
-    }
-    if head == base || !app.git.is_ancestor(&dir, &base, &head).await? {
-        return Err(not_mergeable(format!(
-            "The head of !{number} does not contain the base or adds nothing; update the branch and review again."
-        )));
     }
     let checks = app.ci.head_checks(repo, &head).await?;
     let missing: Vec<&str> = repo
@@ -1711,7 +1736,37 @@ pub async fn check_landable(
             repo.required_approvals
         )));
     }
-    Ok((head, base))
+    let id = repo.id.clone();
+    let branch = p.base.clone();
+    let gate = app
+        .store
+        .read(move |r| {
+            let queue = crate::landing::active(r, &id)?;
+            Ok(queue.into_iter().find(|e| e.base == branch))
+        })
+        .await?;
+    let gate = gate
+        .filter(|e| {
+            e.number == number && e.state == "passed" && e.head_sha == head && e.base_sha == base
+        })
+        .and_then(|e| e.gate)
+        .ok_or_else(|| {
+            not_mergeable(format!(
+                "!{number} has not passed the current landing gate at the front of its queue."
+            ))
+        })?;
+    let gate_checks = app.ci.head_checks(repo, &gate).await?;
+    if !repo.required_checks.iter().all(|n| {
+        gate_checks
+            .checks
+            .iter()
+            .any(|c| &c.name == n && c.succeeded())
+    }) {
+        return Err(not_mergeable(
+            "The required landing gate checks have not succeeded.",
+        ));
+    }
+    Ok((head, base, gate))
 }
 
 pub async fn merge(
@@ -1751,7 +1806,8 @@ pub async fn merge_pull(
     }
     let r2 = repo.clone();
     let p = app.store.read(move |r| load_pull(r, &r2, number)).await?;
-    let (head, base) = check_landable(app, &repo, &p, &input, auto).await?;
+    crate::landing::reconcile_locked(app, &repo).await?;
+    let (head, base, gate) = check_landable(app, &repo, &p, &input, auto).await?;
     let dir = app.git.repo_dir(&repo.path);
     keep_merged(app, &repo, number, &head).await?;
     let entry = JournalEntry {
@@ -1759,7 +1815,7 @@ pub async fn merge_pull(
         repo: repo.id.clone(),
         refname: format!("refs/heads/{}", p.base),
         old: base.clone(),
-        new: head.clone(),
+        new: gate.clone(),
         op: JournalOp::Merge { number },
         created_at: util::now(),
     };
@@ -1771,7 +1827,7 @@ pub async fn merge_pull(
         .update_ref(
             &dir,
             &entry.refname,
-            &head,
+            &gate,
             &base,
             &format!("branvil: merge !{number}"),
         )
@@ -1795,6 +1851,7 @@ pub async fn merge_pull(
             Ok(p)
         })
         .await?;
+    crate::landing::remove_merged_ref(app, &repo, number).await?;
     retire_merged_head(app, &repo, &merged).await?;
     refs::record_refs_locked(app, &repo).await?;
     app.events.publish("pull", &repo.path, number.to_string());
@@ -1899,6 +1956,13 @@ pub fn mark_merged(
     p.merged_at = Some(now.clone());
     p.closed_at = Some(now.clone());
     p.merge_sha = Some(merge_sha.to_string());
+    p.merged_head = if p.upstream.as_ref().is_some_and(|x| x.state == "merged") {
+        p.upstream.as_ref().and_then(|x| x.pushed.clone())
+    } else {
+        crate::landing::current(w, &repo.id, number)?.map(|e| e.head_sha)
+    }
+    .or_else(|| Some(merge_sha.to_string()));
+    crate::landing::mark_merged(w, &repo.id, number)?;
     p.merged_base = merged_base;
     p.updated_at = now.clone();
     p.revision += 1;
@@ -1926,4 +1990,121 @@ pub fn mark_merged(
         left = open;
     }
     Ok(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::domain::members::{NewMember, insert_member};
+    use crate::domain::repos::{self, NewRepo, NewWorkspace};
+    use crate::model::MemberKind;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn closing_waits_for_queue_work_and_reopening_releases_the_lock_before_ci() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config::load(None, Some(temp.path()), None, None).unwrap();
+        let layout = config.layout();
+        layout.create().unwrap();
+        let store = store::Store::open(&layout.db(), 1 << 20, 2).unwrap();
+        let member = store
+            .write_sync(|w| {
+                insert_member(
+                    w,
+                    &NewMember {
+                        name: "owner1".into(),
+                        display_name: None,
+                        kind: MemberKind::Owner,
+                    },
+                )
+            })
+            .unwrap();
+        let caller = Caller { member };
+        let app = App::new(
+            config,
+            "http://127.0.0.1:7878".into(),
+            store,
+            vec![],
+            "http://127.0.0.1:7878".into(),
+        );
+        repos::create_workspace(
+            &app,
+            &caller,
+            NewWorkspace {
+                name: "acme".into(),
+            },
+        )
+        .await
+        .unwrap();
+        repos::create(
+            &app,
+            &caller,
+            NewRepo {
+                path: "acme/demo".into(),
+                default_branch: None,
+                labels: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let repo = repos::visible(&app, &caller, "acme/demo").await.unwrap();
+        let p = Pull {
+            repo: repo.id.clone(),
+            number: 1,
+            title: "Serialize closing".into(),
+            body: String::new(),
+            state: "open".into(),
+            merged: false,
+            draft: false,
+            author: "owner1".into(),
+            head: "feature".into(),
+            base: "main".into(),
+            reviewers: vec![],
+            tickets: vec![],
+            labels: vec![],
+            reviewed_by: vec![],
+            ready_at: None,
+            created_at: util::now(),
+            updated_at: util::now(),
+            closed_at: None,
+            merged_at: None,
+            merge_sha: None,
+            merged_head: None,
+            merged_base: None,
+            upstream: None,
+            revision: 1,
+        };
+        app.store
+            .write(move |w| write_pull(w, None, &p))
+            .await
+            .unwrap();
+        let lock = app.repo_lock(&repo.id);
+        let held = lock.lock().await;
+        let mut closing = Box::pin(set_open(&app, &caller, &repo.path, 1, false));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), closing.as_mut())
+                .await
+                .is_err(),
+            "closing must wait for the in-flight queue update"
+        );
+        let r2 = repo.clone();
+        assert_eq!(
+            app.store
+                .read(move |r| Ok(load_pull(r, &r2, 1)?.state))
+                .await
+                .unwrap(),
+            "open"
+        );
+        drop(held);
+        assert_eq!(closing.await.unwrap().state, "closed");
+        let reopened = tokio::time::timeout(
+            Duration::from_secs(5),
+            set_open(&app, &caller, &repo.path, 1, true),
+        )
+        .await
+        .expect("reopening must not hold the repository lock while registering CI")
+        .unwrap();
+        assert_eq!(reopened.state, "open");
+    }
 }

@@ -159,12 +159,16 @@ async fn job_retry(
     Path((repo, id)): Path<(String, String)>,
 ) -> R {
     let (repo, a) = attempt_of(&app, &c, &repo, &id).await?;
-    let (queue_max, now) = (app.ci.config().queue_max, util::now());
-    let id = a.id.clone();
-    let new = app
-        .store
-        .write(move |w| queue::retry(w, &id, queue_max, &now))
-        .await?;
+    let new = {
+        // Ref cleanup may still be cancelling work after its landing state
+        // became visible. A new explicit retry must follow that cleanup.
+        let lock = app.repo_lock(&repo.id);
+        let _guard = lock.lock().await;
+        let (queue_max, now, id) = (app.ci.config().queue_max, util::now(), a.id.clone());
+        app.store
+            .write(move |w| queue::retry(w, &id, queue_max, &now))
+            .await?
+    };
     app.events.publish("check", &repo.path, new.sha.clone());
     Ok(ok(view(&app, &new).await?))
 }
@@ -680,4 +684,152 @@ pub fn routes() -> Router<Shared> {
         .route("/runner/attempts/{id}/log", post(log_append))
         .route("/runner/attempts/{id}/artifacts/{name}", put(artifact_put))
         .route("/runner/attempts/{id}/finish", post(finish))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::model::{self, Member};
+    use crate::store::{self, Store};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn retry_waits_for_ref_cleanup_and_keeps_the_new_attempt_claimable() {
+        for branch in ["gate/3", "feature"] {
+            let temp = tempfile::tempdir().unwrap();
+            let config = Config::load(None, Some(temp.path()), None, None).unwrap();
+            let layout = config.layout();
+            layout.create().unwrap();
+            let store = Store::open(&layout.db(), 1 << 20, 2).unwrap();
+            let app = Arc::new(App::new(
+                config,
+                "http://127.0.0.1:7878".into(),
+                store,
+                vec![],
+                "http://127.0.0.1:7878".into(),
+            ));
+            let repo = Repo {
+                id: "repo_1".into(),
+                path: "acme/demo".into(),
+                workspace: "ws_1".into(),
+                default_branch: "main".into(),
+                protected_branches: vec![],
+                required_checks: vec!["build".into()],
+                required_approvals: 0,
+                auto_land: false,
+                ci_network: false,
+                labels: vec![],
+                upstream: None,
+                revision: 1,
+                created_at: util::now(),
+            };
+            let c = Caller {
+                member: Member {
+                    name: "member1".into(),
+                    display_name: "Member 1".into(),
+                    kind: MemberKind::Agent,
+                    accounts: vec![],
+                    reviewers: vec![],
+                    created_at: util::now(),
+                    avatar: None,
+                },
+            };
+            let r2 = repo.clone();
+            let branch = branch.to_string();
+            let b2 = branch.clone();
+            let failed = app
+                .store
+                .write(move |w| {
+                    model::put_indexed(
+                        w,
+                        store::REPOS,
+                        &Repo::key(&r2.id),
+                        None,
+                        &r2,
+                        model::repo_index(&r2),
+                    )?;
+                    let now = util::now();
+                    queue::register(
+                        w,
+                        queue::Registration {
+                            repo: r2.id,
+                            repo_path: r2.path,
+                            sha: "gate-sha".into(),
+                            tree: Some("gate-tree".into()),
+                            branch: b2,
+                            protected: false,
+                            pipeline: queue::PipelineState::Jobs {
+                                jobs: vec![JobDef {
+                                    name: "build".into(),
+                                    image: "alpine".into(),
+                                    commands: vec!["true".into()],
+                                    timeout_secs: None,
+                                    artifacts: vec![],
+                                    cache: None,
+                                }],
+                            },
+                            network: false,
+                        },
+                        10,
+                        &now,
+                    )?;
+                    let claim = queue::claim(w, "runner1", 60, &now)?.unwrap();
+                    queue::finish(
+                        w,
+                        &claim.attempt.id,
+                        &claim.lease,
+                        "failure",
+                        None,
+                        queue::ResultInfo::default(),
+                        &now,
+                    )
+                })
+                .await
+                .unwrap();
+            let lock = app.repo_lock(&repo.id);
+            let held = lock.lock().await;
+            let mut retry = Box::pin(job_retry(
+                State(app.clone()),
+                c,
+                Path((repo.path.clone(), failed.id.clone())),
+            ));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), retry.as_mut())
+                    .await
+                    .is_err(),
+                "retry must wait until ref cleanup has finished"
+            );
+            let id = repo.id.clone();
+            app.store
+                .write(move |w| {
+                    queue::branch_left(
+                        w,
+                        &id,
+                        "gate-sha",
+                        &branch,
+                        "a deletion of the branch",
+                        &util::now(),
+                    )
+                })
+                .await
+                .unwrap();
+            drop(held);
+            let response = retry.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let claimed = app
+                .store
+                .write(|w| queue::claim(w, "runner1", 60, &util::now()))
+                .await
+                .unwrap()
+                .expect("the accepted retry must still be claimable");
+            assert_eq!(claimed.attempt.sha, "gate-sha");
+            assert_eq!(claimed.attempt.number, failed.number + 1);
+            assert!(!claimed.attempt.superseded);
+            assert!(!claimed.attempt.allow_reuse);
+            assert_eq!(claimed.attempt.cache_scope, failed.cache_scope);
+        }
+    }
 }

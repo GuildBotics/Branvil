@@ -1,8 +1,6 @@
-//! Landing pull requests automatically (`docs/architecture.md`, "Landing
-//! automatically"): in a repository with `auto_land`, an open pull request
-//! that is not a draft lands by itself once it can, merged here or, with an
-//! upstream, published to the host. A publish made this way is told once to
-//! the owner's webhook, since people merge it there.
+//! Advances each repository's landing queues and, with `auto_land`, merges
+//! or publishes their passed leaders. Each automatic gate pass is told to
+//! the owner's webhook, since people merge upstream pull requests there.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
@@ -17,13 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Shared};
 use crate::auth::Caller;
-use crate::domain::member_by_name;
 use crate::domain::pulls::{self, MergeInput, load_pull};
 use crate::error::{AppError, AppResult};
 use crate::events::Notice;
 use crate::http::J;
-use crate::model::{Published, Pull, Repo};
-use crate::store::{self, Key, Rd};
+use crate::model::{Landing, Repo};
+use crate::store::{self, Rd};
 use crate::util;
 
 /// Every repository is looked at again this often, whatever changed.
@@ -124,30 +121,29 @@ async fn sweep(app: &App, dirty: &Dirty) {
     }
 }
 
-/// Published automatically, there, and the webhook not yet told.
-fn awaits_notice(x: &Published) -> bool {
-    x.auto && x.number.is_some() && x.notified_at.is_none()
+/// An automatic gate pass the webhook has not been told about.
+fn awaits_notice(x: &Landing) -> bool {
+    x.state == "passed" && x.notify && x.notified_at.is_none()
 }
 
 /// Lands what the repository can when it lands automatically, then tells the
 /// webhook of its automatic publishes it was not told of (while `webhook_ok`).
 /// `repo` is as the sweep read it: landing reads it again under its lock.
 async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<()> {
+    crate::landing::sweep_repo(app, repo).await?;
     let r2 = repo.clone();
-    let (notices, candidates) = app
+    let candidates = app
         .store
         .read(move |r| {
-            let mut notices = Vec::new();
             let mut candidates = Vec::new();
-            for p in open_pulls(r, &r2)? {
-                if p.upstream.as_ref().is_some_and(awaits_notice) {
-                    notices.push(p.number);
-                }
-                if r2.auto_land && !p.draft && worth_trying(r, &r2, &p)? {
+            for p in pulls::open_pulls(r, &r2)? {
+                let passed = crate::landing::current(r, &r2.id, p.number)?
+                    .is_some_and(|l| l.state == "passed");
+                if r2.auto_land && passed && (r2.upstream.is_none() || p.upstream.is_none()) {
                     candidates.push(p);
                 }
             }
-            Ok((notices, candidates))
+            Ok(candidates)
         })
         .await?;
     let tips = if candidates.is_empty() {
@@ -190,6 +186,19 @@ async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<
         }
         app.autoland.failures.lock().unwrap().remove(&what);
     }
+    // Publishing may have stopped. Reconcile it before offering a merge.
+    crate::landing::sweep_repo(app, repo).await?;
+    let r2 = repo.clone();
+    let notices = app
+        .store
+        .read(move |r| {
+            Ok(crate::landing::active(r, &r2.id)?
+                .into_iter()
+                .filter(awaits_notice)
+                .map(|l| l.number)
+                .collect::<Vec<_>>())
+        })
+        .await?;
     for number in notices {
         if !*webhook_ok {
             break;
@@ -199,36 +208,9 @@ async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<
     Ok(())
 }
 
-fn open_pulls(r: &impl Rd, repo: &Repo) -> AppResult<Vec<Pull>> {
-    let prefix = Key::new().s(&repo.id).bytes();
-    let mut out = Vec::new();
-    for (_, n) in r.prefix_raw(store::IX_OPEN_PULLS, &prefix, None, usize::MAX)? {
-        let n = String::from_utf8_lossy(&n)
-            .parse()
-            .map_err(AppError::internal)?;
-        out.push(load_pull(r, repo, n)?);
-    }
-    Ok(out)
-}
-
-/// Whether landing `p` is worth trying: a publish needs a pull request into
-/// the default branch, never published before (Branvil publishes it once),
-/// whose author has an account on the host. Merging needs nothing more.
-fn worth_trying(r: &impl Rd, repo: &Repo, p: &Pull) -> AppResult<bool> {
-    let Some(up) = &repo.upstream else {
-        return Ok(true);
-    };
-    Ok(p.base == repo.default_branch
-        && p.upstream.is_none()
-        && member_by_name(r, &p.author)?
-            .accounts
-            .iter()
-            .any(|a| a.provider == up.provider))
-}
-
 // ---------------------------------------------------------------- the webhook
 
-/// Tells the webhook, once, that Branvil published pull request `number`.
+/// Tells the webhook, once per gate pass, that pull request `number` can merge.
 /// Without a webhook nothing is sent; a failure is kept and tried again.
 /// Returns false when the send failed. A crash between the webhook's answer
 /// and the write of `notified_at` sends it again: at least once.
@@ -238,13 +220,28 @@ async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<bool> {
     };
     // The poller rewrites the record under the same lock.
     let _guard = app.upstream.pull_lock(&repo.id, number).await;
-    let r2 = repo.clone();
-    let p = app.store.read(move |r| load_pull(r, &r2, number)).await?;
-    let Some(mut x) = p.upstream.filter(awaits_notice) else {
+    let id = repo.id.clone();
+    let (p, landing, repo) = app
+        .store
+        .read(move |r| {
+            let repo = crate::domain::repo_by_id(r, &id)?;
+            Ok((
+                load_pull(r, &repo, number)?,
+                crate::landing::current(r, &id, number)?,
+                repo,
+            ))
+        })
+        .await?;
+    let Some(landing) = landing.filter(awaits_notice) else {
+        return Ok(true);
+    };
+    let Some(x) =
+        crate::landing::published(&repo, &p).filter(|x| x.number.is_some() && x.stopped.is_none())
+    else {
         return Ok(true);
     };
     let text = format!(
-        "{} ({} !{number}) was published to {} automatically and awaits a merge there.\n{}\n{}",
+        "{} ({} !{number}) passed its landing gate and awaits a merge on {}.\n{}\n{}",
         p.title,
         repo.path,
         app.upstream.host_name(&x.provider),
@@ -273,10 +270,8 @@ async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<bool> {
         return Ok(false);
     }
     *app.autoland.problem.lock().unwrap() = None;
-    x.notified_at = Some(util::now());
-    let r2 = repo.clone();
     app.store
-        .write(move |w| pulls::store_published(w, &r2, number, x, None))
+        .write(move |w| crate::landing::mark_notified(w, &landing, &util::now()))
         .await?;
     app.events.publish("pull", &repo.path, number.to_string());
     Ok(true)
