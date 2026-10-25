@@ -578,9 +578,11 @@ require every job that must keep a commit out of the service, here `fmt`,
 `clippy`, `test`, `web`, and `dev-script`):
 it backs the service up, builds the new commit and rehearses its upgrade on a
 copy of the backup while the old build serves, and stops the service only to
-switch builds, once its running CI jobs have finished. A failed commit is not
-tried again until `main` moves on.
-Failures are written to the log and shown once as a macOS notification
+switch builds, once its running CI jobs have finished. A commit whose required checks failed is checked again each round and can
+update after a successful retry. An installation, rehearsal, or activation
+failure waits for a person or a newer main commit.
+Failures are written to the log, sent to the configured notification webhook
+(also while the service is stopped), and shown once as a macOS notification
 (`osascript`, which macOS lists as Script Editor under System Settings →
 Notifications; allow it once, for instance after
 `osascript -e 'display notification "test" with title "Branvil"'`).

@@ -71,6 +71,13 @@ pub struct Run {
     /// frees up.
     pub waiting: bool,
     pub superseded_by: Option<String>,
+    /// Protected branches that asked for this run, retained when they move.
+    pub protected_branches: Vec<String>,
+    /// Successful delivery of this run's required-check failure notice.
+    pub failure_notified_at: Option<String>,
+    /// A final required-check failure awaits delivery (maintained with every
+    /// run/attempt change, so sweeps never scan successful history).
+    pub failure_pending: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -133,6 +140,13 @@ pub fn run_key(repo: &str, sha: &str) -> Vec<u8> {
 
 pub fn run_index(r: &Run) -> Vec<IxEntry> {
     let mut out = Vec::new();
+    if r.failure_pending {
+        out.push(IxEntry {
+            table: store::IX_CI_UNNOTIFIED,
+            key: run_key(&r.repo, &r.sha),
+            value: run_key(&r.repo, &r.sha),
+        });
+    }
     if let Some(tree) = &r.tree {
         out.push(IxEntry {
             table: store::IX_CI_TREE,
@@ -189,14 +203,59 @@ pub fn expected_index(r: &impl Rd) -> AppResult<Vec<IxEntry>> {
     Ok(out)
 }
 
-pub fn put_run(w: &Wtx, old: Option<&Run>, new: &Run) -> AppResult<()> {
+/// The required checks are evaluated in the same transaction as an attempt
+/// change. Missing required jobs are failures even without an attempt. A
+/// superseded attempt is routine cancellation, not an operational failure.
+fn refresh_failure(r: &impl Rd, run: &mut Run) -> AppResult<()> {
+    run.failure_pending = false;
+    if run.protected_branches.is_empty() || run.failure_notified_at.is_some() {
+        return Ok(());
+    }
+    let Some(repo) =
+        r.get::<crate::model::Repo>(store::REPOS, &crate::model::Repo::key(&run.repo))?
+    else {
+        return Ok(());
+    };
+    let jobs = match &run.pipeline {
+        PipelineState::Jobs { jobs } => jobs.as_slice(),
+        _ => &[],
+    };
+    let latest = current_attempts(r, &run.repo, &run.sha, jobs)?;
+    let mut failed = false;
+    for name in &repo.required_checks {
+        if !jobs.iter().any(|j| &j.name == name) {
+            failed = true;
+            continue;
+        }
+        let Some(a) = latest.iter().find(|a| &a.job.name == name) else {
+            if run.superseded_by.is_some() {
+                continue;
+            }
+            return Ok(());
+        };
+        if a.status != "completed" {
+            return Ok(());
+        }
+        failed |= a.conclusion.as_deref() != Some("success") && !a.superseded;
+    }
+    run.failure_pending = failed;
+    Ok(())
+}
+
+pub fn put_run(w: &Wtx, new: &Run) -> AppResult<()> {
+    let old = get_run(w, &new.repo, &new.sha)?;
+    let mut new = new.clone();
+    refresh_failure(w, &mut new)?;
+    if old.as_ref() == Some(&new) {
+        return Ok(());
+    }
     put_indexed(
         w,
         store::CI_RUNS,
         &run_key(&new.repo, &new.sha),
-        old.map(run_index),
-        new,
-        run_index(new),
+        old.as_ref().map(run_index),
+        &new,
+        run_index(&new),
     )
 }
 
@@ -208,7 +267,11 @@ fn put_attempt(w: &Wtx, old: Option<&Attempt>, new: &Attempt) -> AppResult<()> {
         old.map(attempt_index),
         new,
         attempt_index(new),
-    )
+    )?;
+    if let Some(run) = get_run(w, &new.repo, &new.sha)? {
+        put_run(w, &run)?;
+    }
+    Ok(())
 }
 
 pub fn get_run(r: &impl Rd, repo: &str, sha: &str) -> AppResult<Option<Run>> {
@@ -382,6 +445,9 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
             }
             if reg.protected {
                 run.cache_scope = scope;
+                if !run.protected_branches.contains(&reg.branch) {
+                    run.protected_branches.push(reg.branch.clone());
+                }
             }
             run.superseded_by = None;
             // The registration read the commit's own pipeline. The comparison
@@ -405,11 +471,18 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
             tree: reg.tree,
             seq: w.next("ci_seq")?,
             created_at: now.to_string(),
+            protected_branches: if reg.protected {
+                vec![reg.branch.clone()]
+            } else {
+                vec![]
+            },
             branches: vec![reg.branch],
             pipeline: reg.pipeline,
             cache_scope: scope,
             waiting: false,
             superseded_by: None,
+            failure_notified_at: None,
+            failure_pending: false,
         },
     };
     let queued = !run.waiting && {
@@ -429,11 +502,10 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
         }
         admit_jobs(w, &mut run, &todo, reg.network, queue_max, now)?
     };
-    if old.as_ref() == Some(&run) {
-        return Ok(queued);
-    }
-    put_run(w, old.as_ref(), &run)?;
-    Ok(true)
+    refresh_failure(w, &mut run)?;
+    let changed = old.as_ref() != Some(&run);
+    put_run(w, &run)?;
+    Ok(queued || changed)
 }
 
 /// Gives `run` (written by the caller) its commit's pipeline. Every
@@ -519,7 +591,7 @@ pub fn admit_waiting(w: &Wtx, queue_max: usize, now: &str) -> AppResult<Vec<(Str
         if run.waiting {
             break;
         }
-        put_run(w, Some(&old), &run)?;
+        put_run(w, &run)?;
         admitted.push((run.repo_path.clone(), run.sha.clone()));
     }
     Ok(admitted)
@@ -560,7 +632,7 @@ pub fn branch_left(
     if run == old {
         return Ok(false);
     }
-    put_run(w, Some(&old), &run)?;
+    put_run(w, &run)?;
     Ok(true)
 }
 
@@ -1762,7 +1834,7 @@ mod tests {
                 let old = get_run(w, "repo_1", "s1")?.unwrap();
                 let mut run = old.clone();
                 run.pipeline = pipeline.clone();
-                put_run(w, Some(&old), &run)?;
+                put_run(w, &run)?;
                 // The run already has this pipeline; the old attempt stops.
                 take_pipeline(w, &mut run, pipeline.clone(), "stop", T0)
             })
@@ -1807,7 +1879,7 @@ mod tests {
             let mut run = old.clone();
             let jobs = vec![changed("test")];
             take_pipeline(w, &mut run, PipelineState::Jobs { jobs }, "stop", T0)?;
-            put_run(w, Some(&old), &run)
+            put_run(w, &run)
         })
         .unwrap();
         let refused = s.write_sync(|w| retry(w, &c.attempt.id, 10, T1));

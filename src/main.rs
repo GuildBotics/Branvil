@@ -25,6 +25,7 @@ mod tunnel;
 mod upgrade;
 mod upstream;
 mod util;
+mod webhook;
 
 use std::path::PathBuf;
 
@@ -322,9 +323,7 @@ async fn run(cli: Cli) -> anyhow::Result<u8> {
             }
         }
         Command::Admin { command, data } => {
-            let config =
-                config::Config::load(data.config.as_deref(), data.data_dir.as_deref(), None, None)?;
-            cli::admin(command, &config).await
+            cli::admin(command, data.config.as_deref(), data.data_dir.as_deref()).await
         }
         Command::Tunnel {
             via,

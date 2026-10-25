@@ -14,27 +14,26 @@ const IMAGE: &str = "docker.io/library/alpine:3.22";
 const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
 #[tokio::test]
-async fn schema_15_upgrade_preserves_reviewed_heads_and_reserves_the_service_author() {
+async fn schema_16_upgrade_preserves_runs_and_indexes_pending_failure_notices() {
     let mut w = World::new().await;
-    let head = land(&w, "landed", &[("landed.txt", "landed\n")], None).await;
+    let runner = Runner::new(&w, "runner1").await;
+    let head = land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test"]))],
+        None,
+    )
+    .await;
+    let attempt = runner.claim().await.unwrap();
+    assert_eq!(runner.finish(&attempt, "failure").await.0, 200);
+    set_required(&w, &["test"]).await;
     w.server.stop();
     let data = w.server.data.clone();
     let db = data.join("branvil.redb");
-    edit_records(&db, "pulls", |p| {
-        p.as_object_mut().unwrap().remove("merged_head");
-    });
-    edit_records(&db, "meta", |v| {
-        if v.is_u64() {
-            *v = json!(15);
-        }
-    });
-    {
-        let database = redb::Database::open(&db).unwrap();
-        let txn = database.begin_write().unwrap();
-        txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new("landing"))
-            .unwrap();
-        txn.commit().unwrap();
-    }
+    let attempts = records(&db, "ci_attempts");
+    let pulls = records(&db, "pulls");
+    as_schema_16(&db);
+    let before = tables(&db);
     let admin = |what: &str| {
         let out = std::process::Command::new(BIN)
             .args(["admin", what, "--data-dir"])
@@ -51,27 +50,16 @@ async fn schema_15_upgrade_preserves_reviewed_heads_and_reserves_the_service_aut
         )
     };
     assert!(admin("check").1.contains("branvil admin upgrade"));
-    let members = records(&db, "members");
-    edit_records(&db, "members", |member| member["name"] = json!("Branvil"));
-    let before = tables(&db);
-    let failed = admin("upgrade");
-    assert_eq!(failed.0, 1, "{}", failed.1);
-    assert!(failed.1.contains("reserved"), "{}", failed.1);
-    assert_eq!(
-        tables(&db),
-        before,
-        "reserved author rejection writes nothing"
-    );
-    let mut originals = members.into_iter();
-    edit_records(&db, "members", |member| {
-        member["name"] = originals.next().unwrap()["name"].clone();
-    });
-    let before = tables(&db);
     let (code, output) = admin("upgrade");
     assert_eq!(code, 3, "{output}");
-    assert!(output.contains("from schema version 15 to 16"), "{output}");
-    assert_eq!(records(&db, "pulls")[0]["merged_head"], head);
-    assert!(records(&db, "landing").is_empty());
+    assert!(output.contains("from schema version 16 to 17"), "{output}");
+    assert_eq!(records(&db, "ci_attempts"), attempts);
+    assert_eq!(records(&db, "pulls"), pulls);
+    let runs = records(&db, "ci_runs");
+    let run = runs.iter().find(|r| r["sha"] == head).unwrap();
+    assert_eq!(run["protected_branches"], json!(["main"]));
+    assert!(run["failure_notified_at"].is_null());
+    assert!(!tables(&db)["ix_ci_unnotified"].is_empty());
     let backup = std::fs::read_dir(&data)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -79,7 +67,7 @@ async fn schema_15_upgrade_preserves_reviewed_heads_and_reserves_the_service_aut
             p.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("branvil-schema-15-")
+                .starts_with("branvil-schema-16-")
         })
         .unwrap();
     assert_eq!(tables(&backup), before);
@@ -262,7 +250,12 @@ pub(crate) fn sync_main(w: &World) {
 
 /// Lands files on the protected main through a reviewed, merged pull
 /// request (running CI with `runner` when there is any).
-async fn land(w: &World, branch: &str, files: &[(&str, &str)], runner: Option<&Runner>) -> String {
+pub(crate) async fn land(
+    w: &World,
+    branch: &str,
+    files: &[(&str, &str)],
+    runner: Option<&Runner>,
+) -> String {
     sync_main(w);
     for (path, content) in files {
         if let Some(parent) = std::path::Path::new(path).parent() {
@@ -1024,7 +1017,7 @@ async fn a_commit_shows_its_checks_with_or_without_a_pull_request() {
     let initial = git_ok(&w.work, &["rev-parse", "HEAD"]);
     assert_eq!(
         commit_checks(&initial).await,
-        json!({"sha": initial, "checks": [], "checks_expected": false})
+        json!({"sha": initial, "checks": [], "checks_expected": false, "run_registered": true})
     );
 
     // The default branch's new tip is followed from queued to its conclusion.

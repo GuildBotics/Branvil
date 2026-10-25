@@ -536,3 +536,20 @@ reports itself unavailable without it, as without `msb`).
   (no network or host files; a checkout of the commit at `/work`, a non-root
   user that cannot read a file of mode 0, `/tmp` on a disk, the cache
   restored in the next attempt, nothing left behind).
+
+## Required-check failure notifications
+
+A protected-branch run whose required checks finish unsuccessfully sends the
+configured notification webhook its repository, protected branches, commit,
+failed check names, and job/log links. Missing required jobs and invalid or
+absent pipelines are failures too; those notices link the commit page.
+Nonrequired jobs do not decide this notice. Normal supersession is not a failure.
+
+Run and attempt writes maintain an index of undelivered required failures.
+The notification task reads that index on check/repository events, startup,
+and each minute, and sends outside database transactions. It records successful
+delivery on the current run without rewriting concurrent queue changes. A
+restart does not repeat delivered notices; a crash between the webhook answer
+and recording it can repeat one. An unavailable or unset webhook leaves
+notices pending. This applies to CI runs registered by the existing triggers;
+it does not add CI triggers for other protected branches.

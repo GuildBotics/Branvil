@@ -39,14 +39,29 @@ pub struct Autoland {
 impl Default for Autoland {
     fn default() -> Self {
         Self {
-            client: reqwest::Client::builder()
-                // A webhook that hangs holds up the sweep no longer.
-                .timeout(Duration::from_secs(10))
-                .user_agent(concat!("branvil/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .expect("an HTTP client"),
+            client: crate::webhook::client(),
             problem: Mutex::new(None),
             failures: Mutex::default(),
+        }
+    }
+}
+
+impl Autoland {
+    /// Shares delivery and its diagnostic with CI and landing notices.
+    pub(crate) async fn send(&self, layout: &crate::config::Layout, text: &str) -> bool {
+        match crate::webhook::send(&self.client, layout, text).await {
+            Ok(sent) => {
+                *self.problem.lock().unwrap() = None;
+                sent
+            }
+            Err(why) => {
+                let mut problem = self.problem.lock().unwrap();
+                if problem.as_ref() != Some(&why) {
+                    tracing::warn!("the webhook failed: {why}");
+                }
+                *problem = Some(why);
+                false
+            }
         }
     }
 }
@@ -109,6 +124,9 @@ async fn sweep(app: &App, dirty: &Dirty) {
         Ok(r) => r,
         Err(e) => return tracing::error!("autoland: {e}"),
     };
+    if let Err(e) = crate::ci::notify::sweep(app).await {
+        tracing::warn!("CI notifications: {e}");
+    }
     // There is one webhook: once a send to it fails, this sweep sends no more.
     let mut webhook_ok = true;
     for repo in repos
@@ -215,9 +233,6 @@ async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<
 /// Returns false when the send failed. A crash between the webhook's answer
 /// and the write of `notified_at` sends it again: at least once.
 async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<bool> {
-    let Ok(url) = std::fs::read_to_string(app.layout.webhook()) else {
-        return Ok(true);
-    };
     // The poller rewrites the record under the same lock.
     let _guard = app.upstream.pull_lock(&repo.id, number).await;
     let id = repo.id.clone();
@@ -248,28 +263,9 @@ async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<bool> {
         app.pull_url(&repo.path, number),
         x.url.clone().unwrap_or_default()
     );
-    let sent = app
-        .autoland
-        .client
-        .post(url.trim())
-        .json(&serde_json::json!({ "text": text }))
-        .send()
-        .await
-        // The URL is a secret: it stays out of the message.
-        .map_err(|e| e.without_url().to_string())
-        .and_then(|r| match r.status() {
-            s if s.is_success() => Ok(()),
-            s => Err(format!("the webhook answered {s}")),
-        });
-    if let Err(why) = sent {
-        let mut problem = app.autoland.problem.lock().unwrap();
-        if problem.as_ref() != Some(&why) {
-            tracing::warn!("autoland: the webhook failed: {why}");
-        }
-        *problem = Some(why);
+    if !app.autoland.send(&app.layout, &text).await {
         return Ok(false);
     }
-    *app.autoland.problem.lock().unwrap() = None;
     app.store
         .write(move |w| crate::landing::mark_notified(w, &landing, &util::now()))
         .await?;

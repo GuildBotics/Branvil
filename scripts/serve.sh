@@ -8,7 +8,11 @@ Usage: scripts/serve.sh [--data-dir PATH] [--interval SECONDS] [--plist]
 
 Run the installed build that builds/current names, and keep it up to date with
 origin/main. Meant to run as a launchd user agent (--plist); it is the only
-process that starts or stops branvil, and TERM stops it all.
+process that starts or stops branvil, and TERM stops it all. Failure notices
+also go to the configured webhook without needing the service. Queued webhook notices are first sent at the next delivery round, normally
+within --interval seconds; slow deliveries or service transitions can delay
+them. Failed deliveries are retried each interval, including while Branvil
+is stopped.
   --data-dir PATH     Data directory (default: BRANVIL_DATA_DIR or <repo>/data).
                       Relative paths are resolved from the repository root.
   --interval SECONDS  Time between update checks, the first at the start
@@ -101,7 +105,7 @@ EOF
   # The update being started (builds/update, written by scripts/update.sh):
   # its new build, the build it replaces, and, once it has failed, the step
   # that failed.
-  local target previous failure
+  local target previous failure next_notice=0
   record() {
     target= previous= failure=
     if [[ -e "$builds/update" ]]; then read -r target previous failure <"$builds/update"; fi
@@ -153,8 +157,7 @@ EOF
   tell() {
     log "$1"
     if [[ "$(cat "$builds/notified" 2>/dev/null)" != "$1" ]]; then
-      put "$builds/notified" "$1"
-      notify "$1"
+      notify "$1" "$builds/notified"
     fi
   }
   # Removes what a cut off rehearsal, install, write, or upgrade left: the
@@ -241,6 +244,10 @@ EOF
   tidy
 
   while true; do
+    if (( now >= next_notice )); then
+      next_notice=$((now + interval))
+      deliver_notices
+    fi
     record
     if [[ -n "$failure" ]]; then give_up; record; fi
     if [[ -n "$serve_pid" ]] && ! kill -0 "$serve_pid" 2>/dev/null; then
@@ -274,6 +281,13 @@ EOF
     if [[ -n "$serve_pid" && -n "$target" && "$target" == "$serve_build" ]]; then
       if ready; then
         rm -f "$builds/update"
+        # Keep pending notices deliverable before retiring their sender build.
+        local pending
+        for pending in "$builds"/*.notice; do
+          [[ -f "$pending" ]] || continue
+          put "$pending" "$target
+$(tail -n +2 "$pending")"
+        done
         # The replaced build stays, to go back to with the database copy.
         for build in "$builds"/*/; do
           build="${build%/}"

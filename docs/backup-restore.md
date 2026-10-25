@@ -30,7 +30,7 @@ branvil-2026-10-14/          (0700)
 `manifest.json` (abridged):
 
 ```json
-{"format": 1, "service": "branvil", "branvil_version": "0.1.0", "schema_version": 16,
+{"format": 1, "service": "branvil", "branvil_version": "0.1.0", "schema_version": 17,
  "git_version": "git version 2.54.0", "created_at": "2026-10-14T10:41:20.123Z",
  "base_url": "http://127.0.0.1:7878",
  "tables": {"tickets": 12, "pulls": 3, "reviews": 4, "...": 0},
@@ -126,7 +126,7 @@ GuildBotics stays valid. Two services on the same base URL cannot both listen.
 | The owner's token (`secrets/owner.token`) | No | The first start of the restored service writes a new one and revokes the old. |
 | GUI sessions | Their records, but they do not survive | The new owner token's start deletes every session. |
 | Members' upstream credentials (`secrets/accounts/`: tokens, GitHub App keys) | **No** | A credential for GitHub is a secret of another system; a backup copied to another disk or machine should not carry it. After a restore the accounts (provider, kind, and login) are there, but polling reports that the credential is not on this machine and nothing is read or sent until it is set again (`PUT …/members/{name}/accounts/{provider}`). `branvil backup` and `branvil restore` list these accounts. |
-| The notification webhook's URL (`secrets/webhook.url`) | **No** | Like an upstream credential, it is a secret of another system. After a restore nothing is told until the owner sets it again (Settings → Notifications, `PUT /api/v1/admin/webhook`); it is then told of pending passed-gate notices for pull requests still open on the host. |
+| The notification webhook's URL (`secrets/webhook.url`) | **No** | Like an upstream credential, it is a secret of another system. After a restore nothing is told until the owner sets it again (Settings → Notifications, `PUT /api/v1/admin/webhook`); it is then told of pending CI failures and passed-gate notices for pull requests still open on the host. |
 | `secrets/cursor.key` | No | A new key is made at the first start; list cursors handed out before become `invalid_cursor`, which clients recover from by starting the list again. |
 | The hook secret | No | It is made per process. |
 
@@ -188,17 +188,12 @@ new data directory; when the upgrade fails, the restored directory is left
 at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
 it once the cause is fixed).
 
-Version 15 → 16 (`src/upgrade.rs`): the database gains landing queues and
-stores each merged pull request's original reviewed head separately from its
-merge commit. Existing local merges use their `merge_sha` as the reviewed head;
-upstream merges use the pushed head when present. Queue entries are populated
-from eligible pull requests after startup. Old publication notification times
-are removed; each new passed gate records its own notice. An open pull request
-already published and notified before the upgrade can therefore send another
-webhook notice when its new gate passes with automatic landing enabled. The
-upgrade refuses a member named `branvil` (case-insensitively), since that name
-is now reserved for service comments. The refusal leaves the old database
-unchanged.
+Version 16 → 17 (`src/upgrade.rs`): CI runs gain protected-branch names,
+a pending-failure flag, and the successful delivery time of their required-check
+failure notice. The upgrade initializes notices for the protected branches
+still recorded on each run and rebuilds indexes. Historical runs whose branches
+already moved away are left without notification intent: the old format did
+not retain their branch names. Attempts, logs, and landing records are preserved.
 
 ### The service run by scripts/serve.sh
 
@@ -223,8 +218,15 @@ neither the running build nor `builds/attempted`, and that commit's run in
 this Branvil has finished with every check the repository requires for a merge
 (`required_checks`) succeeded (or it has no checks and expects none): what may
 be merged may be installed, and a check that is not required decides nothing.
-While the run is unfinished, it looks again in the next round; when a required
-check did not succeed, the commit goes to `builds/attempted`. An update:
+While checks are unfinished or failed, it reads them again in the next round;
+a later successful retry allows the update. Required-check failures are told
+by the service, for every repository's protected-branch run, rather than by
+`update.sh`. After an hour from the first observation of a commit, the updater
+tells each waiting reason once: unavailable API (connection failure, timeout,
+or HTTP 5xx), no registered CI run, or queued/running checks. Authentication
+failures, HTTP 4xx, invalid responses, and failures before a candidate is
+fetched stop that round and queue a notice at once; their diagnostics stay in
+the log. A pre-fetch failure never uses an installed commit's old waiting time. An update:
 
 1. backs the running service up with the running build into
    `~/branvil-backups/branvil-update-<UTC time>` (keeping the newest three of
@@ -269,11 +271,14 @@ the disk, and renamed. Write them by hand the same way, for instance
 | `builds/current` | The commit of the build that runs (the checkout's `HEAD` can differ). Missing: Branvil is stopped on purpose. |
 | `builds/<commit>/branvil` | An installed build. |
 | `builds/update` | An update in flight: `<new> <previous> [<failed step>]`. |
-| `builds/attempted` | The last commit an update gave up on; not tried again until `main` moves on. |
-| `builds/notified` | The last failure notified (so it is notified once). |
+| `builds/attempted` | The last commit whose installation, rehearsal, or activation failed after the backup; not tried again until `main` moves on. Failed checks never write it. |
+| `builds/notified` | The last update/activation failure queued for notification. |
+| `builds/checks-seen` | Commit and first-observed Unix time, retained across updater and service restarts. |
+| `builds/told` | Commit/reason pairs already queued for a long-wait notice; successful waiting rounds do not clear it. |
+| `builds/*.notice` | Pending script webhook notices, including the installed build that can send each one (updated before its old build is retired); first sent at the next delivery round (normally within `--interval` seconds; slow deliveries or service transitions can delay it), removed after successful delivery, and retried each interval even while the service is stopped. |
 | `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line, and `branvil stopping: …` while a stop waits for its running CI jobs). |
 | `builds/rehearsal`, `builds/*.new`, `builds/*.tmp`, `<data>/branvil-schema-*.redb.partial` | Left only by something cut off; removed at the next start. |
-| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's required checks; recorded in `builds/attempted` but not notified), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. A stop that waited for running CI jobs logs "branvil serve of … stopped N seconds after TERM; it waited for its running CI jobs"; one that had to interrupt jobs logs and notifies "branvil serve of … stopped while CI jobs still ran". |
+| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's required checks; the service handles their webhook notice), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. A stop that waited for running CI jobs logs "branvil serve of … stopped N seconds after TERM; it waited for its running CI jobs"; one that had to interrupt jobs logs and notifies "branvil serve of … stopped while CI jobs still ran". |
 
 **The state.**
 
@@ -282,12 +287,15 @@ the disk, and renamed. Write them by hand the same way, for instance
 - The last failure: the last failure line of the log (see the table), and `builds/attempted`.
 - Stopped: no `builds/current`. The log says why.
 
-**What a failure leaves.** Nothing is retried automatically; a person is told
-once.
+**What a failure leaves.** Checks are read again automatically. Once an update
+has taken its backup and fails to install, rehearse, or activate that commit,
+it waits for a person. Notices go to the configured webhook and the macOS
+desktop. Webhook delivery failures remain queued, also across restarts.
 
 | When | What runs then |
 | --- | --- |
-| A step up to the rehearsal fails (a build, the rehearsal's upgrade or check) | The previous build keeps running. A missing required command, the checkout check, reaching the running service, a failed fetch, reading of the checks, or backup is tried again in the next round. |
+| Required checks fail or have not finished | The previous build; checks are read again each round and a later success allows installation. |
+| A step up to the rehearsal fails (a build, the rehearsal's upgrade or check) | The previous build keeps running. A missing required command, the checkout check, reaching the running service, a failed fetch, or backup is tried again in the next round. |
 | The new build's upgrade, check, or start fails | The previous build again, when its own `branvil admin upgrade` finds the database at its version (nothing changed it). Otherwise (the upgrade changed it) nothing: `builds/current` is removed, and the log names the database copy the upgrade kept. |
 | A reboot, power loss, logout, or `launchctl bootout` at any moment | At its next start `scripts/serve.sh` goes on from these files: an update not yet recorded runs again in the next round, a recorded one is switched to and started, and one whose failure was recorded is concluded. A start cut off after its upgrade changed the database checks it at the next start. |
 

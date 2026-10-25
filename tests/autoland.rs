@@ -209,6 +209,39 @@ impl Hook {
 }
 
 #[tokio::test]
+async fn protected_required_failure_is_sent_on_check_event_and_not_repeated_after_restart() {
+    let mut w = World::new().await;
+    let hook = Hook::start(&w, &[]).await;
+    let runner = Runner::new(&w, "runner1").await;
+    crate::ci::land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &pipeline(&["test"]))],
+        None,
+    )
+    .await;
+    settings(&w, json!({"required_checks": ["test"]})).await;
+    let c = runner.claim().await.unwrap();
+    assert_eq!(runner.finish(&c, "failure").await.0, 200);
+    eventually("required-check failure notification", || async {
+        hook.received().len() == 1
+    })
+    .await;
+    let text = hook.received()[0].1["text"].as_str().unwrap().to_string();
+    assert!(text.contains("acme/demo [main]"), "{text}");
+    assert!(text.contains(c["sha"].as_str().unwrap()), "{text}");
+    assert!(text.contains(c["attempt_id"].as_str().unwrap()), "{text}");
+    let barrier = other_repo(&w, OTHER, true).await;
+    swept(&w, &barrier).await;
+    w.restart(&[]);
+    swept(&w, &barrier).await;
+    assert_eq!(hook.received().len(), 1);
+    w.server.stop();
+    let runs = records(&w.server.data.join("branvil.redb"), "ci_runs");
+    assert!(runs.iter().find(|r| r["sha"] == c["sha"]).unwrap()["failure_notified_at"].is_string());
+}
+
+#[tokio::test]
 async fn a_pull_request_merges_itself_once_approved_and_its_required_check_succeeded() {
     let w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;

@@ -1699,7 +1699,7 @@ mod tests {
                 let old = crate::ci::queue::get_run(w, &repo, &commit)?.unwrap();
                 let mut run = old.clone();
                 run.cache_scope = "branch:feature".into();
-                crate::ci::queue::put_run(w, Some(&old), &run)
+                crate::ci::queue::put_run(w, &run)
             })
             .await
             .unwrap();

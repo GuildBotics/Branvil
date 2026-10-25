@@ -861,10 +861,12 @@ exists, including a new gate for an already published head ("Webhook").
   the job-log endpoint below; the other job endpoints do not know them.
 
 `GET /api/v1/repos/{repo}/commits/{sha}/checks` →
-`{"sha": "...", "checks": [...], "checks_expected": true}`: the checks of any
+`{"sha": "...", "checks": [...], "checks_expected": true, "run_registered": true}`: the checks of any
 commit of the repository (the default branch's tip, for instance), `checks`
 and `checks_expected` as for a pull request's head above, without the upstream
-host's check runs. Only a commit that is or was the default branch's tip or
+host's check runs. `run_registered` states whether a local CI run exists;
+it distinguishes an unregistered commit from a registered run waiting for
+queue room, including when both expose required-check placeholders. Only a commit that is or was the default branch's tip or
 an open pull request's head or a landing gate gets a run (`docs/ci.md`,
 "What registers a run"):
 with a pipeline or required checks, another commit's checks stay "not
@@ -1086,8 +1088,9 @@ is polled when, and how conflicts are settled: `docs/architecture.md`,
 
 ### Webhook
 
-The webhook Branvil tells when an automatic landing gate passes, since people
-merge the pull request on the host. Its URL is a credential of another system:
+Branvil tells the webhook when an automatic landing gate passes, when a
+protected run's required checks finally fail, and when a scripted service
+update or activation stops. Its URL is a credential of another system:
 it is kept in `<data>/secrets/webhook.url` (`0600`), never returned, and not in
 backups.
 
@@ -1111,6 +1114,25 @@ at the next look, which sends no more notices after one send fails. Delivery
 is at least once: a crash between the answer and storing `notified_at` can
 repeat it. Without a webhook nothing is sent; setting one later sends pending
 notices. Local merges and gates passed with automatic landing off send nothing.
+
+`branvil admin notify 'The service stopped' --data-dir /srv/branvil` posts
+`{"text": "The service stopped"}` directly, without opening the database or
+contacting the service. It works with the service running or stopped, including
+after a failed schema upgrade. With no webhook it exits successfully without
+sending anything. It exits nonzero on delivery failure; errors omit the URL
+and response body. Requests time out after 10 seconds and do not follow redirects.
+
+The service records successful CI failure delivery on the run. Undelivered
+failures are indexed and retried on relevant events, startup, and every minute.
+A crash between delivery and recording may repeat a notice (at least once).
+Ordinary supersession does not send a failure notice. Missing required jobs,
+absent pipelines, and invalid pipelines do: they include a commit-page link
+when no attempt/log exists. Script notices have their own persistent delivery
+queue under `builds/`, so they can be sent even while the service is stopped.
+Queued script webhook notices, including their first attempt, wait for the
+next delivery round, normally within `scripts/serve.sh --interval` seconds.
+Slow deliveries or service transitions can delay them. Unsuccessful deliveries
+are retried each interval; desktop notifications do not wait for this round.
 
 ### CI settings
 
