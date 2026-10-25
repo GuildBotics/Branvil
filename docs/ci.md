@@ -137,8 +137,8 @@ protected job with a missing or old cache. For cached jobs the source must
 have recorded its cache key. A protected attempt requests a separate cache
 refresh when that key has no complete save on this runner within 24 hours.
 A different digest executes as usual. Registration, queue order,
-and commands are unchanged. Manual retries always execute, including after
-their first interruption.
+and commands are unchanged. Manual and automatic retries always execute,
+including after their first interruption.
 
 This treats inputs other than the tree, job definition, image, and network as
 equivalent: history, tags, `BRANVIL_SHA` and other per-attempt environment
@@ -233,9 +233,10 @@ Leases and interruptions:
   details "Interrupted: …", and, the first time for that job and only when it
   was neither cancelled nor superseded, a new attempt is queued in the place
   the interrupted one had in the queue, ahead of the jobs queued after it. A
-  second interruption ends that attempt. Checks say "Interrupted twice …;
-  retry the job". Cache refreshes need no manual retry: a later check requests
-  a new refresh if the cache still needs one.
+  second interruption ends that attempt. Eligible protected required checks
+  then use the automatic retry budget below; other checks require a manual
+  retry. Cache refreshes need no manual retry: a later check requests a new
+  refresh if the cache still needs one.
 - A restart of the service is handled the same way: leases are stored, so a
   runner on another machine that keeps working through a short restart keeps
   its attempt, and attempts whose lease ran out while the service was down
@@ -274,8 +275,10 @@ No runner, no executor:
 - When no runner has contacted the service for `ci.runner_absent_secs`
   (default 120 s), queued attempts older than that are concluded
   `startup_failure` ("No CI runner has contacted Branvil …"). Its details ask
-  the owner to start the runner. Checks also ask for a manual retry; cache
-  refreshes explain that a later check can request another refresh.
+  the owner to start the runner. Eligible required checks queue an automatic
+  retry that waits until a runner claims it; this wait does not exhaust the
+  retry budget. Other checks require a manual retry; cache refreshes explain
+  that a later check can request another refresh.
 - A runner whose executor is unusable still claims attempts and concludes each
   `startup_failure` with the reason (for example "No usable msb 0.6.17
   found …"), so the problem is visible on the checks. Nothing ever runs on the
@@ -288,11 +291,37 @@ with the same job definition (the pipeline is not read again). Cache refreshes
 cannot be retried. Retry takes the repository lock used for ref changes. If a landing gate has just left its queue, its ref cleanup
 finishes before the new attempt is queued, so it cannot cancel that retry.
 
+## Automatic retries
+
+A required check of a protected run automatically retries up to three times
+after its initial failure. Eligible endings are command failure, timeout,
+no runner contacting the service, and the second interruption of an attempt.
+Other startup failures (such as a missing image), requested cancellations,
+supersession, nonrequired jobs, pull-request/gate runs, and cache refreshes do
+not trigger automatic retries.
+
+The failed attempt and the next queued attempt are recorded in one transaction:
+commit checks show the queued retry without an intervening failed check.
+Retries keep the same commit, job definition, network setting, and queue
+position, and always execute. Each records the first failed attempt and its
+automatic retry number. An interruption requeue preserves that record and
+number; a manual retry starts a new budget. Job pages and check details show
+“Automatic retry 1/3 of att_…”, followed by the attempt's own reason.
+
+After runner absence or a second interruption, the finished attempt names the
+automatic retry queued after it. It asks for a manual retry only when none is
+queued, including when the automatic retry budget is exhausted.
+
+A retry queued because no runner was available stays queued until a runner
+claims it. Once all three retries fail, the existing final-failure notice
+becomes pending. A successful retry queues a recovery notice with the
+repository, commit, job, and links to failed and successful attempts.
+
 ## Limits
 
 | Limit | Default | Where |
 | --- | --- | --- |
-| queued attempts | 256 (`ci.queue_max`) | a run whose jobs do not fit **waits**, visibly ("Waiting for room in the CI queue"), and is admitted in order as room frees up; a retry into a full queue is refused with `503 unavailable` |
+| queued attempts | 256 (`ci.queue_max`) | a run whose jobs do not fit **waits**, visibly ("Waiting for room in the CI queue"), and is admitted in order as room frees up; a manual retry into a full queue is refused with `503 unavailable`; interruption recovery and automatic retries keep their old queue place even when new admissions have filled the queue |
 | log per attempt | 16 MiB (`ci.log_max_mib`) | then one truncation notice and nothing more; one log request is at most 1 MiB |
 | one artifact | 64 MiB (`ci.artifact_max_mib`) | `413 too_large`; at most 16 artifacts per attempt, zip only, names `[A-Za-z0-9_.-]` declared by the job |
 | artifacts per attempt (before zipping) | 64 MiB (`ci.executor.artifacts_max_mib`) | runner side |
@@ -561,13 +590,14 @@ reports itself unavailable without it, as without `msb`).
   user that cannot read a file of mode 0, `/tmp` on a disk, the cache
   restored in the next attempt, nothing left behind).
 
-## Required-check failure notifications
+## Required-check notifications
 
 A protected-branch run whose required checks finish unsuccessfully sends the
 configured notification webhook its repository, protected branches, commit,
 failed check names, and job/log links. Missing required jobs and invalid or
 absent pipelines are failures too; those notices link the commit page.
-Nonrequired jobs do not decide this notice. Normal supersession is not a failure.
+An outstanding automatic retry defers this notice. Nonrequired jobs do not
+decide this notice. Normal supersession is not a failure.
 
 Run and attempt writes maintain an index of undelivered required failures.
 The notification task reads that index on check/repository events, startup,
@@ -577,3 +607,12 @@ restart does not repeat delivered notices; a crash between the webhook answer
 and recording it can repeat one. An unavailable or unset webhook leaves
 notices pending. This applies to CI runs registered by the existing triggers;
 it does not add CI triggers for other protected branches.
+
+Successful automatic retries maintain an index of undelivered recovery notices.
+Recovery notices include the retained protected-branch names, as final-failure
+notices do. The same task and delivery rules apply, with delivery recorded on
+the successful attempt. A later branch move or manual retry does not discard
+the notice.
+Final-failure delivery remains once per run; recovery delivery is once per
+successful automatic retry. Neither is repeated on ordinary restart; a crash
+between delivery and recording may repeat either notice.
