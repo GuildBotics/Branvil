@@ -582,23 +582,20 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Recreates the immediately preceding schema in a stopped database.
-pub fn as_schema_16(db: &Path) {
-    edit_records(db, "ci_runs", |run| {
-        run.as_object_mut().unwrap().remove("protected_branches");
-        run.as_object_mut().unwrap().remove("failure_notified_at");
-        run.as_object_mut().unwrap().remove("failure_pending");
+pub fn as_schema_17(db: &Path) {
+    edit_records(db, "ci_attempts", |a| {
+        a.as_object_mut().unwrap().remove("purpose");
+        a.as_object_mut().unwrap().remove("cache_refresh");
     });
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(16);
+            *v = json!(17);
         }
     });
     let database = redb::Database::open(db).unwrap();
     let txn = database.begin_write().unwrap();
-    txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new(
-        "ix_ci_unnotified",
-    ))
-    .unwrap();
+    txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new("ix_ci_refresh"))
+        .unwrap();
     txn.commit().unwrap();
 }
 

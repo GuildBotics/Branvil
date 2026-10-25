@@ -86,10 +86,32 @@ pub struct ArtifactMeta {
     pub bytes: u64,
 }
 
+/// Why the job is running; only checks affect commit readiness.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Purpose {
+    Check,
+    CacheRefresh,
+}
+
+impl Purpose {
+    fn recovery_hint(self) -> &'static str {
+        match self {
+            Self::Check => "retry the job",
+            Self::CacheRefresh => {
+                "no manual retry is needed; a later check will request a new refresh if needed"
+            }
+        }
+    }
+}
+
 /// One try of one job.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Attempt {
     pub id: String,
+    pub purpose: Purpose,
+    /// The refresh requested by this reused check, including an existing one.
+    pub cache_refresh: Option<String>,
     pub repo: String,
     pub repo_path: String,
     pub sha: String,
@@ -99,7 +121,8 @@ pub struct Attempt {
     pub image_digest: Option<String>,
     /// The actual execution whose result this attempt reused, reported at finish.
     pub reused_from: Option<String>,
-    /// The dependency cache key computed by an actual execution.
+    /// The computed dependency-cache key; while a refresh is unfinished,
+    /// the key whose save it was requested to refresh.
     pub cache_key: Option<String>,
     /// Manual retries (including their interruption requeues) must execute.
     pub allow_reuse: bool,
@@ -175,6 +198,16 @@ pub fn attempt_index(a: &Attempt) -> Vec<IxEntry> {
             .bytes(),
         value: a.id.as_bytes().to_vec(),
     }];
+    if a.purpose == Purpose::CacheRefresh
+        && a.status != "completed"
+        && let Some(key) = &a.cache_key
+    {
+        out.push(IxEntry {
+            table: store::IX_CI_REFRESH,
+            key: Key::new().s(&a.repo).s(&a.job.name).s(key).bytes(),
+            value: a.id.as_bytes().to_vec(),
+        });
+    }
     match a.status.as_str() {
         "queued" => out.push(IxEntry {
             table: store::IX_CI_PENDING,
@@ -305,7 +338,7 @@ pub fn current_attempts(
 ) -> AppResult<Vec<Attempt>> {
     let mut out: Vec<Attempt> = Vec::new();
     for a in attempts_of(r, repo, sha)? {
-        if !jobs.contains(&a.job) {
+        if a.purpose != Purpose::Check || !jobs.contains(&a.job) {
             continue;
         }
         match out.last_mut() {
@@ -376,6 +409,8 @@ fn new_attempt(w: &Wtx, run: &Run, job: &JobDef, network: bool, now: &str) -> Ap
     let number = next_number(w, &run.repo, &run.sha, &job.name)?;
     Ok(Attempt {
         id: util::new_id("att"),
+        purpose: Purpose::Check,
+        cache_refresh: None,
         repo: run.repo.clone(),
         repo_path: run.repo_path.clone(),
         sha: run.sha.clone(),
@@ -626,7 +661,9 @@ pub fn branch_left(
         run.waiting = false;
         let reason = format!("Superseded: {branch} moved from {sha} to {by}.");
         for a in attempts_of(w, repo, sha)? {
-            stop(w, &a, &reason, true, now)?;
+            if a.purpose == Purpose::Check {
+                stop(w, &a, &reason, true, now)?;
+            }
         }
     }
     if run == old {
@@ -659,10 +696,13 @@ pub struct ResultInfo {
     pub image_digest: Option<String>,
     pub reused_from: Option<String>,
     pub cache_key: Option<String>,
+    #[serde(default)]
+    pub refresh_cache: bool,
 }
 
 fn can_reuse(r: &impl Rd, a: &Attempt, source: &Attempt) -> AppResult<bool> {
-    if !a.allow_reuse
+    if a.purpose != Purpose::Check
+        || !a.allow_reuse
         || a.id == source.id
         || a.repo != source.repo
         || a.job != source.job
@@ -671,6 +711,7 @@ fn can_reuse(r: &impl Rd, a: &Attempt, source: &Attempt) -> AppResult<bool> {
         || source.conclusion.as_deref() != Some("success")
         || source.reused_from.is_some()
         || source.image_digest.is_none()
+        || (a.job.cache.is_some() && source.cache_key.is_none())
     {
         return Ok(false);
     }
@@ -811,6 +852,7 @@ pub fn heartbeat(w: &Wtx, id: &str, lease: &str, lease_secs: u64, now: &str) -> 
 
 /// Concludes a leased attempt with the runner's result. A cancellation that
 /// was requested wins over the reported conclusion.
+#[allow(clippy::too_many_arguments)]
 pub fn finish(
     w: &Wtx,
     id: &str,
@@ -818,6 +860,7 @@ pub fn finish(
     conclusion: &str,
     details: Option<String>,
     info: ResultInfo,
+    queue_max: usize,
     now: &str,
 ) -> AppResult<Attempt> {
     if !CONCLUSIONS.contains(&conclusion) {
@@ -844,6 +887,14 @@ pub fn finish(
             "cache_key must be a SHA-256 key of a job with a cache.",
         ));
     }
+    if info.refresh_cache
+        && (info.reused_from.is_none() || a.cache_scope != "protected" || a.job.cache.is_none())
+    {
+        return Err(AppError::invalid(
+            "refresh_cache requires a reused protected cache job.",
+        ));
+    }
+    let mut refresh_key = None;
     if let Some(id) = &info.reused_from {
         let source = get_attempt(w, id)?.ok_or_else(|| AppError::invalid("No reuse source."))?;
         if conclusion != "success"
@@ -854,6 +905,9 @@ pub fn finish(
             return Err(AppError::invalid(
                 "The reuse source must be a successful execution of the same tree, job, network, and image.",
             ));
+        }
+        if info.refresh_cache {
+            refresh_key = source.cache_key;
         }
     }
     a.image_digest = info.image_digest;
@@ -870,9 +924,44 @@ pub fn finish(
     } else {
         conclude(&mut a, conclusion, details, now);
         a.reused_from = info.reused_from;
+        if let Some(key) = refresh_key {
+            a.cache_refresh = enqueue_refresh(w, &a, &key, queue_max, now)?;
+        }
     }
     put_attempt(w, Some(&old), &a)?;
     Ok(a)
+}
+
+/// One unfinished refresh per repository, job name, and cache key. Refreshes
+/// use the same bounded queue as checks, but never make a run wait for room.
+fn enqueue_refresh(
+    w: &Wtx,
+    check: &Attempt,
+    key: &str,
+    queue_max: usize,
+    now: &str,
+) -> AppResult<Option<String>> {
+    let prefix = Key::new().s(&check.repo).s(&check.job.name).s(key).bytes();
+    if let Some((_, id)) = w
+        .prefix_raw(store::IX_CI_REFRESH, &prefix, None, 1)?
+        .into_iter()
+        .next()
+    {
+        return Ok(Some(String::from_utf8_lossy(&id).into_owned()));
+    }
+    if pending_count(w, queue_max + 1)? >= queue_max {
+        return Ok(None);
+    }
+    let run = get_run(w, &check.repo, &check.sha)?
+        .ok_or_else(|| AppError::internal("attempt without a run"))?;
+    let mut a = new_attempt(w, &run, &check.job, check.network, now)?;
+    a.purpose = Purpose::CacheRefresh;
+    a.cache_scope = "protected".into();
+    a.cache_key = Some(key.into());
+    a.allow_reuse = false;
+    let id = a.id.clone();
+    put_attempt(w, None, &a)?;
+    Ok(Some(id))
 }
 
 /// Records an uploaded artifact (the file is already in place).
@@ -914,6 +1003,11 @@ pub fn cancel(w: &Wtx, id: &str, who: &str, now: &str) -> AppResult<Attempt> {
 pub fn retry(w: &Wtx, id: &str, queue_max: usize, now: &str) -> AppResult<Attempt> {
     let old =
         get_attempt(w, id)?.ok_or_else(|| AppError::not_found(format!("No CI attempt {id}.")))?;
+    if old.purpose == Purpose::CacheRefresh {
+        return Err(AppError::conflict(
+            "Cache refresh attempts cannot be manually retried.",
+        ));
+    }
     if old.status != "completed" {
         return Err(AppError::conflict(format!(
             "Attempt {id} is {}; only a completed attempt can be retried.",
@@ -999,6 +1093,18 @@ fn active(r: &impl Rd) -> AppResult<Vec<Attempt>> {
     Ok(out)
 }
 
+/// Cache work must not hold up a restart. Called after claims are disabled.
+pub fn interrupt_refreshes(w: &Wtx, now: &str) -> AppResult<Vec<(String, String)>> {
+    let mut changed = Vec::new();
+    for a in active(w)? {
+        if a.purpose == Purpose::CacheRefresh {
+            interrupt(w, &a, "Branvil stopped during cache refresh", now)?;
+            changed.push((a.repo_path, a.sha));
+        }
+    }
+    Ok(changed)
+}
+
 /// Concludes the in-progress attempt `old` `cancelled` as interrupted
 /// (`why`); the first interruption of a job that was not cancelled or
 /// superseded is queued again as a new attempt in the place `old` had in the
@@ -1014,7 +1120,7 @@ fn interrupt(w: &Wtx, old: &Attempt, why: &str, now: &str) -> AppResult<()> {
     } else if requeue {
         format!("Interrupted: {why}; queued again in its place.")
     } else {
-        format!("Interrupted twice: {why}; retry the job.")
+        format!("Interrupted twice: {why}; {}.", old.purpose.recovery_hint())
     };
     conclude(&mut a, "cancelled", Some(details), now);
     put_attempt(w, Some(old), &a)?;
@@ -1025,6 +1131,9 @@ fn interrupt(w: &Wtx, old: &Attempt, why: &str, now: &str) -> AppResult<()> {
         next.seq = old.seq;
         next.after_interrupt = true;
         next.allow_reuse = old.allow_reuse;
+        next.purpose = old.purpose;
+        next.cache_key = old.cache_key.clone();
+        next.cache_scope = old.cache_scope.clone();
         put_attempt(w, None, &next)?;
     }
     Ok(())
@@ -1048,7 +1157,12 @@ pub fn fail_queued(
             continue;
         }
         let mut a = old.clone();
-        conclude(&mut a, "startup_failure", Some(details.to_string()), now);
+        conclude(
+            &mut a,
+            "startup_failure",
+            Some(format!("{details}; {}.", old.purpose.recovery_hint())),
+            now,
+        );
         put_attempt(w, Some(&old), &a)?;
         changed.push((old.repo_path.clone(), old.sha.clone()));
     }
@@ -1169,10 +1283,326 @@ mod tests {
                     image_digest: Some(DIGEST.into()),
                     ..Default::default()
                 },
+                10,
                 now,
             )
         })
         .unwrap()
+    }
+
+    fn cached(sha: &str) -> Registration {
+        let mut reg = same_tree(sha);
+        if let PipelineState::Jobs { jobs } = &mut reg.pipeline {
+            jobs[0].cache = Some(super::super::pipeline::CacheDef {
+                paths: vec!["target".into()],
+                key_files: vec![],
+            });
+        }
+        reg
+    }
+
+    const CACHE_KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn cached_source(s: &Store) -> Attempt {
+        s.write_sync(|w| {
+            register(w, cached("source"), 10, T0)?;
+            let c = claim(w, "runner", 60, T0)?.unwrap();
+            finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "success",
+                None,
+                ResultInfo {
+                    image_digest: Some(DIGEST.into()),
+                    cache_key: Some(CACHE_KEY.into()),
+                    ..Default::default()
+                },
+                10,
+                T1,
+            )
+        })
+        .unwrap()
+    }
+
+    fn refresh_check(w: &Wtx, source: &Attempt, sha: &str, max: usize) -> AppResult<Attempt> {
+        register(w, cached(sha), 10, T1)?;
+        // Choose this check even while older refresh work waits.
+        let a = latest_attempts(w, "repo_1", sha)?.pop().unwrap();
+        let mut selected = a.clone();
+        selected.seq = 0;
+        put_attempt(w, Some(&a), &selected)?;
+        let c = claim(w, "runner", 60, T1)?.unwrap();
+        assert_eq!(c.attempt.id, a.id);
+        finish(
+            w,
+            &c.attempt.id,
+            &c.lease,
+            "success",
+            None,
+            ResultInfo {
+                image_digest: Some(DIGEST.into()),
+                reused_from: Some(source.id.clone()),
+                refresh_cache: true,
+                ..Default::default()
+            },
+            max,
+            T1,
+        )
+    }
+
+    #[test]
+    fn refresh_is_not_a_check_and_is_deduplicated_while_queued_and_running() {
+        let (_d, s) = store();
+        let source = cached_source(&s);
+        s.write_sync(|w| {
+            let first = refresh_check(w, &source, "s1", 10)?;
+            let id = first.cache_refresh.clone().unwrap();
+            let second = refresh_check(w, &source, "s2", 10)?;
+            assert_eq!(second.cache_refresh.as_ref(), Some(&id));
+            let refresh = claim(w, "runner", 60, T1)?.unwrap();
+            assert_eq!(refresh.attempt.id, id);
+            assert_eq!(refresh.attempt.purpose, Purpose::CacheRefresh);
+            assert!(refresh.reuse.is_none());
+            let third = refresh_check(w, &source, "s3", 10)?;
+            assert_eq!(third.cache_refresh.as_ref(), Some(&id));
+            branch_left(w, "repo_1", "s1", "main", "s2", T1)?;
+            assert!(!get_attempt(w, &id)?.unwrap().cancel_requested);
+            for sha in ["s1", "s2", "s3"] {
+                let checks = latest_attempts(w, "repo_1", sha)?;
+                assert_eq!(checks.len(), 1);
+                assert_eq!(checks[0].conclusion.as_deref(), Some("success"));
+            }
+            finish(
+                w,
+                &id,
+                &refresh.lease,
+                "failure",
+                None,
+                ResultInfo::default(),
+                10,
+                T1,
+            )?;
+            assert_eq!(latest_attempts(w, "repo_1", "s1")?[0].id, first.id);
+            assert!(
+                w.prefix_raw(store::IX_CI_REFRESH, &[], None, 10)?
+                    .is_empty()
+            );
+            let fourth = refresh_check(w, &source, "s4", 10)?;
+            assert_ne!(fourth.cache_refresh, Some(id));
+            assert!(crate::model::index_problems(w)?.is_empty());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn refresh_queue_full_and_cancelled_check_do_not_block_success_or_enqueue() {
+        let (_d, s) = store();
+        let source = cached_source(&s);
+        s.write_sync(|w| {
+            let check = refresh_check(w, &source, "s1", 0)?;
+            assert!(check.cache_refresh.is_none());
+            assert_eq!(check.conclusion.as_deref(), Some("success"));
+            assert!(!get_run(w, "repo_1", "s1")?.unwrap().waiting);
+            register(w, cached("s2"), 10, T1)?;
+            let c = claim(w, "runner", 60, T1)?.unwrap();
+            branch_left(w, "repo_1", "s2", "main", "s3", T1)?;
+            let cancelled = finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "success",
+                None,
+                ResultInfo {
+                    image_digest: Some(DIGEST.into()),
+                    reused_from: Some(source.id),
+                    refresh_cache: true,
+                    ..Default::default()
+                },
+                10,
+                T1,
+            )?;
+            assert_eq!(cancelled.conclusion.as_deref(), Some("cancelled"));
+            assert!(cancelled.cache_refresh.is_none());
+            assert_eq!(pending_count(w, 10)?, 0);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn refresh_survives_departure_and_interrupt_and_its_success_is_reusable() {
+        for stop in [false, true] {
+            let (_d, s) = store();
+            let source = cached_source(&s);
+            s.write_sync(|w| {
+                let check = refresh_check(w, &source, "s1", 10)?;
+                let id = check.cache_refresh.unwrap();
+                branch_left(w, "repo_1", "s1", "main", "s2", T1)?;
+                assert_eq!(get_attempt(w, &id)?.unwrap().status, "queued");
+                let c = claim(w, "runner", 60, T1)?.unwrap();
+                if stop {
+                    interrupt_refreshes(w, T1)?;
+                } else {
+                    expire(w, T2)?;
+                }
+                assert!(
+                    finish(
+                        w,
+                        &id,
+                        &c.lease,
+                        "success",
+                        None,
+                        ResultInfo::default(),
+                        10,
+                        T2
+                    )
+                    .is_err()
+                );
+                let next = claim(w, "runner", 600, T2)?.unwrap();
+                assert_eq!(next.attempt.purpose, Purpose::CacheRefresh);
+                assert_eq!(next.attempt.cache_key.as_deref(), Some(CACHE_KEY));
+                assert_eq!(next.attempt.cache_scope, "protected");
+                assert!(next.reuse.is_none());
+                let success = finish(
+                    w,
+                    &next.attempt.id,
+                    &next.lease,
+                    "success",
+                    None,
+                    ResultInfo {
+                        image_digest: Some(DIGEST.into()),
+                        cache_key: Some(CACHE_KEY.into()),
+                        ..Default::default()
+                    },
+                    10,
+                    T3,
+                )?;
+                register(w, cached("s3"), 10, T3)?;
+                assert_eq!(
+                    claim(w, "runner", 60, T3)?
+                        .unwrap()
+                        .reuse
+                        .unwrap()
+                        .attempt_id,
+                    success.id
+                );
+                assert_eq!(
+                    latest_attempts(w, "repo_1", "s1")?[0].conclusion.as_deref(),
+                    Some("success")
+                );
+
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_guidance_matches_the_purpose_and_refresh_can_be_requested_again() {
+        for purpose in [Purpose::Check, Purpose::CacheRefresh] {
+            for cause in ["lease", "stop", "no_runner"] {
+                let (_d, s) = store();
+                let source = cached_source(&s);
+                s.write_sync(|w| {
+                    let id = if purpose == Purpose::CacheRefresh {
+                        refresh_check(w, &source, "s1", 10)?.cache_refresh.unwrap()
+                    } else {
+                        register(w, cached("s1"), 10, T1)?;
+                        latest_attempts(w, "repo_1", "s1")?.pop().unwrap().id
+                    };
+                    let final_id = if cause == "no_runner" {
+                        fail_queued(w, T2, "Start the runner", T2)?;
+                        id
+                    } else {
+                        claim(w, "runner", 60, T1)?.unwrap();
+                        if cause == "lease" {
+                            expire(w, T2)?;
+                        } else {
+                            interrupt_running(w, None, "service stopped", T2)?;
+                        }
+                        let again = claim(w, "runner", 60, T2)?.unwrap();
+                        if cause == "lease" {
+                            expire(w, T3)?;
+                        } else {
+                            interrupt_running(w, None, "service stopped", T3)?;
+                        }
+                        again.attempt.id
+                    };
+                    let ended = get_attempt(w, &final_id)?.unwrap();
+                    let details = ended.details.unwrap();
+                    assert_eq!(ended.purpose, purpose);
+                    assert_eq!(ended.status, "completed");
+                    if purpose == Purpose::Check {
+                        assert!(details.contains("retry the job"), "{cause}: {details}");
+                        assert_eq!(retry(w, &final_id, 10, T3)?.purpose, Purpose::Check);
+                    } else {
+                        assert!(!details.contains("retry the job"), "{cause}: {details}");
+                        assert!(
+                            details.contains("no manual retry is needed"),
+                            "{cause}: {details}"
+                        );
+                        assert!(details.contains("later check"), "{cause}: {details}");
+                        assert!(
+                            w.prefix_raw(store::IX_CI_REFRESH, &[], None, 10)?
+                                .is_empty()
+                        );
+                        let fresh = refresh_check(w, &source, "s2", 10)?.cache_refresh.unwrap();
+                        assert_ne!(fresh, final_id);
+                        assert_eq!(
+                            get_attempt(w, &fresh)?.unwrap().purpose,
+                            Purpose::CacheRefresh
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_retry_is_explicitly_refused_in_every_state() {
+        for state in ["queued", "in_progress", "completed"] {
+            let (_d, s) = store();
+            let source = cached_source(&s);
+            s.write_sync(|w| {
+                let check = refresh_check(w, &source, "s1", 10)?;
+                let id = check.cache_refresh.unwrap();
+                if state != "queued" {
+                    let c = claim(w, "runner", 60, T1)?.unwrap();
+                    if state == "completed" {
+                        finish(
+                            w,
+                            &id,
+                            &c.lease,
+                            "failure",
+                            None,
+                            ResultInfo::default(),
+                            10,
+                            T1,
+                        )?;
+                    }
+                }
+                let refused = retry(w, &id, 0, T1).unwrap_err();
+                assert_eq!(refused.code, "conflict");
+                assert_eq!(
+                    refused.message,
+                    "Cache refresh attempts cannot be manually retried."
+                );
+                if state == "completed" {
+                    let next = retry(w, &check.id, 10, T1)?;
+                    assert_eq!(next.purpose, Purpose::Check);
+                    assert_eq!(
+                        next.number, 3,
+                        "check and refresh share the job's numbering"
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
     }
 
     #[test]
@@ -1253,10 +1683,11 @@ mod tests {
                 image_digest: Some(DIGEST.into()),
                 reused_from: Some(second.id.clone()),
                 cache_key: None,
+                refresh_cache: false,
             };
             let mut invalid = info.clone();
             invalid.image_digest = None;
-            assert!(finish(w, &c.attempt.id, &c.lease, "success", None, invalid, T2).is_err());
+            assert!(finish(w, &c.attempt.id, &c.lease, "success", None, invalid, 10, T2).is_err());
             assert!(
                 finish(
                     w,
@@ -1265,11 +1696,12 @@ mod tests {
                     "failure",
                     None,
                     info.clone(),
+                    10,
                     T2
                 )
                 .is_err()
             );
-            let done = finish(w, &c.attempt.id, &c.lease, "success", None, info, T2)?;
+            let done = finish(w, &c.attempt.id, &c.lease, "success", None, info, 10, T2)?;
             assert_eq!(done.reused_from.as_deref(), Some(second.id.as_str()));
             register(w, same_tree("s4"), 10, T3)?;
             let next = claim(w, "r", 60, T3)?.unwrap();
@@ -1308,7 +1740,9 @@ mod tests {
                     image_digest: Some(DIGEST.into()),
                     reused_from: Some(source.id.clone()),
                     cache_key: None,
+                    refresh_cache: false,
                 },
+                10,
                 T1,
             )?;
             assert_eq!(done.reused_from.as_deref(), Some(source.id.as_str()));
@@ -1337,6 +1771,7 @@ mod tests {
                     image_digest: Some(DIGEST.into()),
                     ..Default::default()
                 },
+                10,
                 T1,
             )?;
             admit_waiting(w, 1, T1)?;
@@ -1364,8 +1799,9 @@ mod tests {
                 image_digest: Some(DIGEST.into()),
                 reused_from: Some(source.id.clone()),
                 cache_key: None,
+                refresh_cache: false,
             };
-            assert!(finish(w, &c.attempt.id, &c.lease, "success", None, info, T1).is_err());
+            assert!(finish(w, &c.attempt.id, &c.lease, "success", None, info, 10, T1).is_err());
             expire(w, T2)?;
             let next = claim(w, "r", 60, T2)?.unwrap();
             assert!(!next.attempt.allow_reuse && next.reuse.is_none());
@@ -1390,6 +1826,7 @@ mod tests {
                             "failure",
                             None,
                             ResultInfo::default(),
+                            10,
                             T0,
                         )?;
                         if departure_first {
@@ -1452,8 +1889,10 @@ mod tests {
                     None,
                     ResultInfo {
                         image_digest: Some(DIGEST.into()),
+                        cache_key: c.attempt.job.cache.as_ref().map(|_| CACHE_KEY.into()),
                         ..Default::default()
                     },
+                    10,
                     T1,
                 )
             })
@@ -1522,6 +1961,7 @@ mod tests {
                 "success",
                 None,
                 ResultInfo::default(),
+                10,
                 T1,
             )
         });
@@ -1537,6 +1977,7 @@ mod tests {
                     image_digest: Some("sha256:x".into()),
                     ..Default::default()
                 },
+                10,
                 T1,
             )
         });
@@ -1553,6 +1994,7 @@ mod tests {
                         image_digest: Some(DIGEST.into()),
                         ..Default::default()
                     },
+                    10,
                     T1,
                 )
             })
@@ -1568,6 +2010,7 @@ mod tests {
                 "success",
                 None,
                 ResultInfo::default(),
+                10,
                 T1,
             )
         });
@@ -1604,6 +2047,7 @@ mod tests {
                 "success",
                 None,
                 ResultInfo::default(),
+                10,
                 T2,
             )
         });
@@ -1697,6 +2141,7 @@ mod tests {
                     "success",
                     None,
                     ResultInfo::default(),
+                    10,
                     T1,
                 )
             })
@@ -1803,6 +2248,7 @@ mod tests {
                 "failure",
                 None,
                 ResultInfo::default(),
+                10,
                 T2,
             )
         })
@@ -1868,6 +2314,7 @@ mod tests {
                 "success",
                 None,
                 ResultInfo::default(),
+                10,
                 T0,
             )
         })
@@ -1913,6 +2360,7 @@ mod tests {
                     "success",
                     None,
                     ResultInfo::default(),
+                    10,
                     T0,
                 )
             })
@@ -1967,7 +2415,7 @@ mod tests {
         );
         let l = latest(&s, "s1");
         assert_eq!(l[0].conclusion.as_deref(), Some("startup_failure"));
-        assert_eq!(l[0].details.as_deref(), Some("no runner"));
+        assert_eq!(l[0].details.as_deref(), Some("no runner; retry the job."));
         // Retry makes attempt 2.
         let a2 = s.write_sync(|w| retry(w, &l[0].id, 10, T1)).unwrap();
         assert_eq!(a2.number, 2);

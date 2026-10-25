@@ -185,6 +185,9 @@ pub fn artifact_attempt(
     let mut attempts = queue::attempts_of(r, repo, sha)?;
     attempts.sort_by(|a, b| (&b.created_at, b.seq).cmp(&(&a.created_at, a.seq)));
     for a in attempts {
+        if a.purpose != queue::Purpose::Check {
+            continue;
+        }
         let source = queue::result_attempt(r, &a)?;
         if !source.files_pruned && source.artifacts.iter().any(|x| x.name == name) {
             return Ok(Some(source));

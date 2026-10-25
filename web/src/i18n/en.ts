@@ -236,6 +236,8 @@ export const en = {
   "ci.showLog": "Show log",
   "ci.hideLog": "Hide log",
   "ci.reason": "Reason",
+  "ci.cacheRefresh": "Cache refresh",
+  "ci.cacheRefreshEffect": "This result does not affect checks or automatic updates.",
   "ci.reused": "Reused from",
   "ci.log": "Log",
   "ci.tailSize": "Show the last",

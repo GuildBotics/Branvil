@@ -14,7 +14,7 @@ const IMAGE: &str = "docker.io/library/alpine:3.22";
 const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
 #[tokio::test]
-async fn schema_16_upgrade_preserves_runs_and_indexes_pending_failure_notices() {
+async fn schema_17_upgrade_preserves_runs_and_indexes_pending_failure_notices() {
     let mut w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;
     let head = land(
@@ -25,14 +25,14 @@ async fn schema_16_upgrade_preserves_runs_and_indexes_pending_failure_notices() 
     )
     .await;
     let attempt = runner.claim().await.unwrap();
-    assert_eq!(runner.finish(&attempt, "failure").await.0, 200);
     set_required(&w, &["test"]).await;
+    assert_eq!(runner.finish(&attempt, "failure").await.0, 200);
     w.server.stop();
     let data = w.server.data.clone();
     let db = data.join("branvil.redb");
     let attempts = records(&db, "ci_attempts");
     let pulls = records(&db, "pulls");
-    as_schema_16(&db);
+    as_schema_17(&db);
     let before = tables(&db);
     let admin = |what: &str| {
         let out = std::process::Command::new(BIN)
@@ -52,7 +52,7 @@ async fn schema_16_upgrade_preserves_runs_and_indexes_pending_failure_notices() 
     assert!(admin("check").1.contains("branvil admin upgrade"));
     let (code, output) = admin("upgrade");
     assert_eq!(code, 3, "{output}");
-    assert!(output.contains("from schema version 16 to 17"), "{output}");
+    assert!(output.contains("from schema version 17 to 18"), "{output}");
     assert_eq!(records(&db, "ci_attempts"), attempts);
     assert_eq!(records(&db, "pulls"), pulls);
     let runs = records(&db, "ci_runs");
@@ -67,7 +67,7 @@ async fn schema_16_upgrade_preserves_runs_and_indexes_pending_failure_notices() 
             p.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("branvil-schema-16-")
+                .starts_with("branvil-schema-17-")
         })
         .unwrap();
     assert_eq!(tables(&backup), before);
@@ -137,6 +137,77 @@ async fn a_reused_success_counts_for_required_checks_and_not_for_duration_estima
     assert!(
         took >= 1,
         "reuse's sub-second duration must not replace the actual duration: {checks}"
+    );
+}
+
+#[tokio::test]
+async fn cache_refresh_never_changes_main_checks_or_required_readiness() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "runner1").await;
+    let cached_pipeline =
+        pipeline(&["test"]).replace("commands =", "cache = { paths = [\"target\"] }\ncommands =");
+    land(&w, "setup", &[(".branvil/ci.toml", &cached_pipeline)], None).await;
+    let source = runner.claim().await.unwrap();
+    let key = "a".repeat(64);
+    let (st, result) = runner.post(&source, "finish", json!({"lease": source["lease"], "conclusion": "success", "image_digest": DIGEST, "cache_key": key})).await;
+    assert_eq!(st, 200, "{result}");
+    set_required(&w, &["test"]).await;
+    sync_main(&w);
+    git_ok(&w.work, &["checkout", "-qb", "same"]);
+    git_ok(&w.work, &["commit", "--allow-empty", "-qm", "same tree"]);
+    git_as_ok(&w.work, "aiko", &w.aiko, &["push", "-q", "origin", "same"]);
+    let p = w.open_pull("same", json!([])).await;
+    let c = runner.claim().await.unwrap();
+    assert_eq!(c["reuse"]["attempt_id"], source["attempt_id"]);
+    assert_eq!(runner.post(&c, "finish", json!({"lease": c["lease"], "conclusion": "success", "image_digest": DIGEST, "reused_from": source["attempt_id"]})).await.0, 200);
+    let n = p["number"].as_u64().unwrap();
+    let (st, result) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/merge", w.repo_path()),
+            &w.owner,
+            json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
+        )
+        .await;
+    assert_eq!(st, 200, "{result}");
+    let c = runner.claim().await.unwrap();
+    assert_eq!(c["purpose"], "check");
+    let (st, result) = runner.post(&c, "finish", json!({"lease": c["lease"], "conclusion": "success", "image_digest": DIGEST, "reused_from": source["attempt_id"], "refresh_cache": true})).await;
+    assert_eq!(st, 200, "{result}");
+    let refresh_id = result["cache_refresh"].as_str().unwrap().to_owned();
+    let sha = c["sha"].as_str().unwrap();
+    let checks_path = format!("{}/commits/{sha}/checks", w.repo_path());
+    let before = w.server.ok(&checks_path, &w.aiko).await;
+    assert_eq!(before["checks"].as_array().unwrap().len(), 1);
+    assert_eq!(before["checks"][0]["status"], "completed");
+    assert_eq!(before["checks"][0]["conclusion"], "success");
+    assert_eq!(before["checks"][0]["cache_refresh"], refresh_id);
+    assert!(
+        before["checks"][0]["details"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("/-/jobs/{refresh_id}"))
+    );
+    let refresh = runner.claim().await.unwrap();
+    assert_eq!(refresh["attempt_id"], refresh_id);
+    assert_eq!(refresh["purpose"], "cache_refresh");
+    assert_eq!(refresh["cache_scope"], "protected");
+    assert!(refresh["reuse"].is_null());
+    assert_eq!(w.server.ok(&checks_path, &w.aiko).await, before);
+    assert_eq!(runner.finish(&refresh, "failure").await.0, 200);
+    assert_eq!(w.server.ok(&checks_path, &w.aiko).await, before);
+    let (st, refused) = w
+        .server
+        .post(
+            &format!("{}/jobs/{refresh_id}/retry", w.repo_path()),
+            &w.aiko,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, 409, "refresh retry cannot become a check");
+    assert_eq!(
+        refused["error"]["message"],
+        "Cache refresh attempts cannot be manually retried."
     );
 }
 
