@@ -245,7 +245,7 @@ async fn protected_required_failure_is_sent_on_check_event_and_not_repeated_afte
     w.restart(&[]);
     swept(&w, &barrier).await;
     assert_eq!(hook.received().len(), 1);
-    w.server.stop_for_admin();
+    w.server.stop();
     let runs = records(&w.server.data.join("branvil.redb"), "ci_runs");
     assert!(runs.iter().find(|r| r["sha"] == c["sha"]).unwrap()["failure_notified_at"].is_string());
 }
@@ -349,7 +349,7 @@ async fn only_the_owner_turns_landing_on_and_it_lands_what_waits_even_at_start()
     sync_main(&w);
     w.push_change("two", "two.txt", "2\n");
     let n = number(&w.open_pull("two", json!([])).await);
-    w.server.stop_for_admin();
+    w.server.stop();
     auto_land_on(&w, REPO);
     w.restart(&[]);
     merged(&w, n).await;
@@ -687,7 +687,7 @@ async fn notices_before_a_landing() -> (World, Hook, Other, u64) {
     let other = other_repo(&w, OTHER, false).await;
     let fix = number(&open_in(&w, &other, "fix").await);
     let hook = Hook::held(&w, &[]).await;
-    w.server.stop_for_admin();
+    w.server.stop();
     auto_land_on(&w, OTHER);
     w.restart(&[]);
     (w, hook, other, fix)

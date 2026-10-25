@@ -4,10 +4,13 @@
 #![allow(dead_code)]
 
 pub mod github;
+mod process;
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
+
+use process::ServiceProcess;
 
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -15,7 +18,7 @@ use serde_json::{Value, json};
 pub const BIN: &str = env!("CARGO_BIN_EXE_branvil");
 
 pub struct Server {
-    child: Option<Child>,
+    child: Option<ServiceProcess>,
     pub url: String,
     pub data: PathBuf,
     pub http: reqwest::Client,
@@ -80,8 +83,8 @@ impl Server {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn().expect("spawn branvil serve");
-        let stdout = child.stdout.take().unwrap();
+        let mut child = ServiceProcess::spawn(&mut cmd).expect("spawn branvil serve");
+        let stdout = child.take_stdout();
         let mut line = String::new();
         BufReader::new(stdout).read_line(&mut line).unwrap();
         let url = line
@@ -102,30 +105,11 @@ impl Server {
         }
     }
 
+    /// Crash the service and drain its children before offline access or restart.
     pub fn stop(&mut self) {
         if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
+            c.stop().expect("stop service process group");
         }
-    }
-
-    /// Stop normally before offline database access. Crash/restart tests keep
-    /// using stop(): killing only the service can leave its pre-exec Git child
-    /// holding an inherited database descriptor.
-    pub fn stop_for_admin(&mut self) {
-        if self.child.is_none() {
-            return;
-        }
-        #[cfg(unix)]
-        {
-            self.signal("INT");
-            let status = self
-                .exit_within(std::time::Duration::from_secs(10))
-                .expect("service did not finish normal shutdown");
-            assert!(status.success(), "normal shutdown failed: {status}");
-        }
-        #[cfg(not(unix))]
-        self.stop();
     }
 
     /// Sends SIGTERM and waits up to `limit` for the process to exit.
@@ -157,16 +141,8 @@ impl Server {
     /// it) when it was still running at `limit`.
     pub fn exit_within(&mut self, limit: std::time::Duration) -> Option<std::process::ExitStatus> {
         let mut c = self.child.take().expect("running");
-        let start = std::time::Instant::now();
-        while start.elapsed() < limit {
-            if let Some(status) = c.try_wait().unwrap() {
-                return Some(status);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let _ = c.kill();
-        let _ = c.wait();
-        None
+        c.exit_within(limit)
+            .expect("wait for service process group")
     }
 
     /// Waits for the process to exit by itself (after a failpoint).
@@ -292,12 +268,6 @@ impl Server {
             .env("BRANVIL_DATA_DIR", &self.data)
             .output()
             .unwrap()
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.stop();
     }
 }
 

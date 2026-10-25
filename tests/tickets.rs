@@ -135,7 +135,7 @@ async fn comment_edit_and_delete_preserve_identity_and_enforce_permissions() {
         .0,
         204
     );
-    w.server.stop_for_admin();
+    w.server.stop();
     let checked = w.server.cli(&w.owner, &["admin", "check"]);
     assert!(
         checked.status.success(),
@@ -849,7 +849,7 @@ async fn concurrent_label_changes_are_all_kept_and_indexes_match() {
 
     // And the offline consistency check finds nothing to repair.
     let mut server = w.server;
-    server.stop_for_admin();
+    server.stop();
     let out = std::process::Command::new(BIN)
         .args(["admin", "check", "--data-dir"])
         .arg(&server.data)
@@ -1285,7 +1285,7 @@ async fn relations_are_shown_from_both_sides_and_never_make_tickets_wait_on_each
 
     // The offline check finds the relation index as the records imply.
     let mut server = w.server;
-    server.stop_for_admin();
+    server.stop();
     let out = std::process::Command::new(BIN)
         .args(["admin", "check", "--data-dir"])
         .arg(&server.data)
