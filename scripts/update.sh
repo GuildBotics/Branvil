@@ -13,7 +13,10 @@ finished with every check the repository requires for a merge succeeded, it
 backs the running service up into ~/branvil-backups,
 fast-forwards the checkout's main, installs the commit as builds/<commit>, and
 rehearses the upgrade on a copy restored from that backup; then it records
-the update in builds/update, which scripts/serve.sh carries out. See "Upgrading" in docs/backup-restore.md.
+the update in builds/update, which scripts/serve.sh carries out.
+Failed checks are read again each round. After an hour, unavailable API,
+unregistered CI, and unfinished checks are each told once per commit.
+Failures go to the configured webhook and the desktop, even with no service. See "Upgrading" in docs/backup-restore.md.
 EOF
 }
 
@@ -46,7 +49,7 @@ EOF
   return "$status"
 }
 
-# Prints ready, running, or failed: the checks of commit $1 in the Branvil of
+# Prints ready, failed, running, unregistered, or unreachable: the checks of commit $1 in the Branvil of
 # origin, read with the owner's token in file $2 (passed in the environment).
 # Once the commit's run has finished, it is ready when every check the
 # repository requires for a merge succeeded: what may be merged may be
@@ -63,19 +66,22 @@ checks_of() {
     BRANVIL_CHECKS_SHA="$1" BRANVIL_CHECKS_TOKEN="$(<"$2")" node --input-type=module -e '
       const read = async (what, url) => {
         const answer = await fetch(url, {
+          signal: AbortSignal.timeout(10000),
           headers: { authorization: `Bearer ${process.env.BRANVIL_CHECKS_TOKEN}` },
         }).catch(() => null);
         // A 404 too: the repository is origin, whose commit was just fetched.
-        if (answer && !answer.ok) throw new Error(`reading ${what}: HTTP ${answer.status}`);
-        return answer && answer.json();
+        if (answer && !answer.ok) return null;
+        return answer && answer.json().catch(() => null);
       };
       const repo = process.env.BRANVIL_REPO_URL;
       const settings = await read("the repository", repo);
       const report = settings && (await read("the checks", `${repo}/commits/${process.env.BRANVIL_CHECKS_SHA}/checks`));
-      let state = "running"; // not reachable now: asked again in the next round
-      if (report) {
+      let state = "unreachable"; // asked again in the next round
+      if (report && Array.isArray(report.checks) && Array.isArray(settings.required_checks)
+          && typeof report.run_registered === "boolean" && typeof report.checks_expected === "boolean") {
         const { checks, checks_expected } = report;
-        if (checks.some((c) => c.status !== "completed")) state = "running";
+        if (!report.run_registered && checks_expected) state = "unregistered";
+        else if (checks.some((c) => c.status !== "completed")) state = "running";
         else if (!checks.length) state = checks_expected ? "running" : "ready";
         else {
           const passed = (name) => checks.some((c) => c.name === name && c.conclusion === "success");
@@ -84,6 +90,41 @@ checks_of() {
       }
       console.log(state);
     '
+}
+
+# Persists the first observation of each commit and successful notices by
+# commit and reason. Neither file is cleared by a successful waiting round.
+observe() {
+  local first seen
+  first="$(awk -v sha="$target" '$1 == sha { print $2; exit }' "$builds/checks-seen" 2>/dev/null || true)"
+  if [[ -z "$first" ]]; then
+    first="$(date +%s)"
+    seen="$(cat "$builds/checks-seen" 2>/dev/null || true)"
+    put "$builds/checks-seen" "${seen:+$seen
+}$target $first"
+  fi
+  echo "$first"
+}
+
+waiting() {
+  local reason="$1" now first seen key message
+  now="$(date +%s)"
+  first="$(observe)"
+  echo "The checks of $target have not finished ($reason); trying again later."
+  if (( now - first < 3600 )); then return; fi
+  key="$target $reason"
+  if grep -Fxq -- "$key" "$builds/told" 2>/dev/null; then return; fi
+  case "$reason" in
+    unreachable) message="the API is unreachable or did not return a usable response" ;;
+    unregistered) message="no CI run is registered" ;;
+    *) message="the checks are still queued or running" ;;
+  esac
+  message="The update to $target has waited over an hour: $message; Branvil still runs $previous."
+  if notify "$message"; then
+    seen="$(cat "$builds/told" 2>/dev/null || true)"
+    put "$builds/told" "${seen:+$seen
+}$key"
+  fi
 }
 
 # Runs at the exit, which no TERM cuts short.
@@ -100,15 +141,15 @@ finish() {
   echo "$message" >&2
   # Interrupted, it concluded nothing; the next round runs it again.
   if "$interrupted"; then return; fi
+  if [[ -n "$backup" ]]; then echo "Backup taken before the update: $backup" >&2; fi
+  # A round that fails as the one before notifies once.
+  if [[ "$(cat "$builds/notified" 2>/dev/null)" != "$message" ]]; then
+    notify "$message" "$builds/notified"
+  fi
   if "$decided"; then
     put "$builds/attempted" "$target"
     echo "The update does not try $target again (builds/attempted)." >&2
   fi
-  if [[ -n "$backup" ]]; then echo "Backup taken before the update: $backup" >&2; fi
-  # A round that fails as the one before notifies once.
-  if [[ "$(cat "$builds/notified" 2>/dev/null)" == "$message" ]]; then return; fi
-  put "$builds/notified" "$message"
-  notify "$message"
 }
 
 # The whole script is read before the checkout changes under it.
@@ -147,10 +188,24 @@ main() {
 
   stage="reaching the running service"
   local owner token="$data_dir/secrets/owner.token"
-  owner="$(client "$previous" member list | node -e '
-    const items = JSON.parse(require("fs").readFileSync(0, "utf8")).items;
-    console.log(items.find((m) => m.kind === "owner").name);
-  ')"
+  target="$(git rev-parse --verify origin/main 2>/dev/null || true)"
+  target="${target:-origin/main}"
+  if ! owner="$(node -e '
+    const env = { ...process.env };
+    delete env.BRANVIL_TOKEN;
+    delete env.BRANVIL_URL;
+    try {
+      const reply = require("child_process").execFileSync(process.argv[1],
+        ["member", "list", "--data-dir", process.argv[2]],
+        { env, timeout: 10000, stdio: ["ignore", "pipe", "ignore"] });
+      const owner = JSON.parse(reply).items.find((m) => m.kind === "owner");
+      if (!owner) throw new Error();
+      console.log(owner.name);
+    } catch { process.exit(1); }
+  ' "$builds/$previous/branvil" "$data_dir")"; then
+    waiting unreachable
+    exit 0
+  fi
   stage="fetching origin"
   fetch_as "$owner" "$token"
   target="$(git rev-parse origin/main)"
@@ -162,15 +217,15 @@ main() {
     echo "The checkout's main has commits that origin/main ($target) does not have; reset or move them." >&2
     exit 1
   fi
+  observe >/dev/null
   stage="reading the checks of $target"
   local checks
   checks="$(checks_of "$target" "$token")"
-  if [[ "$checks" == running ]]; then
-    echo "The checks of $target have not finished; trying again later."
+  if [[ "$checks" != ready && "$checks" != failed ]]; then
+    waiting "$checks"
     exit 0
   fi
   if [[ "$checks" == failed ]]; then
-    put "$builds/attempted" "$target"
     echo "The required checks of $target did not all succeed; it is not installed."
     exit 0
   fi

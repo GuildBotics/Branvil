@@ -270,14 +270,14 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
     );
     assert!(text(&out).contains(&serves), "{}", text(&out));
 
-    // A backup of the previous schema version: what version 15 wrote.
+    // A backup of the previous schema version: what version 16 wrote.
     let previous = out_dir.path().join("previous");
     copy_backup(&backup, &previous, &manifest);
     let db = previous.join("branvil.redb");
-    as_schema_15(&db);
+    as_schema_16(&db);
     let bytes = std::fs::read(&db).unwrap();
     let mut old = manifest.clone();
-    old["schema_version"] = json!(15);
+    old["schema_version"] = json!(16);
     for f in old["files"].as_array_mut().unwrap() {
         if f["path"] == "branvil.redb" {
             f["bytes"] = json!(bytes.len());
@@ -311,15 +311,11 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         text(&out)
     );
     assert!(
-        text(&out).contains("from schema version 15 to 16"),
+        text(&out).contains("from schema version 16 to 17"),
         "{}",
         text(&out)
     );
-    assert!(
-        text(&out).contains("pull request(s) upgraded"),
-        "{}",
-        text(&out)
-    );
+    assert!(text(&out).contains("CI run(s) upgraded"), "{}", text(&out));
     // Upgraded on the way: it has to pass its check before it serves.
     let checks_first = format!(
         "restored into {0}; `branvil admin check --data-dir {0}` has to pass before `branvil serve --data-dir {0}` starts it",

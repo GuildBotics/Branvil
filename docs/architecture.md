@@ -21,7 +21,7 @@ branvil runner ── runner API (HTTP) ─ ci ─ redb queue · ci/ files      
 
 | Module | Responsibility |
 | --- | --- |
-| `main.rs`, `cli.rs` | clap commands: `init`, `serve`, `admin check|reindex|upgrade` (offline, on the data directory), and `member`/`workspace`/`repo`/`backup`/`open` (clients of the running API, with the owner's token file by default) |
+| `main.rs`, `cli.rs` | clap commands: `init`, `serve`, `admin check|reindex|upgrade` (offline, on the data directory), `admin notify` (reads only the webhook credential, online or offline), and `member`/`workspace`/`repo`/`backup`/`open` (clients of the running API, with the owner's token file by default) |
 | `config.rs` | `branvil.toml`, data directory layout, loopback-only listen, fixed base URL |
 | `store.rs` | redb tables, order-preserving keys, JSON records, bounded blocking executor (`Store::read` / `Store::write`), the schema version and the upgrade frame (exclusive open, reads, then a copy and one write transaction) |
 | `upgrade.rs` | what the upgrade from the previous schema version changes in the records (replaced at each version) |
@@ -36,7 +36,8 @@ branvil runner ── runner API (HTTP) ─ ci ─ redb queue · ci/ files      
 | `runner/` | `branvil runner`: the claim/heartbeat/finish loop, `executor` (the `Executor` trait and the microsandbox implementation over the `msb` CLI), `workspace` (source checkout, artifacts without links, dependency cache), `zip` |
 | `upstream/` | the upstream code host: the provider boundary (`host.rs`, `github.rs`), members' accounts, following the default branch, publishing pull requests, carrying changes both ways, the host's check runs (see below) |
 | `landing.rs` | persistent queues per repository/base, admission and departure, gate commits, gate checks, and failure comments |
-| `autoland.rs` | the task that advances every repository's landing queues, automatically merges or publishes with `auto_land`, and tells the webhook when automatic landing gates pass (see below) |
+| `webhook.rs` | bounded webhook delivery shared by the service and offline CLI; never exposes the URL in errors |
+| `autoland.rs` | the task that advances every repository's landing queues, automatically merges or publishes with `auto_land`, and tells the webhook when automatic landing gates pass; independently sweeps CI failure notifications (`ci/notify.rs`) |
 | `backup.rs` | `POST /admin/backup` (online, consistent) and the offline `branvil restore` (`docs/backup-restore.md`) |
 | `tunnel.rs` | `branvil tunnel`: the system `ssh -N -L` forward to the Hub machine, restarted with backoff |
 | `events.rs` | bounded broadcast for SSE and the landing task |

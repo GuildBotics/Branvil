@@ -17,6 +17,7 @@ pub mod admin;
 pub mod api;
 pub mod config;
 pub mod files;
+pub mod notify;
 pub mod pipeline;
 pub mod queue;
 pub mod settings;
@@ -108,6 +109,8 @@ impl Check {
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Checks {
+    /// Whether this commit has a locally registered CI run.
+    pub run_registered: bool,
     pub checks: Vec<Check>,
     /// True when the commit has a pipeline or the repository has required
     /// checks: no checks then means "not registered yet", never "no checks".
@@ -343,9 +346,21 @@ impl Ci {
                 );
             return Ok(Checks {
                 checks,
+                run_registered: false,
                 checks_expected: expected,
             });
         };
+        self.run_checks(repo, &run, latest)
+    }
+
+    /// Checks of a registered run, shared with required-failure notification.
+    fn run_checks(
+        &self,
+        repo: &Repo,
+        run: &queue::Run,
+        latest: Vec<(Attempt, Attempt)>,
+    ) -> AppResult<Checks> {
+        let mut checks = Vec::new();
         if let PipelineState::Invalid { message } = &run.pipeline {
             checks.push(Check::placeholder(
                 "pipeline",
@@ -413,6 +428,7 @@ impl Ci {
             checks.push(Check::placeholder(name, "completed", Some("failure"), why));
         }
         Ok(Checks {
+            run_registered: true,
             checks,
             checks_expected: run.pipeline != PipelineState::Absent
                 || !repo.required_checks.is_empty(),

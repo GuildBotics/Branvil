@@ -28,6 +28,7 @@ import shutil
 import signal
 import sys
 import time
+import urllib.request
 
 tool, *args = sys.argv[1:]
 env = dict(os.environ)
@@ -199,7 +200,19 @@ if tool == "branvil":
         # On the copy of the rehearsal, steps and failures have their own names.
         step = ("REHEARSAL_" if data.name == "rehearsal" else "") + args[1].upper()
         hold(step)
-        if args[1] == "upgrade":
+        if args[1] == "notify":
+            if setting("DEV_TEST_NOTIFY_EXIT"):
+                sys.exit(int(setting("DEV_TEST_NOTIFY_EXIT")))
+            webhook = data / "secrets/webhook.url"
+            if webhook.exists():
+                request = urllib.request.Request(webhook.read_text().strip(),
+                    data=json.dumps({"text": args[2]}).encode(), headers={"Content-Type": "application/json"})
+                try:
+                    urllib.request.urlopen(request, timeout=2).close()
+                except Exception:
+                    print("the webhook request failed", file=sys.stderr)
+                    sys.exit(1)
+        elif args[1] == "upgrade":
             # As branvil admin upgrade: 3 upgraded (now or before) and not
             # checked since, 0 checked at this version, 1 failed.
             if database() == schema and unchecked():
@@ -647,6 +660,8 @@ class GitServer:
         self.checks = {}
         self.check_requests = []
         self.required = ["test"]  # an int: that error status
+        self.notices = []
+        self.notice_status = 200
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -661,7 +676,12 @@ class GitServer:
                 else:
                     self.backend()
 
-            do_POST = do_GET
+            def do_POST(self):
+                if self.path == "/webhook/test-secret":
+                    body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                    server.notices.append(json.loads(body)["text"])
+                    return self.answer(server.notice_status)
+                self.do_GET()
 
             def answer(self, status, payload=b"", headers=()):
                 self.send_response(status)
@@ -686,6 +706,8 @@ class GitServer:
                 answer = server.checks.get(sha, 404)
                 if isinstance(answer, int):  # an error status
                     return self.answer(answer, b'{"error": {"code": "test"}}')
+                if "checks" in answer:
+                    answer = {"run_registered": bool(answer["checks"]), **answer}
                 self.answer(200, json.dumps(answer).encode())
 
             def backend(self):
@@ -887,7 +909,7 @@ class ServeScriptTests(ScriptTestCase):
         steps = []
         for event in self.events():
             tool, args = event["tool"], event["args"]
-            if tool == "branvil" and args[0] != "member":
+            if tool == "branvil" and args[0] != "member" and args[:2] != ["admin", "notify"]:
                 steps.append(" ".join(args[:2]) if args[0] == "admin" else args[0])
             elif tool == "cargo" and args[0] == "build":
                 steps.append("build")
@@ -1271,7 +1293,7 @@ class ServeScriptTests(ScriptTestCase):
         self.assertEqual(self.steps()[-3:], ["admin upgrade", "admin check", "serve"])
         self.assertFalse(self.unchecked())
 
-    def test_failed_required_checks_are_not_installed_nor_read_again(self):
+    def test_failed_required_checks_are_read_again_and_install_after_retry(self):
         new = self.merge({
             "checks": [
                 {"name": "test", "status": "completed", "conclusion": "failure"},
@@ -1279,13 +1301,125 @@ class ServeScriptTests(ScriptTestCase):
             ],
             "checks_expected": True,
         })
-        self.watch()
-        self.wait_until(lambda: self.attempted() == new)
+        proc, output = self.watch()
         self.rounds_pass()
-        self.assertEqual(self.server.check_requests, [new])
+        self.wait_until(lambda: self.server.check_requests.count(new) >= 2, proc)
+        self.assertIsNone(self.attempted())
         self.assertEqual(self.steps(), self.BOOT)
         self.assertEqual(self.current(), self.base)
         self.assertEqual(self.notifications(), [])
+
+        self.server.checks[new] = SUCCESS
+        self.finished(proc, output, new)
+        self.assert_runs(new)
+        self.assertEqual(self.notifications(), [], "The service owns failure notification")
+
+    def test_hour_long_waits_distinguish_reasons_and_notify_once_across_restarts(self):
+        new = self.merge(RUNNING)
+        proc, output = self.watch()
+        self.rounds_pass()
+        self.assertEqual(self.notifications(), [], "No early alert")
+        self.assertIn(new, (self.builds / "checks-seen").read_text())
+        (self.builds / "checks-seen").write_text(f"{new} {int(time.time()) - 3601}\n")
+        for report, reason, text in [
+            (RUNNING, "unregistered", "no CI run is registered"),
+            ({"run_registered": True, "checks": [{"name": "test", "status": "queued"}], "checks_expected": True},
+             "running", "still queued or running"),
+            (503, "unreachable", "API is unreachable"),
+        ]:
+            self.server.checks[new] = report
+            self.rounds_pass()
+            self.wait_until(lambda: f"{new} {reason}" in (self.builds / "told").read_text())
+            self.assertTrue(any(text in n for n in self.notifications()))
+        self.assertEqual(len(self.notifications()), 3)
+        proc, output = self.restart()
+        self.rounds_pass()
+        self.server.checks[new] = RUNNING
+        self.rounds_pass()
+        self.assertEqual(len(self.notifications()), 3, "Prior reasons remain told after restart")
+        self.assertIsNone(self.attempted())
+        self.server.checks[new] = SUCCESS
+        self.finished(proc, output, new)
+        self.assert_runs(new)
+
+    def test_a_stopped_service_is_reported_to_the_webhook_by_the_installed_binary(self):
+        (self.data / "secrets/webhook.url").write_text(f"{self.server.url}/webhook/test-secret")
+        proc, _ = self.watch(running=False, DEV_TEST_SERVE_EXIT="1")
+        self.wait_until(lambda: len(self.server.notices) == 1, proc)
+        self.wait_until(lambda: self.current() is None, proc)
+        self.assertIsNone(self.service_pid())
+        self.assertIn("Branvil is stopped", self.server.notices[0])
+        calls = [e for e in self.events("branvil") if e["args"][:2] == ["admin", "notify"]]
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["token_present"])
+        self.assertFalse(calls[0]["url_present"])
+        self.assertEqual(calls[0]["args"][-1], str(self.data))
+
+    def test_terminal_notice_retries_after_webhook_failure_and_watcher_restart(self):
+        (self.data / "secrets/webhook.url").write_text(f"{self.server.url}/webhook/test-secret")
+        self.server.notice_status = 503
+        proc, _ = self.watch(running=False, DEV_TEST_SERVE_EXIT="1")
+        self.wait_until(lambda: self.current() is None and self.server.notices, proc)
+        self.assertTrue(list(self.builds.glob("*.notice")), "Failed sends stay queued")
+        proc.terminate()
+        self.assertEqual(proc.wait(timeout=30), 143)
+        # No service/current build is needed to flush the persistent notice.
+        self.server.notice_status = 200
+        before = len(self.server.notices)
+        proc, _ = self.watch(running=False)
+        self.wait_until(lambda: len(self.server.notices) > before, proc)
+        self.wait_until(lambda: not list(self.builds.glob("*.notice")), proc)
+        self.assertIsNone(self.current())
+        self.assertIsNone(self.service_pid())
+        self.assertEqual(len(set(self.server.notices)), 1)
+
+    def test_pending_notice_survives_retiring_its_sender_build(self):
+        (self.data / "secrets/webhook.url").write_text(f"{self.server.url}/webhook/test-secret")
+        self.server.notice_status = 503
+        new = self.merge(SUCCESS)
+        self.control(DEV_TEST_BACKUP_EXIT="1")
+        proc, output = self.watch()
+        self.wait_until(lambda: self.server.notices, proc)
+        self.control()
+        self.finished(proc, output, new)
+        newer = self.merge(SUCCESS)
+        self.finished(proc, output, newer)
+        self.assertFalse((self.builds / self.base).exists(), "Original sender was retired")
+        self.assertTrue(list(self.builds.glob("*.notice")))
+        proc.terminate()
+        self.assertEqual(proc.wait(timeout=30), 143)
+        (self.builds / "current").unlink()
+        self.server.notice_status = 200
+        before = len(self.server.notices)
+        proc, _ = self.watch(running=False)
+        self.wait_until(lambda: len(self.server.notices) > before, proc)
+        self.wait_until(lambda: not list(self.builds.glob("*.notice")), proc)
+        self.assertIsNone(self.service_pid())
+
+    def test_first_notification_capable_build_sends_its_own_activation_failure(self):
+        (self.data / "secrets/webhook.url").write_text(f"{self.server.url}/webhook/test-secret")
+        proc, _ = self.watch()
+        new = self.merge(SUCCESS)
+        self.control(**{f"DEV_TEST_SCHEMA_{new}": "12", f"DEV_TEST_CHECK_EXIT_{new}": "1",
+                        f"DEV_TEST_NOTIFY_EXIT_{self.base}": "2"})
+        self.wait_until(lambda: self.current() is None and self.server.notices, proc)
+        self.assertIn("Branvil is stopped", self.server.notices[0])
+        calls = [e for e in self.events("branvil") if e["args"][:2] == ["admin", "notify"]]
+        self.assertTrue(all(e["binary"] == self.binary(new) for e in calls))
+
+    def test_terminal_failure_enqueues_before_recording_attempted(self):
+        (self.data / "secrets/webhook.url").write_text(f"{self.server.url}/webhook/test-secret")
+        self.server.notice_status = 503
+        proc, _ = self.watch()
+        hold = self.root / "hold-notice"
+        hold.touch()
+        self.control(DEV_TEST_BUILD_EXIT="1", DEV_TEST_HOLD_NOTIFY=str(hold))
+        new = self.merge(SUCCESS)
+        self.wait_until(lambda: Path(str(hold) + ".held").exists(), proc)
+        self.assertTrue(list(self.builds.glob("*.notice")), "Durable notice precedes the skip marker")
+        self.assertIsNone(self.attempted())
+        hold.unlink()
+        self.wait_until(lambda: self.attempted() == new, proc)
 
     def test_only_the_checks_the_repository_requires_decide(self):
         # A check that is not required for a merge, such as one against
@@ -1336,12 +1470,7 @@ class ServeScriptTests(ScriptTestCase):
         self.server.required = 503
         self.server.checks[new] = SUCCESS
         self.rounds_pass()
-        log = output.read_text(encoding="utf-8")
-        for text in ["checks: HTTP 500", "checks: HTTP 401", "checks: HTTP 404", "TypeError",
-                     "the repository: HTTP 503"]:
-            self.assertIn(text, log)
-        [message] = self.notifications()
-        self.assertIn(f"stopped while reading the checks of {new}", message)
+        self.assertEqual(self.notifications(), [], "Unavailable checks wait an hour")
         self.assertEqual(self.steps(), self.BOOT + self.UPDATE)
         self.assertIsNone(self.attempted(), "Read again in the next round")
         # Keep the next update pending until authentication has recovered.
@@ -1349,15 +1478,15 @@ class ServeScriptTests(ScriptTestCase):
         self.server.required = ["test"]
         token = self.data / "secrets/owner.token"
         token.unlink()
-        self.wait_until(lambda: len(self.notifications()) == 2, proc)
-        self.assertIn("stopped while fetching origin", self.notifications()[1])
-        self.assertIn(f"Branvil still runs {previous}", self.notifications()[1])
+        self.wait_until(lambda: len(self.notifications()) == 1, proc)
+        self.assertIn("stopped while fetching origin", self.notifications()[0])
+        self.assertIn(f"Branvil still runs {previous}", self.notifications()[0])
         # Observe repeated failed rounds, rather than merely the first notice.
         self.wait_until(
             lambda: output.read_text(encoding="utf-8").count("stopped while fetching origin") >= 3,
             proc,
         )
-        self.assertEqual(len(self.notifications()), 2)
+        self.assertEqual(len(self.notifications()), 1)
         self.assertTrue((self.builds / "notified").exists())
         token.write_text("test-owner-token\n", encoding="utf-8")
         self.rounds_pass()
@@ -1369,7 +1498,7 @@ class ServeScriptTests(ScriptTestCase):
         self.server.checks[new] = SUCCESS
         self.finished(proc, output, new)
         self.assert_runs(new)
-        self.assertEqual(len(self.notifications()), 2)
+        self.assertEqual(len(self.notifications()), 1)
         self.assertFalse((self.builds / "notified").exists())
 
     def check_checkout(self, change):
@@ -1692,7 +1821,8 @@ class ServeScriptTests(ScriptTestCase):
             self.assertEqual(self.database(), "12" if upgraded else "11")
             return
         self.wait_until(self.notifications, proc)
-        self.assertEqual(self.attempted(), new)
+        # Delivery is durably queued before the updater records giving up.
+        self.wait_until(lambda: self.attempted() == new, proc)
         [message] = self.notifications()
         self.assertIn(message, output.read_text(encoding="utf-8"))
         if stage in ("install", "rehearsal upgrade", "rehearsal check"):

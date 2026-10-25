@@ -406,6 +406,7 @@ export interface Checks extends CheckSet {
 
 export interface CommitChecks extends CheckSet {
   sha: string;
+  run_registered: boolean;
 }
 
 export interface Branch {

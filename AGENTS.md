@@ -59,7 +59,9 @@ hold across modules:
 - **The HTTP API is the only way into the data.** The GUI, GuildBotics'
   provider, and the `branvil` CLI's client commands all use it. Only
   `branvil init`, `branvil admin check|reindex|upgrade`, and `branvil restore`, run
-  with the service stopped, work on the data directory directly.
+  with the service stopped, work on the data directory directly. `branvil admin
+  notify` reads only `secrets/webhook.url` and works with the service running
+  or stopped; it never opens the database.
 - **The GUI looks like GuildBotics Desktop.** Keep the Mantine version, the
   theme (`web/src/theme.ts`), and the design tokens and component overrides in
   `web/src/styles.css` the same as GuildBotics Desktop's ("GUI files" in

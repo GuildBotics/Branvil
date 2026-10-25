@@ -23,7 +23,7 @@ pub type Tbl = TableDefinition<'static, &'static [u8], &'static [u8]>;
 /// The schema version this build reads and writes. A database of any other
 /// version is refused instead of being misread; one of the previous version
 /// is upgraded by `upgrade` (`branvil admin upgrade`, `branvil restore`).
-pub const SCHEMA_VERSION: u64 = 16;
+pub const SCHEMA_VERSION: u64 = 17;
 
 pub const META: Tbl = TableDefinition::new("meta");
 pub const COUNTERS: Tbl = TableDefinition::new("counters");
@@ -66,6 +66,7 @@ pub const IX_CI_PENDING: Tbl = TableDefinition::new("ix_ci_pending");
 pub const IX_CI_ACTIVE: Tbl = TableDefinition::new("ix_ci_active");
 pub const IX_CI_WAITING: Tbl = TableDefinition::new("ix_ci_waiting");
 pub const IX_CI_TREE: Tbl = TableDefinition::new("ix_ci_tree");
+pub const IX_CI_UNNOTIFIED: Tbl = TableDefinition::new("ix_ci_unnotified");
 
 pub const PRIMARY_TABLES: &[Tbl] = &[
     META,
@@ -108,6 +109,7 @@ pub const INDEX_TABLES: &[Tbl] = &[
     IX_CI_ACTIVE,
     IX_CI_WAITING,
     IX_CI_TREE,
+    IX_CI_UNNOTIFIED,
 ];
 
 /// Order-preserving composite key. Strings are escaped (`00` → `00 FF`) and

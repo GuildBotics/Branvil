@@ -1607,6 +1607,7 @@ pub async fn checks(
     };
     let head = if head_sha.is_empty() {
         crate::ci::Checks {
+            run_registered: false,
             checks: Vec::new(),
             checks_expected: !repo.required_checks.is_empty(),
         }
