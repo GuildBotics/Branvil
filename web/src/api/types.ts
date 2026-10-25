@@ -341,6 +341,12 @@ export type CheckConclusion =
   | "startup_failure"
   | null;
 
+export interface ReusedFrom {
+  attempt_id: string;
+  url: string;
+  sha: string;
+}
+
 export interface Check {
   name: string;
   status: CheckStatus;
@@ -350,6 +356,7 @@ export interface Check {
   details_url?: string;
   details?: string;
   artifact_names?: string[];
+  reused_from?: ReusedFrom;
   started_at?: string;
   finished_at?: string;
   /** For an unfinished check: how long the job took where it last succeeded before. */
@@ -390,6 +397,7 @@ export interface Job {
   finished_at: string | null;
   details: string | null;
   artifact_names: string[];
+  reused_from: ReusedFrom | null;
 }
 
 export interface JobLog {

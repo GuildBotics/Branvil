@@ -737,12 +737,16 @@ once its pull request is open on the host.
   so far). While it is `in_progress`, `expected_secs` is how long the same job
   (by name) last took from claim to conclusion where it succeeded: on the
   commit itself or the nearest of its first-parent ancestors (20 commits in
-  all); there is none without such a commit. The GUI shows the time left by
+  all), excluding reused attempts; there is none without such a commit. The GUI shows the time left by
   it.
 - `status` is `queued`, `in_progress`, or `completed`. `conclusion` (when
   completed) is `success`, `failure`, `cancelled`, `timed_out`, `skipped`, or
   `startup_failure` (no runner or no usable executor; the details say which).
-  Only an attempt of that exact commit can be `success`.
+  A successful attempt belongs to that exact commit, but may reuse an actual
+  successful execution of the same tree, job definition, network setting,
+  and image digest (`docs/ci.md`, "Trust"). Such a check includes
+  `reused_from: {"attempt_id","url","sha"}` linking its source; its
+  `artifact_names` resolve to the source's unpruned artifacts.
 - `checks_expected` is true when the head has a pipeline (valid or not) or
   Branvil cannot read whether it has one, or when the repository has required
   checks: a head without checks is then "not
@@ -767,10 +771,14 @@ is not the full sha of a commit of the repository.
 ### CI attempts
 
 - `GET /api/v1/repos/{repo}/jobs/{attempt_id}` →
-  `{"id","url","repository","job","attempt","sha","image_digest","status","conclusion","details","cancel_requested","created_at","started_at","finished_at","artifact_names","log_bytes"}`.
+  `{"id","url","repository","job","attempt","sha","image_digest","reused_from","status","conclusion","details","cancel_requested","created_at","started_at","finished_at","artifact_names","log_bytes"}`.
   `image_digest` is the configuration digest (`sha256:…`) of the image the
   job ran on, as its runner reported it; `null` when the job did not get that
-  far. `404 not_found` for an id of another repository.
+  far. `reused_from` is `null` for an actual execution, otherwise
+  `{"attempt_id","url","sha"}` of its source execution. Its own log explains
+  the reuse; the source URL leads to the execution log. `artifact_names` are
+  the source's artifacts, empty after the source's retention expires.
+  `404 not_found` for an id of another repository.
 - `GET /api/v1/repos/{repo}/jobs/{attempt_id}/log?tail_bytes={n}` →
   `{"log": "...", "log_bytes": 12345, "truncated": true, "pruned": false}`; `log`
   is the last `tail_bytes` bytes (default 65536, at most 4194304; decoded as
@@ -784,14 +792,16 @@ is not the full sha of a commit of the repository.
   same job definition). Only the latest attempt of its job as the commit's
   pipeline defines it, once completed, can be retried (`409 conflict`
   otherwise, also for an attempt of another definition); a full queue is
-  `503 unavailable`.
+  `503 unavailable`. The new attempt always executes; it never reuses a
+  result, including when requeued after interruption.
 - `POST /api/v1/repos/{repo}/jobs/{attempt_id}/cancel` → the attempt: a
   queued one is `completed`/`cancelled` at once, a running one gets
   `cancel_requested: true` and is concluded `cancelled` when its runner stops
   (or its lease runs out). A completed attempt is returned unchanged.
 - `GET /api/v1/repos/{repo}/commits/{sha}/artifacts/{name}` →
   `application/zip` with `Content-Length`; the artifact of the newest attempt
-  of that commit that has it. `404 not_found` when there is none.
+  of that commit that has it, resolving a reused result to its source's file.
+  The source's original retention applies. `404 not_found` when there is none.
 
 ## Runner API (`/api/v1/runner`, runner token)
 
@@ -804,12 +814,20 @@ kind `runner` (created by `branvil runner register`); any other member gets
 - `POST /claim` `{"executor": "microsandbox", "executor_state": "ready"|"unavailable", "executor_detail"?: "..."}`
   → `204` (nothing queued, or the service is stopping: see "Stopping the
   service" in `docs/ci.md`) or
-  `{"attempt_id","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false,"queued_secs"}`.
+  `{"attempt_id","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false,"queued_secs","reuse"}`.
   `timeout_secs` is `null` when the pipeline gives none; the runner applies its
   own CPUs, memory, and time limit. `cache_scope` is `protected` for a run a
   protected branch asked for, the only runs that save the dependency cache
   (`docs/ci.md`). `queued_secs` is how long the attempt
   waited in the queue (from its registration to this claim).
+  `reuse` is `null` or `{"attempt_id","sha","image_digest","cache_key"}`
+  of the latest finished actual successful execution whose files have not
+  been pruned, with the same repository,
+  tree, job definition, and network. `cache_key` may be `null`. Manual retries
+  receive no source. The runner compares the resolved image digest before
+  fetching source. If it matches, jobs without a cache or outside protected
+  scope may reuse; protected cached jobs also require a complete save of that
+  key on the runner within 24 hours. Otherwise the runner executes normally.
   The executor state is shown in the diagnostics; a runner whose executor is
   unavailable still claims and concludes `startup_failure`.
 - `GET /attempts/{id}/source` → `application/x-git-bundle`: a v2 Git bundle of
@@ -823,10 +841,17 @@ kind `runner` (created by `branvil runner register`); any other member gets
 - `PUT /attempts/{id}/artifacts/{name}` zip bytes → `{"name","bytes"}`. The name
   must be one the job declares; `400 invalid` for anything not starting like a
   zip archive, `413 too_large` above `ci.artifact_max_mib`.
-- `POST /attempts/{id}/finish` `{"lease","conclusion","details"?,"image_digest"?}`
+- `POST /attempts/{id}/finish` `{"lease","conclusion","details"?,"image_digest"?,"reused_from"?,"cache_key"?}`
   → the attempt. `image_digest` is the configuration digest of the image the
   job ran on (`sha256:<64 hex>`, `400 invalid` otherwise), recorded on the
-  attempt. When a cancellation was requested the conclusion is `cancelled`
+  attempt. An actual execution of a cached job reports its computed
+  `cache_key` (64 hex characters); other jobs leave it `null`. A reused success
+  reports the source attempt ID as `reused_from` and leaves `cache_key` and
+  `details` null; the source is already identified by `reused_from` and the log.
+  The service validates that the source is an actual successful execution of
+  the same repository, tree, job, network, and image and that reuse is allowed;
+  an invalid reuse report is `400 invalid`. When a cancellation was requested
+  no reuse is recorded and the conclusion is `cancelled`
   whatever was reported.
 
 A request with a lease that is not the attempt's current, unexpired lease

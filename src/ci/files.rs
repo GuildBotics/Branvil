@@ -182,10 +182,15 @@ pub fn artifact_attempt(
     sha: &str,
     name: &str,
 ) -> AppResult<Option<queue::Attempt>> {
-    Ok(queue::attempts_of(r, repo, sha)?
-        .into_iter()
-        .filter(|a| !a.files_pruned && a.artifacts.iter().any(|x| x.name == name))
-        .max_by(|a, b| (&a.created_at, a.seq).cmp(&(&b.created_at, b.seq))))
+    let mut attempts = queue::attempts_of(r, repo, sha)?;
+    attempts.sort_by(|a, b| (&b.created_at, b.seq).cmp(&(&a.created_at, a.seq)));
+    for a in attempts {
+        let source = queue::result_attempt(r, &a)?;
+        if !source.files_pruned && source.artifacts.iter().any(|x| x.name == name) {
+            return Ok(Some(source));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

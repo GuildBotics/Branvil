@@ -54,6 +54,9 @@ pub struct Run {
     pub repo: String,
     pub repo_path: String,
     pub sha: String,
+    /// The commit's tree. None only for upgraded runs whose commit is no
+    /// longer available in Git; those runs cannot supply reusable results.
+    pub tree: Option<String>,
     pub seq: u64,
     pub created_at: String,
     /// Branches whose tip this commit is and that asked for CI of it. When
@@ -87,6 +90,12 @@ pub struct Attempt {
     /// The configuration digest of the image the job ran on, as its runner
     /// reported it (none when it did not get that far).
     pub image_digest: Option<String>,
+    /// The actual execution whose result this attempt reused, reported at finish.
+    pub reused_from: Option<String>,
+    /// The dependency cache key computed by an actual execution.
+    pub cache_key: Option<String>,
+    /// Manual retries (including their interruption requeues) must execute.
+    pub allow_reuse: bool,
     pub number: u64,
     pub seq: u64,
     pub status: String,
@@ -123,15 +132,22 @@ pub fn run_key(repo: &str, sha: &str) -> Vec<u8> {
 }
 
 pub fn run_index(r: &Run) -> Vec<IxEntry> {
+    let mut out = Vec::new();
+    if let Some(tree) = &r.tree {
+        out.push(IxEntry {
+            table: store::IX_CI_TREE,
+            key: Key::new().s(&r.repo).s(tree).s(&r.sha).bytes(),
+            value: run_key(&r.repo, &r.sha),
+        });
+    }
     if r.waiting {
-        vec![IxEntry {
+        out.push(IxEntry {
             table: store::IX_CI_WAITING,
             key: Key::new().u(r.seq).bytes(),
             value: run_key(&r.repo, &r.sha),
-        }]
-    } else {
-        Vec::new()
+        });
     }
+    out
 }
 
 pub fn attempt_index(a: &Attempt) -> Vec<IxEntry> {
@@ -302,6 +318,9 @@ fn new_attempt(w: &Wtx, run: &Run, job: &JobDef, network: bool, now: &str) -> Ap
         sha: run.sha.clone(),
         job: job.clone(),
         image_digest: None,
+        reused_from: None,
+        cache_key: None,
+        allow_reuse: true,
         number,
         seq: w.next("ci_seq")?,
         status: "queued".into(),
@@ -337,6 +356,7 @@ pub struct Registration {
     pub repo: String,
     pub repo_path: String,
     pub sha: String,
+    pub tree: Option<String>,
     pub branch: String,
     pub protected: bool,
     pub pipeline: PipelineState,
@@ -382,6 +402,7 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
             repo: reg.repo,
             repo_path: reg.repo_path,
             sha: reg.sha,
+            tree: reg.tree,
             seq: w.next("ci_seq")?,
             created_at: now.to_string(),
             branches: vec![reg.branch],
@@ -548,6 +569,85 @@ pub fn branch_left(
 pub struct Claimed {
     pub attempt: Attempt,
     pub lease: String,
+    pub reuse: Option<Reuse>,
+}
+
+/// A successful execution the runner may reuse after checking its image and cache.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Reuse {
+    pub attempt_id: String,
+    pub sha: String,
+    pub image_digest: String,
+    pub cache_key: Option<String>,
+}
+
+/// The execution metadata reported by the runner at finish.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ResultInfo {
+    pub image_digest: Option<String>,
+    pub reused_from: Option<String>,
+    pub cache_key: Option<String>,
+}
+
+fn can_reuse(r: &impl Rd, a: &Attempt, source: &Attempt) -> AppResult<bool> {
+    if !a.allow_reuse
+        || a.id == source.id
+        || a.repo != source.repo
+        || a.job != source.job
+        || a.network != source.network
+        || source.status != "completed"
+        || source.conclusion.as_deref() != Some("success")
+        || source.reused_from.is_some()
+        || source.image_digest.is_none()
+    {
+        return Ok(false);
+    }
+    let tree = get_run(r, &a.repo, &a.sha)?.and_then(|run| run.tree);
+    Ok(tree.is_some() && tree == get_run(r, &source.repo, &source.sha)?.and_then(|run| run.tree))
+}
+
+fn reuse_candidate(r: &impl Rd, a: &Attempt) -> AppResult<Option<Reuse>> {
+    if !a.allow_reuse {
+        return Ok(None);
+    }
+    let Some(tree) = get_run(r, &a.repo, &a.sha)?.and_then(|run| run.tree) else {
+        return Ok(None);
+    };
+    let prefix = Key::new().s(&a.repo).s(&tree).bytes();
+    let mut newest: Option<Attempt> = None;
+    for (_, key) in r.prefix_raw(store::IX_CI_TREE, &prefix, None, usize::MAX)? {
+        let run: Run = r
+            .get(store::CI_RUNS, &key)?
+            .ok_or_else(|| AppError::internal("tree index run is missing"))?;
+        for source in attempts_of(r, &a.repo, &run.sha)? {
+            // Once offered, a source may expire before finish. Retention
+            // disqualifies new offers, not a runner's already claimed work.
+            if !source.files_pruned
+                && can_reuse(r, a, &source)?
+                && newest.as_ref().is_none_or(|old| {
+                    (&source.finished_at, source.seq) > (&old.finished_at, old.seq)
+                })
+            {
+                newest = Some(source);
+            }
+        }
+    }
+    Ok(newest.map(|source| Reuse {
+        attempt_id: source.id,
+        sha: source.sha,
+        image_digest: source.image_digest.unwrap(),
+        cache_key: source.cache_key,
+    }))
+}
+
+/// The attempt that owns the result's artifact files. Reuse never chains.
+pub fn result_attempt(r: &impl Rd, a: &Attempt) -> AppResult<Attempt> {
+    match &a.reused_from {
+        Some(id) => {
+            get_attempt(r, id)?.ok_or_else(|| AppError::internal("reuse source is missing"))
+        }
+        None => Ok(a.clone()),
+    }
 }
 
 /// Hands the oldest queued attempt to `runner` under a new lease.
@@ -573,7 +673,12 @@ pub fn claim(w: &Wtx, runner: &str, lease_secs: u64, now: &str) -> AppResult<Opt
     a.runner = Some(runner.to_string());
     a.started_at = Some(now.to_string());
     put_attempt(w, Some(&old), &a)?;
-    Ok(Some(Claimed { attempt: a, lease }))
+    let reuse = reuse_candidate(w, &a)?;
+    Ok(Some(Claimed {
+        attempt: a,
+        lease,
+        reuse,
+    }))
 }
 
 fn lease_hash(lease: &str) -> String {
@@ -640,7 +745,7 @@ pub fn finish(
     lease: &str,
     conclusion: &str,
     details: Option<String>,
-    image_digest: Option<String>,
+    info: ResultInfo,
     now: &str,
 ) -> AppResult<Attempt> {
     if !CONCLUSIONS.contains(&conclusion) {
@@ -649,7 +754,8 @@ pub fn finish(
             CONCLUSIONS.join(", ")
         )));
     }
-    if image_digest
+    if info
+        .image_digest
         .as_deref()
         .is_some_and(|d| !super::pipeline::valid_digest(d))
     {
@@ -659,7 +765,27 @@ pub fn finish(
     }
     let old = leased(w, id, lease, now)?;
     let mut a = old.clone();
-    a.image_digest = image_digest;
+    if let Some(key) = &info.cache_key
+        && (key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) || a.job.cache.is_none())
+    {
+        return Err(AppError::invalid(
+            "cache_key must be a SHA-256 key of a job with a cache.",
+        ));
+    }
+    if let Some(id) = &info.reused_from {
+        let source = get_attempt(w, id)?.ok_or_else(|| AppError::invalid("No reuse source."))?;
+        if conclusion != "success"
+            || info.cache_key.is_some()
+            || !can_reuse(w, &a, &source)?
+            || info.image_digest != source.image_digest
+        {
+            return Err(AppError::invalid(
+                "The reuse source must be a successful execution of the same tree, job, network, and image.",
+            ));
+        }
+    }
+    a.image_digest = info.image_digest;
+    a.cache_key = info.cache_key;
     if a.cancel_requested {
         let why = a.details.clone().unwrap_or_else(|| "Cancelled.".into());
         let reported = details.map(|d| format!(" (the runner reported {conclusion}: {d})"));
@@ -671,6 +797,7 @@ pub fn finish(
         );
     } else {
         conclude(&mut a, conclusion, details, now);
+        a.reused_from = info.reused_from;
     }
     put_attempt(w, Some(&old), &a)?;
     Ok(a)
@@ -742,7 +869,8 @@ pub fn retry(w: &Wtx, id: &str, queue_max: usize, now: &str) -> AppResult<Attemp
         )));
     }
     let network = network_of(w, &old.repo)?;
-    let a = new_attempt(w, &run, &old.job, network, now)?;
+    let mut a = new_attempt(w, &run, &old.job, network, now)?;
+    a.allow_reuse = false;
     put_attempt(w, None, &a)?;
     Ok(a)
 }
@@ -824,6 +952,7 @@ fn interrupt(w: &Wtx, old: &Attempt, why: &str, now: &str) -> AppResult<()> {
         let mut next = new_attempt(w, &run, &old.job, old.network, now)?;
         next.seq = old.seq;
         next.after_interrupt = true;
+        next.allow_reuse = old.allow_reuse;
         put_attempt(w, None, &next)?;
     }
     Ok(())
@@ -913,6 +1042,7 @@ mod tests {
             repo: "repo_1".into(),
             repo_path: "acme/demo".into(),
             sha: sha.into(),
+            tree: Some(format!("tree-{sha}")),
             branch: branch.into(),
             protected: branch == "main",
             pipeline: PipelineState::Jobs {
@@ -946,6 +1076,232 @@ mod tests {
         s.read_sync(|r| latest_attempts(r, "repo_1", sha)).unwrap()
     }
 
+    fn same_tree(sha: &str) -> Registration {
+        Registration {
+            tree: Some("same-tree".into()),
+            ..reg(sha, "main", &["test"])
+        }
+    }
+
+    fn execute(s: &Store, sha: &str, now: &str) -> Attempt {
+        s.write_sync(|w| {
+            register(w, same_tree(sha), 10, now)?;
+            let c = claim(w, "r", 60, now)?.unwrap();
+            finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "success",
+                None,
+                ResultInfo {
+                    image_digest: Some(DIGEST.into()),
+                    ..Default::default()
+                },
+                now,
+            )
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn reuse_requires_the_same_repo_tree_definition_network_and_an_actual_success() {
+        for mismatch in [
+            "none",
+            "repo",
+            "tree",
+            "definition",
+            "network",
+            "failure",
+            "unfinished",
+            "reused",
+            "missing_tree",
+            "missing_digest",
+            "pruned",
+        ] {
+            let (_d, s) = store();
+            let source = execute(&s, "s1", T0);
+            s.write_sync(|w| {
+                let mut changed = source.clone();
+                match mismatch {
+                    "network" => changed.network = true,
+                    "failure" => changed.conclusion = Some("failure".into()),
+                    "unfinished" => {
+                        changed.status = "in_progress".into();
+                        changed.conclusion = None;
+                    }
+                    "reused" => changed.reused_from = Some("another".into()),
+                    "missing_digest" => changed.image_digest = None,
+                    "pruned" => changed.files_pruned = true,
+                    _ => {}
+                }
+                put_attempt(w, Some(&source), &changed)?;
+                let mut next = same_tree("s2");
+                match mismatch {
+                    "repo" => {
+                        next.repo = "repo_2".into();
+                        next.repo_path = "acme/other".into();
+                    }
+                    "tree" => next.tree = Some("different-tree".into()),
+                    "missing_tree" => next.tree = None,
+                    "definition" => {
+                        if let PipelineState::Jobs { jobs } = &mut next.pipeline {
+                            jobs[0].commands.push("false".into());
+                        }
+                    }
+                    _ => {}
+                }
+                register(w, next, 10, T1)?;
+                let c = claim(w, "r", 60, T1)?.unwrap();
+                assert_eq!(
+                    c.reuse.as_ref().map(|x| x.attempt_id.as_str()),
+                    if mismatch == "none" {
+                        Some(source.id.as_str())
+                    } else {
+                        None
+                    },
+                    "{mismatch}"
+                );
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn reuse_selects_the_latest_finished_execution_and_never_chains() {
+        let (_d, s) = store();
+        let first = execute(&s, "s1", T0);
+        let second = execute(&s, "s2", T1); // runner declined reuse and actually executed
+        assert!(second.reused_from.is_none());
+        s.write_sync(|w| {
+            register(w, same_tree("s3"), 10, T2)?;
+            let c = claim(w, "r", 60, T2)?.unwrap();
+            assert_eq!(c.reuse.as_ref().unwrap().attempt_id, second.id);
+            let info = ResultInfo {
+                image_digest: Some(DIGEST.into()),
+                reused_from: Some(second.id.clone()),
+                cache_key: None,
+            };
+            let mut invalid = info.clone();
+            invalid.image_digest = None;
+            assert!(finish(w, &c.attempt.id, &c.lease, "success", None, invalid, T2).is_err());
+            assert!(
+                finish(
+                    w,
+                    &c.attempt.id,
+                    &c.lease,
+                    "failure",
+                    None,
+                    info.clone(),
+                    T2
+                )
+                .is_err()
+            );
+            let done = finish(w, &c.attempt.id, &c.lease, "success", None, info, T2)?;
+            assert_eq!(done.reused_from.as_deref(), Some(second.id.as_str()));
+            register(w, same_tree("s4"), 10, T3)?;
+            let next = claim(w, "r", 60, T3)?.unwrap();
+            assert_eq!(next.reuse.unwrap().attempt_id, second.id);
+            // A newer failed retry does not erase an earlier successful execution.
+            let mut failed = second.clone();
+            failed.conclusion = Some("failure".into());
+            put_attempt(w, Some(&second), &failed)?;
+            assert_eq!(
+                reuse_candidate(w, &next.attempt)?.unwrap().attempt_id,
+                first.id
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_source_pruned_after_claim_still_finishes_but_is_never_offered_again() {
+        let (_d, s) = store();
+        let source = execute(&s, "s1", T0);
+        s.write_sync(|w| {
+            register(w, same_tree("s2"), 10, T1)?;
+            let c = claim(w, "r", 60, T1)?.unwrap();
+            assert_eq!(c.reuse.unwrap().attempt_id, source.id);
+            let mut pruned = source.clone();
+            pruned.files_pruned = true;
+            put_attempt(w, Some(&source), &pruned)?;
+            let done = finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "success",
+                None,
+                ResultInfo {
+                    image_digest: Some(DIGEST.into()),
+                    reused_from: Some(source.id.clone()),
+                    cache_key: None,
+                },
+                T1,
+            )?;
+            assert_eq!(done.reused_from.as_deref(), Some(source.id.as_str()));
+            register(w, same_tree("s3"), 10, T2)?;
+            assert!(claim(w, "r", 60, T2)?.unwrap().reuse.is_none());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn reuse_is_decided_when_waiting_and_interrupted_attempts_are_claimed() {
+        let (_d, s) = store();
+        s.write_sync(|w| {
+            register(w, same_tree("s1"), 1, T0)?;
+            register(w, same_tree("s2"), 1, T0)?;
+            assert!(get_run(w, "repo_1", "s2")?.unwrap().waiting);
+            let first = claim(w, "r", 60, T0)?.unwrap();
+            finish(
+                w,
+                &first.attempt.id,
+                &first.lease,
+                "success",
+                None,
+                ResultInfo {
+                    image_digest: Some(DIGEST.into()),
+                    ..Default::default()
+                },
+                T1,
+            )?;
+            admit_waiting(w, 1, T1)?;
+            let next = claim(w, "r", 60, T1)?.unwrap();
+            assert_eq!(next.reuse.unwrap().attempt_id, first.attempt.id);
+            expire(w, T2)?;
+            let requeued = claim(w, "r", 60, T2)?.unwrap();
+            assert!(requeued.attempt.after_interrupt);
+            assert_eq!(requeued.reuse.unwrap().attempt_id, first.attempt.id);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn manual_retries_and_their_interruption_requeues_always_execute() {
+        let (_d, s) = store();
+        let source = execute(&s, "s1", T0);
+        s.write_sync(|w| {
+            let retry = retry(w, &source.id, 10, T1)?;
+            assert!(!retry.allow_reuse);
+            let c = claim(w, "r", 60, T1)?.unwrap();
+            assert!(c.reuse.is_none());
+            let info = ResultInfo {
+                image_digest: Some(DIGEST.into()),
+                reused_from: Some(source.id.clone()),
+                cache_key: None,
+            };
+            assert!(finish(w, &c.attempt.id, &c.lease, "success", None, info, T1).is_err());
+            expire(w, T2)?;
+            let next = claim(w, "r", 60, T2)?.unwrap();
+            assert!(!next.attempt.allow_reuse && next.reuse.is_none());
+            Ok(())
+        })
+        .unwrap();
+    }
+
     /// A fast-forward merge: main comes to want a commit whose jobs ran for
     /// the pull request. The jobs with a cache run again, once, as main's.
     #[test]
@@ -971,7 +1327,10 @@ mod tests {
                     &c.lease,
                     "success",
                     None,
-                    Some(DIGEST.into()),
+                    ResultInfo {
+                        image_digest: Some(DIGEST.into()),
+                        ..Default::default()
+                    },
                     T1,
                 )
             })
@@ -988,6 +1347,10 @@ mod tests {
             ("build", 2)
         );
         assert_eq!(c.attempt.cache_scope, "protected");
+        assert!(
+            c.reuse.is_some(),
+            "a fast-forward merge may reuse the same commit's completed PR execution"
+        );
         assert!(
             s.write_sync(|w| claim(w, "r", 60, T2)).unwrap().is_none(),
             "lint has no cache"
@@ -1028,8 +1391,17 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let wrong =
-            s.write_sync(|w| finish(w, &c.attempt.id, "bvl_other", "success", None, None, T1));
+        let wrong = s.write_sync(|w| {
+            finish(
+                w,
+                &c.attempt.id,
+                "bvl_other",
+                "success",
+                None,
+                ResultInfo::default(),
+                T1,
+            )
+        });
         assert_eq!(wrong.unwrap_err().code, "conflict");
         let junk = s.write_sync(|w| {
             finish(
@@ -1038,7 +1410,10 @@ mod tests {
                 &c.lease,
                 "success",
                 None,
-                Some("sha256:x".into()),
+                ResultInfo {
+                    image_digest: Some("sha256:x".into()),
+                    ..Default::default()
+                },
                 T1,
             )
         });
@@ -1051,7 +1426,10 @@ mod tests {
                     &c.lease,
                     "failure",
                     Some("exit 1".into()),
-                    Some(DIGEST.into()),
+                    ResultInfo {
+                        image_digest: Some(DIGEST.into()),
+                        ..Default::default()
+                    },
                     T1,
                 )
             })
@@ -1059,7 +1437,17 @@ mod tests {
         assert_eq!(done.conclusion.as_deref(), Some("failure"));
         assert_eq!(done.image_digest.as_deref(), Some(DIGEST));
         // The lease is gone with the conclusion: a late repeat changes nothing.
-        let again = s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, None, T1));
+        let again = s.write_sync(|w| {
+            finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "success",
+                None,
+                ResultInfo::default(),
+                T1,
+            )
+        });
         assert_eq!(again.unwrap_err().code, "conflict");
         assert_eq!(latest(&s, "s1")[0].conclusion.as_deref(), Some("failure"));
         assert!(
@@ -1085,8 +1473,17 @@ mod tests {
         assert_eq!((l[0].number, l[0].status.as_str()), (2, "queued"));
         assert!(l[0].after_interrupt);
         // The first runner's late result is refused.
-        let late =
-            s.write_sync(|w| finish(w, &c1.attempt.id, &c1.lease, "success", None, None, T2));
+        let late = s.write_sync(|w| {
+            finish(
+                w,
+                &c1.attempt.id,
+                &c1.lease,
+                "success",
+                None,
+                ResultInfo::default(),
+                T2,
+            )
+        });
         assert_eq!(late.unwrap_err().code, "conflict");
         // The second interruption is final.
         let c2 = s.write_sync(|w| claim(w, "r", 60, T2)).unwrap().unwrap();
@@ -1176,7 +1573,7 @@ mod tests {
                     &running.lease,
                     "success",
                     None,
-                    None,
+                    ResultInfo::default(),
                     T1,
                 )
             })
@@ -1275,8 +1672,18 @@ mod tests {
         // The current attempt fails and is retried; the old one is history.
         let c = s.write_sync(|w| claim(w, "r", 60, T2)).unwrap().unwrap();
         assert_eq!(c.attempt.number, 2);
-        s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "failure", None, None, T2))
-            .unwrap();
+        s.write_sync(|w| {
+            finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "failure",
+                None,
+                ResultInfo::default(),
+                T2,
+            )
+        })
+        .unwrap();
         let again = s.write_sync(|w| retry(w, &c.attempt.id, 10, T2)).unwrap();
         assert_eq!((again.number, again.job == changed("test")), (3, true));
         let refused = s.write_sync(|w| retry(w, &old.attempt.id, 10, T2));
@@ -1330,8 +1737,18 @@ mod tests {
         s.write_sync(|w| register(w, reg("s1", "feature", &["test"]), 10, T0))
             .unwrap();
         let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
-        s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, None, T0))
-            .unwrap();
+        s.write_sync(|w| {
+            finish(
+                w,
+                &c.attempt.id,
+                &c.lease,
+                "success",
+                None,
+                ResultInfo::default(),
+                T0,
+            )
+        })
+        .unwrap();
         // The run takes another definition (as the upgrade does for a run no
         // branch wants now): the old attempt is the newest, and only history.
         s.write_sync(|w| {
@@ -1365,8 +1782,18 @@ mod tests {
             .unwrap();
         for _ in 0..2 {
             let c = s.write_sync(|w| claim(w, "r", 60, T0)).unwrap().unwrap();
-            s.write_sync(|w| finish(w, &c.attempt.id, &c.lease, "success", None, None, T0))
-                .unwrap();
+            s.write_sync(|w| {
+                finish(
+                    w,
+                    &c.attempt.id,
+                    &c.lease,
+                    "success",
+                    None,
+                    ResultInfo::default(),
+                    T0,
+                )
+            })
+            .unwrap();
         }
         // The queue is full when the run takes a pipeline with a new b.
         s.write_sync(|w| register(w, reg("s2", "other", &["x"]), 1, T0))

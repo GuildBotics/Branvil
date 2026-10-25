@@ -141,6 +141,99 @@ async fn bootstrap_and_admin_commands() {
     assert!(text(&out).contains("indexes: ok"));
 }
 
+/// These guards survive schema changes; only the previous-schema fixture
+/// below needs to move when the stored format changes.
+#[tokio::test]
+async fn an_upgraded_database_serves_only_after_a_successful_check() {
+    let mut w = World::new().await;
+    w.ticket("Check upgrade").await;
+    w.server.stop();
+    let data = w.server.data.clone();
+    let db = data.join("branvil.redb");
+    as_schema_14(&db);
+    let admin = |what: &str| {
+        std::process::Command::new(BIN)
+            .args(["admin", what, "--data-dir"])
+            .arg(&data)
+            .output()
+            .unwrap()
+    };
+    let unchecked = "has not passed `branvil admin check` since";
+    let out = admin("upgrade");
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let out = admin("upgrade");
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    assert!(text(&out).contains(unchecked), "{}", text(&out));
+    async fn refuses_to_serve(data: &std::path::Path) {
+        let mut serve = tokio::process::Command::new(BIN);
+        serve
+            .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+            .arg(data)
+            .kill_on_drop(true);
+        let out = tokio::time::timeout(std::time::Duration::from_secs(20), serve.output())
+            .await
+            .expect("serve did not refuse an unchecked database")
+            .unwrap();
+        assert!(!out.status.success(), "{}", text(&out));
+        assert!(
+            text(&out).contains("has not passed `branvil admin check` since"),
+            "{}",
+            text(&out)
+        );
+    }
+    refuses_to_serve(&data).await;
+    {
+        let database = redb::Database::open(&db).unwrap();
+        let txn = database.begin_write().unwrap();
+        {
+            let mut cards = txn
+                .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("ix_cards"))
+                .unwrap();
+            let key = redb::ReadableTable::iter(&cards)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .0
+                .value()
+                .to_vec();
+            cards.remove(key.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let out = admin("check");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("index problem"), "{}", text(&out));
+    let out = admin("upgrade");
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    assert!(text(&out).contains(unchecked), "{}", text(&out));
+    refuses_to_serve(&data).await;
+    let out = admin("reindex");
+    assert!(out.status.success(), "{}", text(&out));
+    let out = admin("upgrade");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "reindex must not mark the database checked: {}",
+        text(&out)
+    );
+    refuses_to_serve(&data).await;
+    let out = admin("check");
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("indexes: ok"), "{}", text(&out));
+    let checked = tables(&db);
+    let out = admin("upgrade");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        text(&out).contains("already has schema version"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(tables(&db), checked);
+    w.restart(&[]);
+    assert_eq!(w.server.ok("/me", &w.owner).await["name"], "alice");
+}
+
 /// How long `serve` lets requests in flight finish after a signal
 /// (`SHUTDOWN_GRACE` in src/cli.rs).
 #[cfg(unix)]

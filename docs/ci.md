@@ -112,11 +112,35 @@ What a job's commands find, as on common CI services:
 Every commit runs its own pipeline: a tip of the default branch and the head
 of an open pull request alike read `.branvil/ci.toml` from that commit. A pull
 request that changes the pipeline runs the changed pipeline as its checks, so
-a mistake in it shows before the merge. A merge is a fast-forward, so the
-default branch's new tip keeps the run the head already has; only the jobs
-with a dependency cache run again, as the default branch's, since only a
-protected branch's run saves the cache ("Dependency cache"). Their checks show
-the new attempt.
+a mistake in it shows before the merge. A fast-forward merge keeps the head's
+run; jobs with a dependency cache get a new protected attempt (a running
+pull-request attempt is stopped). A squash merge gets its own run. Both kinds
+of new attempts may reuse an earlier successful execution of the same tree.
+
+When a runner claims an attempt, the service offers the most recently finished
+successful execution whose files have not been pruned, in the same repository
+with the same Git tree, parsed job definition, and network setting. Reused
+attempts cannot themselves be a source. Retention after claim does not reject
+finish or extend the source's file lifetime. After resolving the image and
+before fetching source, the runner checks that the image's configuration
+digest matches. A job without a cache,
+or an attempt outside the protected cache scope, then succeeds without a VM.
+A protected attempt with a cache also requires a complete save of the source's
+cache key on this runner within 24 hours; otherwise it executes and saves as
+usual. A different digest also executes as usual. Registration, queue order,
+and commands are unchanged. Manual retries always execute, including after
+their first interruption.
+
+This treats inputs other than the tree, job definition, image, and network as
+equivalent: history, tags, `BRANVIL_SHA` and other per-attempt environment
+variables, external services, and the runner's resource limits may differ.
+Jobs that inspect those inputs are outside this approximation. Selection uses
+the latest **successful** execution; a later failed retry does not erase it.
+
+Reused attempts have their own successful check, log, and timing, and record
+the source attempt's ID and commit. Their artifact names and downloads resolve
+to that source's files, within the source's original `retention_days`; reuse
+does not extend retention. Duration estimates exclude reused attempts.
 
 A pull request can therefore change its own jobs, but not the repository's
 settings, which only the owner changes (`PATCH /api/v1/repos/{repo}`):
@@ -177,9 +201,10 @@ Rapid pushes: when a branch moves from commit A to B and no other branch still
 wants A, A is **superseded**: its queued attempts are concluded `cancelled`
 ("Superseded: …"), its running attempts are asked to stop (the runner sees
 `cancel: true` on its next heartbeat), and any result a runner still reports
-for A is recorded as `cancelled`. Results only ever describe their own commit,
-so nothing of A can count for B. A commit that becomes a tip again gets fresh
-attempts.
+for A is recorded as `cancelled`. B has its own attempts; a runner may conclude
+one successfully by reusing an actual successful execution of the same tree
+under the conditions above. A commit that becomes a tip again gets fresh
+attempts, eligible for the same claim-time reuse decision.
 
 Leases and interruptions:
 
@@ -272,12 +297,12 @@ is refused, and nothing outside the work directory is read.
 `cache.paths` are restored into the work directory before the job, and saved
 after a successful job of a run that a protected branch asked for (its cache
 scope is `protected`). When a protected branch comes to want a commit whose
-jobs ran for a pull request (a fast-forward merge), the jobs with a cache run
-again as its own (one still running for the pull request is stopped), and an
-attempt still queued takes its run's scope when a runner claims it. So a merge
-costs one more run of every job with a cache (four of the six of Branvil's
-own pipeline), and when the branch moves on before they end, they are
-superseded and the next commit's run saves the cache.
+jobs ran for a pull request (a fast-forward merge), jobs with a cache get
+protected attempts (one still running for the pull request is stopped), and an
+attempt still queued takes its run's scope when a runner claims it. These
+attempts execute only when they cannot reuse a result with a recent cache
+save. When the branch moves on before they end, they are superseded and the
+next commit's run may save the cache.
 A pull request's run (`branch:<name>`) restores the
 same entries and saves nothing (its log says `cache not saved`): it cannot
 plant a cache entry that the default branch would use, and its runs never
@@ -298,6 +323,14 @@ The cache holds one entry per job with a cache of every repository the runner
 serves. While a protected branch's run saves the entries of a new lock file,
 pull requests still restore the previous ones, so a `cache_max_mib` of twice
 their total keeps both until the pull requests catch up.
+
+Each complete save records its time alongside the cached contents before
+they replace the old entry. Restoring updates the last-use time for eviction
+but never the save time. Reuse of a protected job requires a save no more than
+24 hours old (`CACHE_REFRESH_SECS`); a missing save timestamp, an evicted entry,
+or a future timestamp requires execution. A matching tree and image imply the
+same key, so this check uses the source execution's recorded key without
+fetching or checking out the source.
 
 Restoring and saving both explicitly record the last-use time. Eviction removes
 the oldest timestamps first. For equal timestamps, the entry just saved is
@@ -392,6 +425,16 @@ the largest resident memory of `msb run` and every process under it (the VM
 among them), read with `ps` every second while the job runs; the VM's grows
 with the guest memory the job touches and does not shrink, so the last samples
 hold the peak. A host without `ps` gives no such line.
+
+A reused attempt instead logs `reused result of <attempt> (<commit>, the same
+tree), image <digest>` and `job ended: success (reused)`, with the cache key
+and save age when checked. It has no `source fetched`, `sandbox started`, or
+`commands ran for` line. `reuse declined` identifies the source and reason
+(digest mismatch, missing cache key/save, or save older than 86400 seconds)
+before normal execution; `reuse unavailable: no reuse offered` means the
+service supplied no source, including for manual retries and upgraded old
+attempts. These lines distinguish reused work from cache refreshes when
+measuring queue time and execution time.
 
 At start it removes every sandbox labelled with its own name and every volume
 named `bv-tmp-<its name>-<attempt id>` (leftovers of a runner that was killed),

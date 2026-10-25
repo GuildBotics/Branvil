@@ -1,87 +1,77 @@
-//! What this build changes in a database of the previous schema version
-//! (`branvil admin upgrade`, and `branvil restore` of such a backup). It
-//! upgrades from `FROM` only; when `store::SCHEMA_VERSION` is raised again,
-//! this whole module is replaced by the upgrade from the version before the
-//! new one.
-//!
-//! 13 → 14: a repository may land its pull requests by itself, and a
-//! published pull request says whether Branvil published it and when the
-//! webhook was told. Every repository lands none by itself, every published
-//! pull request was published by the owner and told nobody, and a pending
-//! merge no longer names who merged it; no index entry follows from that.
+//! 14 → 15: record CI trees and execution reuse metadata, and index runs by
+//! repository and tree. Only the immediately preceding schema is supported.
 
 use serde_json::{Value, json};
 
+use crate::ci::queue::{Attempt, Run};
 use crate::config::Layout;
-use crate::error::AppError;
-use crate::model::{JournalEntry, Pull, Repo};
-use crate::store::{self, Rd, Tbl, Upgraded, Upgrading};
+use crate::store::{self, Rd, Upgraded, Upgrading};
 
-/// The schema version this module upgrades from.
-pub const FROM: u64 = 13;
+pub const FROM: u64 = 14;
 const _: () = assert!(FROM + 1 == store::SCHEMA_VERSION);
 
-/// Upgrades the database of `layout`. Returns `None` when it already has this
-/// build's version.
 pub fn upgrade(layout: &Layout) -> anyhow::Result<Option<Upgraded>> {
     let Some(db) = Upgrading::open(&layout.db())? else {
         return Ok(None);
     };
-    // Every record that changes must read as this version's before anything
-    // is written.
-    let repos = changed::<Repo>(&db, store::REPOS, "a repository", |r| {
-        r["auto_land"] = json!(false);
-        true
-    })?;
-    let pulls = changed::<Pull>(&db, store::PULLS, "a pull request", |p| {
-        let Some(x) = p["upstream"].as_object_mut() else {
-            return false;
-        };
-        x.insert("auto".into(), json!(false));
-        x.insert("notified_at".into(), Value::Null);
-        true
-    })?;
-    let merges = changed::<JournalEntry>(&db, store::JOURNAL, "a pending merge", |e| {
-        e["op"].as_object_mut().map(|op| op.remove("merged_by"));
-        true
-    })?;
-    let db_err = |e: AppError| anyhow::anyhow!("{}", e.message);
-    Ok(Some(db.finish(|w| {
-        for (key, repo) in &repos {
-            w.put(store::REPOS, key, repo).map_err(db_err)?;
+    // Decode every changed record and read Git before making the backup or
+    // writing anything. Only a missing object, not a broken Git invocation,
+    // leaves a run without a tree.
+    let mut runs = Vec::new();
+    for (key, bytes) in db.read(|r| r.prefix_raw(store::CI_RUNS, &[], None, usize::MAX))? {
+        let mut value: Value = serde_json::from_slice(&bytes)?;
+        value["tree"] = Value::Null;
+        let mut run: Run = serde_json::from_value(value)?;
+        let out = crate::git::base_command_sync(&layout.git_config())
+            .current_dir(layout.repo_dir(&run.repo_path))
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{}^{{tree}}", run.sha),
+            ])
+            .output()?;
+        if out.status.success() {
+            let tree = String::from_utf8(out.stdout)?.trim().to_string();
+            anyhow::ensure!(
+                crate::util::is_sha(&tree),
+                "Git returned an invalid tree for {}",
+                run.sha
+            );
+            run.tree = Some(tree);
+        } else {
+            anyhow::ensure!(
+                out.status.code() == Some(1) && out.stderr.is_empty(),
+                "cannot read tree of {} in {}: {}",
+                run.sha,
+                run.repo_path,
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
-        for (key, pull) in &pulls {
-            w.put(store::PULLS, key, pull).map_err(db_err)?;
-        }
-        for (key, entry) in &merges {
-            w.put(store::JOURNAL, key, entry).map_err(db_err)?;
-        }
-        Ok(format!(
-            "{} repository(ies) land nothing by themselves, {} published pull request(s) were published by the owner, {} pending merge(s) changed; nothing else changed",
-            repos.len(),
-            pulls.len(),
-            merges.len()
-        ))
-    })?))
-}
-
-/// The records of `table` that `change` changes (it answers whether it
-/// does), each read as this version's record.
-fn changed<T: serde::de::DeserializeOwned>(
-    db: &Upgrading,
-    table: Tbl,
-    what: &str,
-    mut change: impl FnMut(&mut Value) -> bool,
-) -> anyhow::Result<Vec<(Vec<u8>, T)>> {
-    let mut out = Vec::new();
-    for (key, bytes) in db.read(|r| r.prefix_raw(table, &[], None, usize::MAX))? {
-        let mut value: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| anyhow::anyhow!("{what} is not JSON: {e}"))?;
-        if change(&mut value) {
-            let record = serde_json::from_value(value)
-                .map_err(|e| anyhow::anyhow!("{what} does not decode: {e}"))?;
-            out.push((key, record));
-        }
+        runs.push((key, run));
     }
-    Ok(out)
+    let mut attempts = Vec::new();
+    for (key, bytes) in db.read(|r| r.prefix_raw(store::CI_ATTEMPTS, &[], None, usize::MAX))? {
+        let mut value: Value = serde_json::from_slice(&bytes)?;
+        value["reused_from"] = Value::Null;
+        value["cache_key"] = Value::Null;
+        // Schema 14 did not mark manual retries. Execute every old unfinished
+        // attempt once so a queued retry (or its interruption requeue) cannot
+        // silently reuse. Old successful executions remain usable sources.
+        value["allow_reuse"] = json!(false);
+        let attempt: Attempt = serde_json::from_value(value)?;
+        attempts.push((key, attempt));
+    }
+    let err = |e: crate::error::AppError| anyhow::anyhow!("{}", e.message);
+    Ok(Some(db.finish(|w| {
+        for (key, run) in &runs {
+            w.put(store::CI_RUNS, key, run).map_err(err)?;
+        }
+        for (key, attempt) in &attempts {
+            w.put(store::CI_ATTEMPTS, key, attempt).map_err(err)?;
+        }
+        crate::model::rebuild_indexes(w).map_err(err)?;
+        Ok(format!("{} CI run(s) and {} attempt(s) upgraded; {} run(s) have no surviving commit; indexes rebuilt",
+            runs.len(), attempts.len(), runs.iter().filter(|(_, r)| r.tree.is_none()).count()))
+    })?))
 }

@@ -43,6 +43,14 @@ use queue::{Attempt, PipelineState, Registration};
 /// How many commits of the first-parent history `Ci::estimate` looks at.
 const ESTIMATE_DEPTH: usize = 20;
 
+/// Where a reused result was actually executed (including its log and artifacts).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ReusedFrom {
+    pub attempt_id: String,
+    pub url: String,
+    pub sha: String,
+}
+
 /// One check of a commit, in the shape of `docs/api.md` "Checks".
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
 pub struct Check {
@@ -63,6 +71,8 @@ pub struct Check {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
     pub artifact_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reused_from: Option<ReusedFrom>,
     /// When its attempt started and finished.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
@@ -204,7 +214,15 @@ impl Ci {
         }
     }
 
-    fn check_of(&self, a: &Attempt) -> Check {
+    pub fn reused_from(&self, a: &Attempt, source: &Attempt) -> Option<ReusedFrom> {
+        a.reused_from.as_ref().map(|id| ReusedFrom {
+            attempt_id: id.clone(),
+            url: self.job_url(&a.repo_path, id),
+            sha: source.sha.clone(),
+        })
+    }
+
+    fn check_of(&self, a: &Attempt, source: &Attempt) -> Check {
         Check {
             name: a.job.name.clone(),
             status: a.status.clone(),
@@ -213,7 +231,12 @@ impl Ci {
             attempt: Some(a.number),
             details_url: Some(self.job_url(&a.repo_path, &a.id)),
             details: a.details.clone(),
-            artifact_names: a.artifacts.iter().map(|x| x.name.clone()).collect(),
+            artifact_names: if source.files_pruned {
+                Vec::new()
+            } else {
+                source.artifacts.iter().map(|x| x.name.clone()).collect()
+            },
+            reused_from: self.reused_from(a, source),
             started_at: a.started_at.clone(),
             finished_at: a.finished_at.clone(),
             expected_secs: None,
@@ -252,6 +275,7 @@ impl Ci {
                 for sha in &ancestors {
                     for a in queue::attempts_of(r, &id, sha)?.into_iter().rev() {
                         if a.conclusion.as_deref() == Some("success")
+                            && a.reused_from.is_none()
                             && let Some(secs) = queue::duration_secs(&a)
                         {
                             took.entry(a.job.name).or_insert(secs);
@@ -291,6 +315,13 @@ impl Ci {
                     }
                     _ => Vec::new(),
                 };
+                let latest = latest
+                    .into_iter()
+                    .map(|a| {
+                        let source = queue::result_attempt(r, &a)?;
+                        Ok((a, source))
+                    })
+                    .collect::<AppResult<Vec<_>>>()?;
                 Ok((run, latest))
             })
             .await?;
@@ -327,13 +358,13 @@ impl Ci {
                 ),
             ));
         }
-        for a in &latest {
-            checks.push(self.check_of(a));
+        for (a, source) in &latest {
+            checks.push(self.check_of(a, source));
         }
         if let PipelineState::Jobs { jobs } = &run.pipeline {
             for j in jobs
                 .iter()
-                .filter(|j| !latest.iter().any(|a| a.job.name == j.name))
+                .filter(|j| !latest.iter().any(|(a, _)| a.job.name == j.name))
             {
                 checks.push(match &run.superseded_by {
                     Some(by) => Check::placeholder(
@@ -413,6 +444,17 @@ impl Ci {
             repo: repo.id.clone(),
             repo_path: repo.path.clone(),
             sha: sha.to_string(),
+            tree: Some(
+                self.inner
+                    .git
+                    .run_ok(
+                        Some(&self.inner.git.repo_dir(&repo.path)),
+                        &["rev-parse", &format!("{sha}^{{tree}}")],
+                    )
+                    .await?
+                    .trim()
+                    .to_string(),
+            ),
             branch: branch.to_string(),
             protected: repo.is_protected(branch),
             pipeline: self.read_pipeline(repo, sha).await?,
@@ -877,6 +919,7 @@ mod tests {
             repo: repo.id.clone(),
             repo_path: repo.path.clone(),
             sha: "s1".into(),
+            tree: Some("tree-s1".into()),
             branch: "feature".into(),
             protected: false,
             pipeline: PipelineState::Jobs { jobs },
@@ -892,7 +935,15 @@ mod tests {
             ci.inner.store.write(|w| {
                 let now = util::now();
                 let c = queue::claim(w, "r", 60, &now)?.unwrap();
-                queue::finish(w, &c.attempt.id, &c.lease, "success", None, None, &now)
+                queue::finish(
+                    w,
+                    &c.attempt.id,
+                    &c.lease,
+                    "success",
+                    None,
+                    queue::ResultInfo::default(),
+                    &now,
+                )
             })
         };
         let test = |c: &Checks| c.checks.iter().find(|x| x.name == "test").cloned().unwrap();
@@ -925,6 +976,7 @@ mod tests {
             repo: repo.id.clone(),
             repo_path: repo.path.clone(),
             sha: sha.into(),
+            tree: Some(format!("tree-{sha}")),
             branch: "feature".into(),
             protected: false,
             pipeline: PipelineState::Jobs { jobs },
