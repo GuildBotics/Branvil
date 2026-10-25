@@ -576,16 +576,14 @@ async fn failed_gates_wait_for_a_successful_retry_and_passed_gates_recheck_retri
     assert_eq!(runner.finish(&claim, "failure").await.0, 200);
     let left = landing(&w, 3, "left").await;
     assert_eq!(left["landing"]["reason"]["code"], "gate_failed");
-    let bare = w.server.data.join("repos/acme/demo.git");
-    assert_eq!(
-        git_ok(&bare, &["rev-parse", "refs/branvil/failed-gate/3"]),
-        gating["landing"]["gate"].as_str().unwrap()
-    );
-    assert!(
-        !git(&bare, &["show-ref", "--verify", "refs/branvil/gate/3"])
-            .status
-            .success()
-    );
+    // Departure is saved before the next ref is made and the old one removed.
+    ref_is(
+        &w,
+        "refs/branvil/failed-gate/3",
+        gating["landing"]["gate"].as_str(),
+    )
+    .await;
+    ref_is(&w, "refs/branvil/gate/3", None).await;
     let _ = w
         .server
         .post(
