@@ -177,9 +177,10 @@ merging or publishing, as with any other change.
 
 A **run** is the CI of one commit of one repository; an **attempt** is one try
 of one job (`att_<ULID>`, numbered 1, 2, … per job). An attempt's `purpose`
-is `check` or `cache_refresh`. Checks show the latest `check` attempt of each
-job: a pull request's page shows its head's, a commit's page
-that commit's, and a repository's page its default branch's tip
+is `check` or `cache_refresh`; both purposes share the job's attempt numbers.
+For example, check #1 followed by refresh #2 makes a manual check retry #3.
+Checks show the latest `check` attempt of each job: a pull request's page
+shows its head's, a commit's page that commit's, and a repository's page its default branch's tip
 (`GET …/pulls/{number}/checks`, `GET …/commits/{sha}/checks`).
 
 | Attempt status | Conclusion (when completed) |
@@ -232,7 +233,9 @@ Leases and interruptions:
   details "Interrupted: …", and, the first time for that job and only when it
   was neither cancelled nor superseded, a new attempt is queued in the place
   the interrupted one had in the queue, ahead of the jobs queued after it. A
-  second interruption is final ("Interrupted twice …; retry the job").
+  second interruption ends that attempt. Checks say "Interrupted twice …;
+  retry the job". Cache refreshes need no manual retry: a later check requests
+  a new refresh if the cache still needs one.
 - A restart of the service is handled the same way: leases are stored, so a
   runner on another machine that keeps working through a short restart keeps
   its attempt, and attempts whose lease ran out while the service was down
@@ -254,9 +257,10 @@ Stopping the service:
   `stopping` meanwhile, and the GUI shows the owner a warning on every page; the
   service's log says how many jobs it waits for, and its standard output says
   `branvil stopping: waiting for …` (which `scripts/serve.sh` reads).
-- Cache-refresh attempts are interrupted and requeued immediately when stopping
-  starts; they do not use the wait period. Their purpose and cache key survive
-  the requeue. Checks continue to use the wait period.
+- Cache-refresh attempts are interrupted immediately when stopping starts;
+  they do not use the wait period. The first interruption requeues them with
+  their purpose and cache key. A second interruption ends them and releases
+  the key for a later check's refresh request. Checks use the wait period.
 - A check still running when that time is up is interrupted ("Interrupted:
   Branvil stopped …; queued again in its place") and queued again in its place,
   so the next start runs it before the jobs queued after it (one already
@@ -269,7 +273,9 @@ No runner, no executor:
 
 - When no runner has contacted the service for `ci.runner_absent_secs`
   (default 120 s), queued attempts older than that are concluded
-  `startup_failure` ("No CI runner has contacted Branvil …").
+  `startup_failure` ("No CI runner has contacted Branvil …"). Its details ask
+  the owner to start the runner. Checks also ask for a manual retry; cache
+  refreshes explain that a later check can request another refresh.
 - A runner whose executor is unusable still claims attempts and concludes each
   `startup_failure` with the reason (for example "No usable msb 0.6.17
   found …"), so the problem is visible on the checks. Nothing ever runs on the
@@ -277,9 +283,9 @@ No runner, no executor:
 
 Cancel and retry: `POST …/jobs/{id}/cancel` concludes a queued attempt
 `cancelled` at once and asks a running one to stop; `POST …/jobs/{id}/retry`
-queues attempt n+1 of the latest completed attempt, with the same job
-definition (the pipeline is not read again). Retry takes the repository lock
-used for ref changes. If a landing gate has just left its queue, its ref cleanup
+queues the next attempt number of the latest check attempt, once completed,
+with the same job definition (the pipeline is not read again). Cache refreshes
+cannot be retried. Retry takes the repository lock used for ref changes. If a landing gate has just left its queue, its ref cleanup
 finishes before the new attempt is queued, so it cannot cancel that retry.
 
 ## Limits

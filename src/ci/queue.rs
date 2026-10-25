@@ -94,6 +94,17 @@ pub enum Purpose {
     CacheRefresh,
 }
 
+impl Purpose {
+    fn recovery_hint(self) -> &'static str {
+        match self {
+            Self::Check => "retry the job",
+            Self::CacheRefresh => {
+                "no manual retry is needed; a later check will request a new refresh if needed"
+            }
+        }
+    }
+}
+
 /// One try of one job.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Attempt {
@@ -992,6 +1003,11 @@ pub fn cancel(w: &Wtx, id: &str, who: &str, now: &str) -> AppResult<Attempt> {
 pub fn retry(w: &Wtx, id: &str, queue_max: usize, now: &str) -> AppResult<Attempt> {
     let old =
         get_attempt(w, id)?.ok_or_else(|| AppError::not_found(format!("No CI attempt {id}.")))?;
+    if old.purpose == Purpose::CacheRefresh {
+        return Err(AppError::conflict(
+            "Cache refresh attempts cannot be manually retried.",
+        ));
+    }
     if old.status != "completed" {
         return Err(AppError::conflict(format!(
             "Attempt {id} is {}; only a completed attempt can be retried.",
@@ -1104,7 +1120,7 @@ fn interrupt(w: &Wtx, old: &Attempt, why: &str, now: &str) -> AppResult<()> {
     } else if requeue {
         format!("Interrupted: {why}; queued again in its place.")
     } else {
-        format!("Interrupted twice: {why}; retry the job.")
+        format!("Interrupted twice: {why}; {}.", old.purpose.recovery_hint())
     };
     conclude(&mut a, "cancelled", Some(details), now);
     put_attempt(w, Some(old), &a)?;
@@ -1141,7 +1157,12 @@ pub fn fail_queued(
             continue;
         }
         let mut a = old.clone();
-        conclude(&mut a, "startup_failure", Some(details.to_string()), now);
+        conclude(
+            &mut a,
+            "startup_failure",
+            Some(format!("{details}; {}.", old.purpose.recovery_hint())),
+            now,
+        );
         put_attempt(w, Some(&old), &a)?;
         changed.push((old.repo_path.clone(), old.sha.clone()));
     }
@@ -1472,6 +1493,112 @@ mod tests {
                     Some("success")
                 );
 
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_guidance_matches_the_purpose_and_refresh_can_be_requested_again() {
+        for purpose in [Purpose::Check, Purpose::CacheRefresh] {
+            for cause in ["lease", "stop", "no_runner"] {
+                let (_d, s) = store();
+                let source = cached_source(&s);
+                s.write_sync(|w| {
+                    let id = if purpose == Purpose::CacheRefresh {
+                        refresh_check(w, &source, "s1", 10)?.cache_refresh.unwrap()
+                    } else {
+                        register(w, cached("s1"), 10, T1)?;
+                        latest_attempts(w, "repo_1", "s1")?.pop().unwrap().id
+                    };
+                    let final_id = if cause == "no_runner" {
+                        fail_queued(w, T2, "Start the runner", T2)?;
+                        id
+                    } else {
+                        claim(w, "runner", 60, T1)?.unwrap();
+                        if cause == "lease" {
+                            expire(w, T2)?;
+                        } else {
+                            interrupt_running(w, None, "service stopped", T2)?;
+                        }
+                        let again = claim(w, "runner", 60, T2)?.unwrap();
+                        if cause == "lease" {
+                            expire(w, T3)?;
+                        } else {
+                            interrupt_running(w, None, "service stopped", T3)?;
+                        }
+                        again.attempt.id
+                    };
+                    let ended = get_attempt(w, &final_id)?.unwrap();
+                    let details = ended.details.unwrap();
+                    assert_eq!(ended.purpose, purpose);
+                    assert_eq!(ended.status, "completed");
+                    if purpose == Purpose::Check {
+                        assert!(details.contains("retry the job"), "{cause}: {details}");
+                        assert_eq!(retry(w, &final_id, 10, T3)?.purpose, Purpose::Check);
+                    } else {
+                        assert!(!details.contains("retry the job"), "{cause}: {details}");
+                        assert!(
+                            details.contains("no manual retry is needed"),
+                            "{cause}: {details}"
+                        );
+                        assert!(details.contains("later check"), "{cause}: {details}");
+                        assert!(
+                            w.prefix_raw(store::IX_CI_REFRESH, &[], None, 10)?
+                                .is_empty()
+                        );
+                        let fresh = refresh_check(w, &source, "s2", 10)?.cache_refresh.unwrap();
+                        assert_ne!(fresh, final_id);
+                        assert_eq!(
+                            get_attempt(w, &fresh)?.unwrap().purpose,
+                            Purpose::CacheRefresh
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_retry_is_explicitly_refused_in_every_state() {
+        for state in ["queued", "in_progress", "completed"] {
+            let (_d, s) = store();
+            let source = cached_source(&s);
+            s.write_sync(|w| {
+                let check = refresh_check(w, &source, "s1", 10)?;
+                let id = check.cache_refresh.unwrap();
+                if state != "queued" {
+                    let c = claim(w, "runner", 60, T1)?.unwrap();
+                    if state == "completed" {
+                        finish(
+                            w,
+                            &id,
+                            &c.lease,
+                            "failure",
+                            None,
+                            ResultInfo::default(),
+                            10,
+                            T1,
+                        )?;
+                    }
+                }
+                let refused = retry(w, &id, 0, T1).unwrap_err();
+                assert_eq!(refused.code, "conflict");
+                assert_eq!(
+                    refused.message,
+                    "Cache refresh attempts cannot be manually retried."
+                );
+                if state == "completed" {
+                    let next = retry(w, &check.id, 10, T1)?;
+                    assert_eq!(next.purpose, Purpose::Check);
+                    assert_eq!(
+                        next.number, 3,
+                        "check and refresh share the job's numbering"
+                    );
+                }
                 Ok(())
             })
             .unwrap();
@@ -2288,7 +2415,7 @@ mod tests {
         );
         let l = latest(&s, "s1");
         assert_eq!(l[0].conclusion.as_deref(), Some("startup_failure"));
-        assert_eq!(l[0].details.as_deref(), Some("no runner"));
+        assert_eq!(l[0].details.as_deref(), Some("no runner; retry the job."));
         // Retry makes attempt 2.
         let a2 = s.write_sync(|w| retry(w, &l[0].id, 10, T1)).unwrap();
         assert_eq!(a2.number, 2);

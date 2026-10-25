@@ -224,6 +224,7 @@ describe("pages", () => {
     const drawer = await screen.findByRole("dialog", { name: /test/ });
     expect(await within(drawer).findByText(language === "ja" ? "キャッシュの更新" : "Cache refresh")).toBeInTheDocument();
     expect(within(drawer).getByRole("button", { name: language === "ja" ? "再実行" : "Retry" })).toBeDisabled();
+    expect(within(drawer).getByText(language === "ja" ? "この結果はチェックと自動更新に影響しません。" : "This result does not affect checks or automatic updates.")).toBeInTheDocument();
   });
 
   it("shows the checks of the default branch's tip on a repository's page", async () => {

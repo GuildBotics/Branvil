@@ -899,9 +899,11 @@ is not the full sha of a commit of the repository.
   unavailable` as for dependency alerts ("Dependency alerts").
 - `POST /api/v1/repos/{repo}/jobs/{attempt_id}/retry` → the new
   attempt (`200`, `status: "queued"`, the job's next `attempt` number, the
-  same job definition). Only the latest attempt of its job as the commit's
+  same job definition). Only the latest check attempt of its job as the commit's
   pipeline defines it, once completed, can be retried (`409 conflict`
-  otherwise, also for an attempt of another definition); a full queue is
+  otherwise, also for an attempt of another definition). Cache-refresh attempts
+  always return `409 conflict` with "Cache refresh attempts cannot be manually
+  retried.", whatever their status; a full queue is
   `503 unavailable`. The new attempt always executes; it never reuses a
   result, including when requeued after interruption. Retry waits for ongoing
   repository ref changes, including a departing gate's cleanup, before it

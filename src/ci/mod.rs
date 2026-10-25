@@ -694,7 +694,7 @@ impl Ci {
         };
         if last_contact.elapsed() > Duration::from_secs(absent) {
             let details = format!(
-                "No CI runner has contacted Branvil for {absent} s (last contact: {}). Start `branvil runner` (docs/ci.md) and retry the job.",
+                "No CI runner has contacted Branvil for {absent} s (last contact: {}). Start `branvil runner` (docs/ci.md)",
                 last_text.unwrap_or_else(|| "none since Branvil started".into())
             );
             let now = util::now();

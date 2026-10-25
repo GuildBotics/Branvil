@@ -196,7 +196,7 @@ async fn cache_refresh_never_changes_main_checks_or_required_readiness() {
     assert_eq!(w.server.ok(&checks_path, &w.aiko).await, before);
     assert_eq!(runner.finish(&refresh, "failure").await.0, 200);
     assert_eq!(w.server.ok(&checks_path, &w.aiko).await, before);
-    let (st, _) = w
+    let (st, refused) = w
         .server
         .post(
             &format!("{}/jobs/{refresh_id}/retry", w.repo_path()),
@@ -205,6 +205,10 @@ async fn cache_refresh_never_changes_main_checks_or_required_readiness() {
         )
         .await;
     assert_eq!(st, 409, "refresh retry cannot become a check");
+    assert_eq!(
+        refused["error"]["message"],
+        "Cache refresh attempts cannot be manually retried."
+    );
 }
 
 /// A scripted runner talking to the runner API.

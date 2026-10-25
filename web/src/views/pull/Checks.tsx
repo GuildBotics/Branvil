@@ -209,12 +209,16 @@ function CheckRow({ check, repo, required, onOpen }: { check: Check; repo: strin
           {t("ci.reason")}: {reason}
         </Text>
       )}
-      {check.cache_refresh && <Link to={href.job(repo, check.cache_refresh)}>{t("ci.cacheRefresh")}</Link>}
       {check.reused_from && (
         <Text size="xs" ml={24} mb={4}>
           <Link to={href.job(repo, check.reused_from.attempt_id)}>
             {t("ci.reused")} · <Sha value={check.reused_from.sha} />
           </Link>
+        </Text>
+      )}
+      {check.cache_refresh && (
+        <Text size="xs" ml={24} mb={4}>
+          <Link to={href.job(repo, check.cache_refresh)}>{t("ci.cacheRefresh")}</Link>
         </Text>
       )}
     </>
@@ -278,7 +282,12 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
   const j = job.data;
   return (
     <Stack gap="md">
-      {j.purpose === "cache_refresh" && <Text fw={600}>{t("ci.cacheRefresh")}</Text>}
+      {j.purpose === "cache_refresh" && (
+        <Stack gap="xs">
+          <Text fw={600}>{t("ci.cacheRefresh")}</Text>
+          <Text size="sm" c="dimmed">{t("ci.cacheRefreshEffect")}</Text>
+        </Stack>
+      )}
       <dl>
         <dt>{t("ci.commit")}</dt>
         <dd>
