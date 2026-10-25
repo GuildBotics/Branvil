@@ -29,7 +29,7 @@ export function LandingLeader({ repo, first, host = true }: { repo: string; firs
   const t = useT();
   const label = useLandingLabel();
   return (
-    <Stack gap={4}>
+    <Stack gap={4} style={{ overflowWrap: "anywhere" }}>
       <Text size="sm">
         {t("landing.first")} <Link to={href.pull(repo, first.number)}>!{first.number}</Link> · {label(first.state, first.error, host, first.published)}
       </Text>
@@ -47,7 +47,7 @@ export function LandingReason({ landing }: { landing: Landing }) {
   if (!reason) return null;
   const recovery = reason.code === "gate_failed" ? "landing.retryGate" : reason.code === "host_failed" ? "landing.retryHost" : reason.code === "publish_stopped" ? "landing.publishAgain" : "landing.rejoin";
   return (
-    <Stack gap={4}>
+    <Stack gap={4} style={{ overflowWrap: "anywhere" }}>
       <Text size="sm" c="var(--color-danger-text)">{reason.message}</Text>
       {reason.jobs.length > 0 && <Text size="sm">{t("landing.failedJobs", { jobs: reason.jobs.join(", ") })}</Text>}
       {reason.files.length > 0 && <Text size="sm">{t("landing.conflicts", { files: reason.files.join(", ") })}</Text>}
@@ -63,7 +63,7 @@ export function GateStage({ pull, host }: { pull: PullRequest; host: boolean }) 
   const checks = useChecks(pull.repository, pull.number, landing?.state === "gating" || landing?.state === "left");
   const gateChecks = checks.data?.checks.filter((c) => c.name.startsWith("gate/")) ?? [];
   return (
-    <Stack gap={6} component="section" aria-label={t("landing.gate")}>
+    <Stack gap={6} component="section" aria-label={t("landing.gate")} style={{ overflowWrap: "anywhere" }}>
       <Text size="sm" fw={700}>{t("landing.gate")}</Text>
       {!landing ? <Text size="sm" c="dimmed">{t("landing.notQueued")}</Text> : (
         <>

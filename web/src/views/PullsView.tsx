@@ -1,4 +1,4 @@
-import { Card, Group, Select, Text, TextInput } from "@mantine/core";
+import { Card, Group, Select, Stack, Text, TextInput } from "@mantine/core";
 import { useQueries } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -62,7 +62,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
 
   return (
-    <>
+    <Stack gap="lg">
       <PageHeader
         title={t("pulls.title")}
         meta={
@@ -164,6 +164,6 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
         )}
         <TipChecks key={repo ?? ALL_REPOS} workspace={workspace} paths={paths} repo={repo} />
       </Card>
-    </>
+    </Stack>
   );
 }
