@@ -187,7 +187,12 @@ pub async fn recover(app: &App) -> AppResult<RecoveryReport> {
     }
     let repos: Vec<Repo> = app.store.read(|r| r.prefix_all(store::REPOS, &[])).await?;
     for repo in repos {
-        let changes = record_refs(app, &repo).await?;
+        let lock = app.repo_lock(&repo.id);
+        let _guard = lock.lock().await;
+        let changes = record_refs_locked(app, &repo).await?;
+        // A gate's database record may precede its hidden ref after a crash.
+        // Repair reachability before accepting requests, including backups.
+        crate::landing::repair_refs_locked(app, &repo).await?;
         if !changes.is_empty() {
             tracing::info!(
                 "recovery: recorded {} ref change(s) of {}",

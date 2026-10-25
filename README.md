@@ -3,7 +3,7 @@
 Branvil is a lightweight local code hosting service for GuildBotics: Git
 repositories over Smart HTTP in workspaces, each workspace with one kanban
 board for the tickets of its repositories, pull requests with reviews and a
-fast-forward merge, and a CI that runs each job in a microVM. It is one Rust
+serial landing queue, and a CI that runs each job in a microVM. It is one Rust
 process that keeps metadata in redb and Git data in bare repositories, and
 listens on loopback only; CI jobs run in a separate `branvil runner` process.
 
@@ -25,9 +25,9 @@ real service (see "Checking with GuildBotics"). See
 ## Requirements
 
 - Rust 1.90 or later (developed with 1.96, edition 2024)
-- Git 2.28 or later on `PATH` (the service runs `git http-backend`,
-  `update-ref`, `diff`, …, and the CI runner checks the source out with it;
-  developed with 2.54)
+- Git 2.38 or later on `PATH` (the service runs `git http-backend`,
+  `update-ref`, `merge-tree --write-tree`, `diff`, …, and the CI runner checks
+  the source out with it; developed with 2.54)
 
 Verified on macOS 26 (arm64). Linux and Windows are not verified.
 
@@ -131,15 +131,23 @@ agent reads everything and works in every repository: tickets, comments,
 reviews, pull requests, pushes to unprotected branches. Creating workspaces
 and repositories, settings and upstreams, members and their accounts, backups,
 merging, publishing, and marking a draft pull request ready are the owner's. A
-merge or a publish needs the repository's required checks on the head and its
+merge or a publish needs a passed landing gate at the front of its base
+branch's queue, the repository's required checks on the head, and its
 required approvals (Settings → Repositories → a repository → CI; 1 unless
 changed, 0 needs none): members other than the author whose last approve or
 request changes approves the current head (a comment keeps it) and who were
 not asked to review again since. The
 author can only comment on their own pull request. With **Land automatically**
 on the same tab, the repository merges (or, with an upstream, publishes once)
-by itself an open pull request that is not a draft as soon as it meets them;
-keeping a pull request a draft holds it. A runner uses only the runner API.
+by itself an open pull request that is not a draft as soon as it meets them.
+The queue and gates also run with this setting off. Only the first pull request
+in each repository/base queue gets a gate: the head itself when it contains
+the base, otherwise a merge commit of base and head whose required checks
+must succeed. The head and its approvals stay unchanged. The next pull request
+waits until the first merges or leaves the queue, including while GitHub's
+merge is pending. The pull request's landing card and the repository's landing
+queue show the order and what the first is waiting for. Keeping a pull
+request a draft holds it. A runner uses only the runner API.
 
 Under Settings → Members → a member → Reviewers, the owner chooses who is
 asked to review every pull request that member opens (owners and agents other
@@ -356,9 +364,10 @@ outside see. Branvil never pushes the default branch; it follows it.
    and its pull request and tickets close.
 
    With **Land automatically** on, Branvil publishes a pull request by itself
-   once it meets the conditions, and tells a webhook once, with links to both
-   pull requests, since a person merges it on GitHub: under Settings →
-   Notifications, the owner enters its URL (a Slack Incoming Webhook takes the
+   once it meets the conditions. Each time its landing gate passes, Branvil
+   tells a webhook, with links to both pull requests, that it awaits a merge
+   on GitHub. This includes a new gate for an already published head. Under
+   Settings → Notifications, the owner enters its URL (a Slack Incoming Webhook takes the
    message as it is), which is kept like a credential and never shown again.
 
 Members read the GitHub repository's Dependabot alerts through Branvil

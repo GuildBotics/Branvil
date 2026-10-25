@@ -12,6 +12,7 @@ export const keys = {
   webhook: () => ["webhook"] as const,
 
   repo: (repo: string) => ["repo", repo] as const,
+  landing: (repo: string) => ["repo", repo, "landing"] as const,
   repoPulls: (repo: string, state: string) => ["repo", repo, "pull-list", state] as const,
   branch: (repo: string, name: string) => ["repo", repo, "branch", name] as const,
   commit: (repo: string, sha: string) => ["repo", repo, "commit", sha] as const,

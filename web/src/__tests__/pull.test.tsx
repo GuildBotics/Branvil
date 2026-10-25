@@ -603,7 +603,6 @@ describe("pull request review", () => {
         error: null,
         stopped: null,
         auto: false,
-        notified_at: null,
       },
     });
     const fake = fakeApi(
@@ -643,7 +642,7 @@ describe("pull request review", () => {
     expect(screen.getByRole("button", { name: "Publish to GitHub" })).toBeDisabled();
   });
 
-  it("shows why sending to the host stopped and offers to publish again", async () => {
+  it("shows why sending to the host stopped and offers to resume landing", async () => {
     fakeApi(
       pullRoutes({
         "GET /api/v1/repos/acme/demo": UPSTREAM_REPO,
@@ -662,7 +661,6 @@ describe("pull request review", () => {
               error: null,
               stopped: "The host refused the branch ticket/3: [rejected] (stale info).",
               auto: true,
-              notified_at: null,
             },
           }),
         ),
@@ -672,12 +670,12 @@ describe("pull request review", () => {
     );
     renderApp("/acme/demo/-/pulls/3");
     expect(await screen.findByRole("alert")).toHaveTextContent("Sending stopped: The host refused the branch ticket/3");
-    expect(screen.getByRole("button", { name: "Publish again to GitHub" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Resume landing" })).toBeEnabled();
     expect(screen.getByText("published automatically")).toBeInTheDocument();
   });
 
   it.each([
-    { repository: { ...UPSTREAM_REPOSITORY, auto_land: true }, says: "This repository publishes it to GitHub by itself, once, when the conditions below hold." },
+    { repository: { ...UPSTREAM_REPOSITORY, auto_land: true }, says: "This repository publishes it to GitHub by itself after it reaches the front of the queue and passes the gate." },
     { repository: { ...UPSTREAM_REPOSITORY, upstream: null, auto_land: true }, says: "This repository merges it by itself once the conditions below hold." },
   ])("says that a repository landing automatically acts by itself: $says", async ({ repository, says }) => {
     fakeApi(

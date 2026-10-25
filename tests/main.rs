@@ -12,6 +12,7 @@ mod ci_settings;
 mod cli;
 mod git_http;
 mod gui;
+mod landing;
 mod pulls;
 mod real_executor;
 mod recovery;

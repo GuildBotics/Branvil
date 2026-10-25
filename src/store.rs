@@ -23,7 +23,7 @@ pub type Tbl = TableDefinition<'static, &'static [u8], &'static [u8]>;
 /// The schema version this build reads and writes. A database of any other
 /// version is refused instead of being misread; one of the previous version
 /// is upgraded by `upgrade` (`branvil admin upgrade`, `branvil restore`).
-pub const SCHEMA_VERSION: u64 = 15;
+pub const SCHEMA_VERSION: u64 = 16;
 
 pub const META: Tbl = TableDefinition::new("meta");
 pub const COUNTERS: Tbl = TableDefinition::new("counters");
@@ -35,6 +35,7 @@ pub const REPOS: Tbl = TableDefinition::new("repos");
 pub const WORKSPACES: Tbl = TableDefinition::new("workspaces");
 pub const TICKETS: Tbl = TableDefinition::new("tickets");
 pub const COMMENTS: Tbl = TableDefinition::new("comments");
+pub const LANDING: Tbl = TableDefinition::new("landing");
 pub const PULLS: Tbl = TableDefinition::new("pulls");
 pub const REVIEWS: Tbl = TableDefinition::new("reviews");
 pub const THREADS: Tbl = TableDefinition::new("threads");
@@ -78,6 +79,7 @@ pub const PRIMARY_TABLES: &[Tbl] = &[
     TICKETS,
     COMMENTS,
     PULLS,
+    LANDING,
     REVIEWS,
     THREADS,
     INLINE,

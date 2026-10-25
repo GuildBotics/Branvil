@@ -332,11 +332,45 @@ pub struct Pull {
     pub closed_at: Option<String>,
     pub merged_at: Option<String>,
     pub merge_sha: Option<String>,
+    /// The reviewed head, distinct from the gate commit placed on the base.
+    pub merged_head: Option<String>,
     /// The base tip the merge moved from (so the merged diff stays available).
     pub merged_base: Option<String>,
     /// Set once the pull request was published to the upstream host.
     pub upstream: Option<Published>,
     pub revision: u64,
+}
+
+/// A position in one repository/base landing queue. Kept after leaving so the
+/// failed gate remains visible and a successful retry can rejoin the queue.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Landing {
+    pub repo: String,
+    pub number: u64,
+    pub base: String,
+    pub queued_at: String,
+    pub sequence: u64,
+    pub state: String,
+    pub state_at: String,
+    pub gate: Option<String>,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub reason: Option<LandingReason>,
+    pub notified_at: Option<String>,
+    pub notify: bool,
+    /// Owner explicitly resumed a stopped publication through its next gate.
+    pub resume_publish: bool,
+    /// Last observed publication stage; state_at also dates changes here.
+    pub published: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LandingReason {
+    pub code: String,
+    pub message: String,
+    pub jobs: Vec<String>,
+    pub files: Vec<String>,
 }
 
 /// A pull request published to the upstream host, and what Branvil last sent
@@ -371,8 +405,6 @@ pub struct Published {
     pub stopped: Option<String>,
     /// Published by Branvil itself (`autoland`), not by the owner.
     pub auto: bool,
-    /// When the webhook was told of an automatic publish (once).
-    pub notified_at: Option<String>,
 }
 
 /// One check run on the upstream host.

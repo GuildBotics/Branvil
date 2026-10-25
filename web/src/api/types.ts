@@ -235,7 +235,36 @@ export interface PullRequest {
   merge_sha: string | null;
   /** Set once published to the repository's upstream host. */
   upstream: Published | null;
+  landing: Landing | null;
   revision: number;
+}
+
+export type LandingState = "waiting" | "gating" | "passed" | "left";
+
+export interface LandingFirst {
+  number: number;
+  published: boolean;
+  state: LandingState;
+  state_at: string;
+  error: string | null;
+}
+
+/** One pull request in its base branch's landing queue. */
+export interface Landing {
+  number: number;
+  base: string;
+  queued_at: string;
+  resume_publish: boolean;
+  published: boolean;
+  error: string | null;
+  state: LandingState;
+  state_at: string;
+  gate: string | null;
+  base_sha: string;
+  head_sha: string;
+  reason: { code: string; message: string; jobs: string[]; files: string[] } | null;
+  position: number | null;
+  first: LandingFirst | null;
 }
 
 /** A pull request published to the upstream host. */
@@ -256,8 +285,6 @@ export interface Published {
   stopped: string | null;
   /** Published by Branvil itself, the repository landing automatically. */
   auto: boolean;
-  /** When the webhook was told of that publish. */
-  notified_at: string | null;
 }
 
 /** The webhook told of automatic publishes; its URL is never shown, only its host. */

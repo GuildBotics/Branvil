@@ -144,6 +144,7 @@ fn auto_land_on(w: &World, path: &str) {
 /// once let through, answers with `answers` in turn, then 200.
 struct Hook {
     received: Arc<Mutex<Vec<(u16, Value)>>>,
+    answers: Arc<Mutex<VecDeque<u16>>>,
     gate: Arc<tokio::sync::Semaphore>,
 }
 
@@ -175,11 +176,8 @@ impl Hook {
     async fn held(w: &World, answers: &[u16]) -> Hook {
         let received = Arc::new(Mutex::new(Vec::new()));
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
-        let state: HookState = (
-            received.clone(),
-            Arc::new(Mutex::new(answers.iter().copied().collect())),
-            gate.clone(),
-        );
+        let answers = Arc::new(Mutex::new(answers.iter().copied().collect()));
+        let state: HookState = (received.clone(), answers.clone(), gate.clone());
         let app = axum::Router::new()
             .route("/services/T0/hook-9f3c", post(hook_receive))
             .with_state(state);
@@ -194,7 +192,11 @@ impl Hook {
             .put("/admin/webhook", &w.owner, json!({"url": url}))
             .await;
         assert_eq!(st, StatusCode::OK, "{v}");
-        Hook { received, gate }
+        Hook {
+            received,
+            answers,
+            gate,
+        }
     }
 
     fn release(&self) {
@@ -312,28 +314,28 @@ async fn only_the_owner_turns_landing_on_and_it_lands_what_waits_even_at_start()
 }
 
 #[tokio::test]
-async fn a_head_behind_its_base_waits_until_it_is_updated() {
+async fn a_head_behind_its_base_lands_through_a_gate_without_changing_its_head() {
     let w = World::new().await;
-    let other = other_repo(&w, OTHER, true).await;
     settings(&w, json!({"auto_land": true})).await;
-    w.push_change("b", "b.txt", "b\n");
+    let head = w.push_change("b", "b.txt", "b\n");
     git_ok(&w.work, &["checkout", "-q", "main"]);
-    w.push_change("a", "a.txt", "a\n");
+    let base = w.push_change("a", "a.txt", "a\n");
     merged(&w, number(&w.open_pull("a", json!([])).await)).await;
-    // b does not contain main's new tip.
     let n = number(&w.open_pull("b", json!([])).await);
-    swept(&w, &other).await;
-    assert_eq!(pull(&w, n).await["state"], "open");
-    git_as_ok(&w.work, "alice", &w.owner, &["fetch", "-q", "origin"]);
-    git_ok(&w.work, &["checkout", "-q", "b"]);
-    git_ok(&w.work, &["rebase", "-q", "origin/main"]);
-    git_as_ok(
-        &w.work,
-        "aiko",
-        &w.aiko,
-        &["push", "-q", "origin", "+HEAD:refs/heads/b"],
-    );
     merged(&w, n).await;
+    let p = pull(&w, n).await;
+    assert_eq!(p["head_sha"], head);
+    assert_ne!(p["merge_sha"], head);
+    assert_eq!(p["landing"]["gate"], p["merge_sha"]);
+    git_as_ok(&w.work, "alice", &w.owner, &["fetch", "-q", "origin"]);
+    assert_eq!(
+        git_ok(&w.work, &["rev-parse", "origin/main^1"]).trim(),
+        base
+    );
+    assert_eq!(
+        git_ok(&w.work, &["rev-parse", "origin/main^2"]).trim(),
+        head
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -359,7 +361,7 @@ async fn a_pull_request_publishes_itself_as_its_author_and_the_webhook_is_told_o
     assert_eq!(there.author, "aiko-bot");
     assert_eq!(gh.tip(GH, "feat").as_deref(), Some(head.as_str()));
     eventually("the notice", || async {
-        pull(&w, n).await["upstream"]["notified_at"].is_string()
+        pull(&w, n).await["landing"]["notified_at"].is_string()
     })
     .await;
     let received = hook.received();
@@ -373,11 +375,14 @@ async fn a_pull_request_publishes_itself_as_its_author_and_the_webhook_is_told_o
         assert!(text.contains(part), "{text}");
     }
 
-    // Later changes are carried to the host; the webhook hears nothing more.
+    // A new head is sent immediately and its next gate pass is notified again.
     w.push_change("feat", "f.txt", "two\n");
     refresh(&w).await;
     swept(&w, &other).await;
-    assert_eq!(hook.received().len(), 1);
+    eventually("the new gate notice", || async {
+        hook.received().len() == 2
+    })
+    .await;
     assert_eq!(pull(&w, n).await["state"], "open", "people merge it there");
 }
 
@@ -410,7 +415,17 @@ async fn an_automatic_publish_the_host_refuses_is_left_to_the_owner() {
     assert_eq!(gh.tip(GH, "feat").as_deref(), Some(theirs.as_str()));
     assert!(gh.pulls(GH).is_empty());
 
-    // The owner's publish replaces it.
+    // The owner first resumes the gate, then explicitly replaces the host branch.
+    let p = pull(&w, n).await;
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/landing/resume", w.repo_path()),
+            &w.owner,
+            json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     let (st, v) = publish(&w, n).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["upstream"]["auto"], false);
@@ -422,7 +437,7 @@ async fn an_automatic_publish_the_host_refuses_is_left_to_the_owner() {
 async fn a_failed_notice_is_sent_again_and_a_manual_publish_tells_nobody() {
     let (w, _gh) = followed().await;
     with_aiko_account(&w).await;
-    let hook = Hook::start(&w, &[500]).await;
+    let hook = Hook::start(&w, &[500; 64]).await;
     let other = other_repo(&w, OTHER, true).await;
     settings(&w, json!({"auto_land": true})).await;
     w.push_change("feat", "f.txt", "one\n");
@@ -434,7 +449,8 @@ async fn a_failed_notice_is_sent_again_and_a_manual_publish_tells_nobody() {
     let problem = w.server.ok("/admin/webhook", &w.owner).await["problem"].clone();
     assert!(problem.as_str().unwrap().contains("500"), "{problem}");
     assert!(!problem.to_string().contains("hook-9f3c"), "{problem}");
-    assert!(pull(&w, n).await["upstream"]["notified_at"].is_null());
+    assert!(pull(&w, n).await["landing"]["notified_at"].is_null());
+    hook.answers.lock().unwrap().clear();
     // The next change of the repository sends it again.
     let (st, _) = w
         .server
@@ -446,19 +462,26 @@ async fn a_failed_notice_is_sent_again_and_a_manual_publish_tells_nobody() {
         .await;
     assert_eq!(st, StatusCode::CREATED);
     eventually("the notice", || async {
-        pull(&w, n).await["upstream"]["notified_at"].is_string()
+        pull(&w, n).await["landing"]["notified_at"].is_string()
     })
     .await;
     assert!(w.server.ok("/admin/webhook", &w.owner).await["problem"].is_null());
     let received = hook.received();
-    assert_eq!(
-        received.iter().map(|r| r.0).collect::<Vec<_>>(),
-        [500, 200],
-        "delivered once"
-    );
-    assert_eq!(received[0].1, received[1].1);
+    assert_eq!(received.last().unwrap().0, 200);
+    assert!(received[..received.len() - 1].iter().all(|r| r.0 == 500));
+    assert!(received.iter().all(|r| r.1 == received[0].1));
+    let sent = received.len();
 
-    // The owner's publish tells nobody.
+    // The owner's publish tells nobody. Release the current queue leader first.
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/close", w.repo_path()),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     settings(&w, json!({"auto_land": false})).await;
     git_ok(&w.work, &["checkout", "-q", "main"]);
     w.push_change("two", "two.txt", "2\n");
@@ -467,8 +490,8 @@ async fn a_failed_notice_is_sent_again_and_a_manual_publish_tells_nobody() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["upstream"]["auto"], false);
     swept(&w, &other).await;
-    assert_eq!(hook.received().len(), 2);
-    assert!(pull(&w, m).await["upstream"]["notified_at"].is_null());
+    assert_eq!(hook.received().len(), sent);
+    assert!(pull(&w, m).await["landing"]["notified_at"].is_null());
 }
 
 #[tokio::test]
@@ -531,13 +554,13 @@ async fn a_webhook_set_later_is_told_of_an_automatic_publish_whatever_auto_land(
         .await;
     assert_eq!(st, StatusCode::CREATED);
     eventually("the notice", || async {
-        pull(&w, n).await["upstream"]["notified_at"].is_string()
+        pull(&w, n).await["landing"]["notified_at"].is_string()
     })
     .await;
     assert_eq!(hook.received().len(), 1);
 }
 
-/// A service started again (now) whose `acme/demo` has two pull requests
+/// A service started again (now) whose `acme/demo` has a pull request
 /// Branvil published by itself while no webhook was set, and whose
 /// `acme/other` has a pull request that can land, landing by itself from this
 /// start; the webhook holds every answer. The start sweeps `acme/demo`
@@ -546,7 +569,7 @@ async fn notices_before_a_landing() -> (World, Hook, Other, u64) {
     let (mut w, _gh) = followed().await;
     with_aiko_account(&w).await;
     settings(&w, json!({"auto_land": true})).await;
-    for branch in ["one", "two"] {
+    for branch in ["one"] {
         git_ok(&w.work, &["checkout", "-q", "main"]);
         w.push_change(branch, &format!("{branch}.txt"), "x\n");
         let n = number(&w.open_pull(branch, json!([])).await);

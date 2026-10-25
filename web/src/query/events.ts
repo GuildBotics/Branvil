@@ -51,7 +51,9 @@ export function predicatesFor(event: ChangeEvent, client: QueryClient): Predicat
       return [
         // That pull request only (its diff is keyed by the head sha), and the repository's PR list.
         (q) => isRepo(q, path) && (id === "" || pullNumberOf(q) === id) && keyOf(q)[4] !== "files",
-        (q) => isRepo(q, path) && keyOf(q)[2] === "pull-list",
+        (q) => isRepo(q, path) && (keyOf(q)[2] === "pull-list" || keyOf(q)[2] === "landing"),
+        // A waiting pull shows its leader's current state, even though its own row did not change.
+        (q) => isRepo(q, path) && keyOf(q)[2] === "pull" && keyOf(q).length === 4 && String((q.state.data as PullRequest | undefined)?.landing?.first?.number) === id,
         (q) => keyOf(q)[2] === "ticket" && keyOf(q)[4] === "pulls",
         boardCardsWhere((cards) =>
           cards.some((c) =>
@@ -74,8 +76,8 @@ export function predicatesFor(event: ChangeEvent, client: QueryClient): Predicat
           if (k[2] !== "pull" || k[4] !== "checks") return false;
           if (id === "") return true;
           const checks = q.state.data as Checks | undefined;
-          const pull = client.getQueryData<PullRequest>(["repo", path, "pull", k[3]]);
-          return checks?.head_sha === id || pull?.head_sha === id;
+          const pull = client.getQueryData<PullRequest>(["repo", k[1], "pull", k[3]]);
+          return checks?.head_sha === id || pull?.head_sha === id || pull?.landing?.gate === id;
         },
       ];
     case "repo":
@@ -91,7 +93,7 @@ export function predicatesFor(event: ChangeEvent, client: QueryClient): Predicat
     case "upstream":
       return [
         (q) => keyOf(q)[0] === "repos",
-        (q) => isRepo(q, path) && keyOf(q).length === 2,
+        (q) => isRepo(q, path) && (keyOf(q).length === 2 || keyOf(q)[2] === "landing" || keyOf(q)[2] === "pull-list" || (keyOf(q)[2] === "pull" && keyOf(q)[4] !== "files")),
         (q) => keyOf(q)[0] === "diagnostics",
       ];
     default:

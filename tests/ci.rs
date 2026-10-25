@@ -14,57 +14,25 @@ const IMAGE: &str = "docker.io/library/alpine:3.22";
 const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
 #[tokio::test]
-async fn schema_14_ci_records_upgrade_with_trees_missing_commits_and_rebuilt_indexes() {
+async fn schema_15_upgrade_preserves_reviewed_heads_and_reserves_the_service_author() {
     let mut w = World::new().await;
-    let runner = Runner::new(&w, "runner1").await;
-    let sha = land(
-        &w,
-        "setup",
-        &[(".branvil/ci.toml", &pipeline(&["test"]))],
-        None,
-    )
-    .await;
-    assert_eq!(runner.drain("success").await, 1);
-    let attempts = w
-        .server
-        .ok(&format!("{}/commits/{sha}/checks", w.repo_path()), &w.owner)
-        .await;
-    let id = attempts["checks"][0]["attempt_id"].as_str().unwrap();
-    let (status, result) = w
-        .server
-        .post(
-            &format!("{}/jobs/{id}/retry", w.repo_path()),
-            &w.owner,
-            json!({}),
-        )
-        .await;
-    assert_eq!(status, 200, "{result}");
+    let head = land(&w, "landed", &[("landed.txt", "landed\n")], None).await;
     w.server.stop();
     let data = w.server.data.clone();
     let db = data.join("branvil.redb");
-    as_schema_14(&db);
-    // An old run whose commit was already pruned stays readable, without a tree.
-    let mut lost = records(&db, "ci_runs")[0].clone();
-    lost["sha"] = json!("f".repeat(40));
-    lost["seq"] = json!(100_000);
-    let mut key = lost["repo"].as_str().unwrap().as_bytes().to_vec();
-    key.extend_from_slice(&[0, 1]);
-    key.extend_from_slice(lost["sha"].as_str().unwrap().as_bytes());
-    key.extend_from_slice(&[0, 1]);
+    edit_records(&db, "pulls", |p| {
+        p.as_object_mut().unwrap().remove("merged_head");
+    });
+    edit_records(&db, "meta", |v| {
+        if v.is_u64() {
+            *v = json!(15);
+        }
+    });
     {
         let database = redb::Database::open(&db).unwrap();
         let txn = database.begin_write().unwrap();
-        {
-            let mut table = txn
-                .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("ci_runs"))
-                .unwrap();
-            table
-                .insert(
-                    key.as_slice(),
-                    serde_json::to_vec(&lost).unwrap().as_slice(),
-                )
-                .unwrap();
-        }
+        txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new("landing"))
+            .unwrap();
         txn.commit().unwrap();
     }
     let admin = |what: &str| {
@@ -83,96 +51,44 @@ async fn schema_14_ci_records_upgrade_with_trees_missing_commits_and_rebuilt_ind
         )
     };
     assert!(admin("check").1.contains("branvil admin upgrade"));
-    let old_attempts = records(&db, "ci_attempts");
-    edit_records(&db, "ci_attempts", |a| a["job"] = json!("broken"));
-    let broken = tables(&db);
+    let members = records(&db, "members");
+    edit_records(&db, "members", |member| member["name"] = json!("Branvil"));
+    let before = tables(&db);
     let failed = admin("upgrade");
     assert_eq!(failed.0, 1, "{}", failed.1);
-    assert_eq!(tables(&db), broken, "decoding failure writes nothing");
-    edit_records(&db, "ci_attempts", |a| {
-        a["job"] = old_attempts
-            .iter()
-            .find(|old| old["id"] == a["id"])
-            .unwrap()["job"]
-            .clone()
+    assert!(failed.1.contains("reserved"), "{}", failed.1);
+    assert_eq!(
+        tables(&db),
+        before,
+        "reserved author rejection writes nothing"
+    );
+    let mut originals = members.into_iter();
+    edit_records(&db, "members", |member| {
+        member["name"] = originals.next().unwrap()["name"].clone();
     });
     let before = tables(&db);
-    // A missing repository is an operational failure, not a missing commit.
-    let bare = data.join("repos").join(format!("{REPO}.git"));
-    let moved = data.join("temporarily-moved.git");
-    std::fs::rename(&bare, &moved).unwrap();
-    let failed = admin("upgrade");
-    assert_eq!(failed.0, 1, "{}", failed.1);
-    std::fs::rename(&moved, &bare).unwrap();
-    assert_eq!(tables(&db), before);
-    // An unreadable/corrupt object is not an absent object, even when quiet
-    // rev-parse reports the same exit status for failed verification.
-    let corrupt = bare.join("objects/ff").join("f".repeat(38));
-    std::fs::create_dir_all(corrupt.parent().unwrap()).unwrap();
-    std::fs::write(&corrupt, "not a compressed git object").unwrap();
-    let failed = admin("upgrade");
-    assert_eq!(failed.0, 1, "{}", failed.1);
-    assert_eq!(tables(&db), before);
-    std::fs::remove_file(corrupt).unwrap();
-    assert!(!std::fs::read_dir(&data).unwrap().any(|e| {
-        e.unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with("branvil-schema-")
-    }));
     let (code, output) = admin("upgrade");
     assert_eq!(code, 3, "{output}");
-    assert!(
-        output.contains("from schema version 14 to 15")
-            && output.contains("1 run(s) have no surviving commit"),
-        "{output}"
-    );
-    let copy = std::fs::read_dir(&data)
+    assert!(output.contains("from schema version 15 to 16"), "{output}");
+    assert_eq!(records(&db, "pulls")[0]["merged_head"], head);
+    assert!(records(&db, "landing").is_empty());
+    let backup = std::fs::read_dir(&data)
         .unwrap()
         .map(|e| e.unwrap().path())
         .find(|p| {
             p.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("branvil-schema-14-")
+                .starts_with("branvil-schema-15-")
         })
         .unwrap();
-    assert_eq!(tables(&copy), before);
-    let runs = records(&db, "ci_runs");
-    let tree = git_ok(&w.work, &["rev-parse", &format!("{sha}^{{tree}}")]);
-    assert_eq!(runs.iter().find(|r| r["sha"] == sha).unwrap()["tree"], tree);
-    assert!(runs.iter().find(|r| r["sha"] == lost["sha"]).unwrap()["tree"].is_null());
-    for a in records(&db, "ci_attempts") {
-        assert!(a["reused_from"].is_null() && a["cache_key"].is_null());
-        assert_eq!(a["allow_reuse"], false);
-        let mut old_shape = a.clone();
-        for field in ["reused_from", "cache_key", "allow_reuse"] {
-            old_shape.as_object_mut().unwrap().remove(field);
-        }
-        assert!(old_attempts.contains(&old_shape));
-    }
-    assert_eq!(
-        tables(&db)["ix_ci_tree"].len(),
-        runs.iter().filter(|r| r["tree"].is_string()).count()
-    );
-    assert_eq!(admin("upgrade").0, 3, "check is still required");
+    assert_eq!(tables(&backup), before);
     let (code, output) = admin("check");
     assert_eq!(code, 0, "{output}");
     assert!(output.contains("indexes: ok"), "{output}");
     let upgraded = tables(&db);
     assert_eq!(admin("upgrade").0, 0);
     assert_eq!(tables(&db), upgraded);
-    w.restart(&[]);
-    let runner = Runner {
-        url: w.server.url.clone(),
-        ..runner
-    };
-    let claimed = runner.claim().await.unwrap();
-    assert!(
-        claimed["reuse"].is_null(),
-        "the pre-upgrade manual retry must execute"
-    );
-    assert_eq!(runner.finish(&claimed, "success").await.0, 200);
 }
 
 pub(crate) fn pipeline(jobs: &[&str]) -> String {
@@ -256,7 +172,7 @@ impl Runner {
         format!("{}/api/v1/runner{path}", self.url)
     }
 
-    async fn claim(&self) -> Option<Value> {
+    pub(crate) async fn claim(&self) -> Option<Value> {
         let resp = self
             .http
             .post(self.at("/claim"))
@@ -293,7 +209,7 @@ impl Runner {
             .await
     }
 
-    async fn finish(&self, c: &Value, conclusion: &str) -> (StatusCode, Value) {
+    pub(crate) async fn finish(&self, c: &Value, conclusion: &str) -> (StatusCode, Value) {
         self.post(
             c,
             "finish",
@@ -1524,10 +1440,25 @@ async fn a_merge_needs_success_on_the_exact_head_and_refuses_a_moved_base() {
     );
     assert!(v["error"]["message"].as_str().unwrap().contains("test"));
     assert_ne!(s1, s2);
+    assert_eq!(
+        w.server
+            .patch(&base, &w.owner, json!({"draft": true}))
+            .await
+            .0,
+        200
+    );
     runner.drain("success").await;
-    // The base moves (another pull request lands) after the caller read it.
+    // While this pull is a draft, another pull can take the queue's front
+    // and move the base after the caller read it.
     let old_base = p["base_sha"].clone();
     land(&w, "other", &[("o.txt", "o\n")], Some(&runner)).await;
+    assert_eq!(
+        w.server
+            .patch(&base, &w.owner, json!({"draft": false}))
+            .await
+            .0,
+        200
+    );
     runner.drain("success").await;
     let (st, v) = w
         .server
@@ -1603,6 +1534,14 @@ async fn ci_records_logs_and_artifacts_survive_a_backup_and_restore() {
         .await;
     assert_eq!(st, 200);
     assert_eq!(runner.finish(&c, "success").await.0, 200);
+    eventually("the landing gate before backup", || async {
+        checks(&w, n).await["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "gate/test" && check["conclusion"] == "success")
+    })
+    .await;
     let before = checks(&w, n).await;
 
     let backup = w.dir.path().join("backup");

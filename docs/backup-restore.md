@@ -30,7 +30,7 @@ branvil-2026-10-14/          (0700)
 `manifest.json` (abridged):
 
 ```json
-{"format": 1, "service": "branvil", "branvil_version": "0.1.0", "schema_version": 7,
+{"format": 1, "service": "branvil", "branvil_version": "0.1.0", "schema_version": 16,
  "git_version": "git version 2.54.0", "created_at": "2026-10-14T10:41:20.123Z",
  "base_url": "http://127.0.0.1:7878",
  "tables": {"tickets": 12, "pulls": 3, "reviews": 4, "...": 0},
@@ -126,7 +126,7 @@ GuildBotics stays valid. Two services on the same base URL cannot both listen.
 | The owner's token (`secrets/owner.token`) | No | The first start of the restored service writes a new one and revokes the old. |
 | GUI sessions | Their records, but they do not survive | The new owner token's start deletes every session. |
 | Members' upstream credentials (`secrets/accounts/`: tokens, GitHub App keys) | **No** | A credential for GitHub is a secret of another system; a backup copied to another disk or machine should not carry it. After a restore the accounts (provider, kind, and login) are there, but polling reports that the credential is not on this machine and nothing is read or sent until it is set again (`PUT …/members/{name}/accounts/{provider}`). `branvil backup` and `branvil restore` list these accounts. |
-| The notification webhook's URL (`secrets/webhook.url`) | **No** | Like an upstream credential, it is a secret of another system. After a restore nothing is told until the owner sets it again (Settings → Notifications, `PUT /api/v1/admin/webhook`); it is then told of the automatic publishes still open. |
+| The notification webhook's URL (`secrets/webhook.url`) | **No** | Like an upstream credential, it is a secret of another system. After a restore nothing is told until the owner sets it again (Settings → Notifications, `PUT /api/v1/admin/webhook`); it is then told of pending passed-gate notices for pull requests still open on the host. |
 | `secrets/cursor.key` | No | A new key is made at the first start; list cursors handed out before become `invalid_cursor`, which clients recover from by starting the list again. |
 | The hook secret | No | It is made per process. |
 
@@ -188,15 +188,14 @@ new data directory; when the upgrade fails, the restored directory is left
 at the previous version, and `branvil admin upgrade --data-dir <it>` finishes
 it once the cause is fixed).
 
-Version 14 → 15 (`src/upgrade.rs`): every CI run records its commit's tree,
-read from the restored or existing Git repository. A commit that is already
-missing leaves the tree unset and supplies no reusable results; a Git error
-stops the upgrade before writing. Every attempt gets empty reuse-source and
-cache-key fields. Existing attempts execute once if still unfinished, since
-the old format did not distinguish manual retries; existing successes can
-still supply results to new attempts. All indexes, including the new
-repository/tree/commit index, are rebuilt from the records. Existing
-conclusions, logs, and artifacts stay as they were.
+Version 15 → 16 (`src/upgrade.rs`): the database gains landing queues and
+stores each merged pull request's original reviewed head separately from its
+merge commit. Existing local merges use their `merge_sha` as the reviewed head;
+upstream merges use the pushed head when present. Queue entries are populated
+from eligible pull requests after startup. Old publication notification times
+are removed; each new passed gate records its own notice. The upgrade refuses
+a member named `branvil` (case-insensitively), since that name is now reserved
+for service comments. The refusal leaves the old database unchanged.
 
 ### The service run by scripts/serve.sh
 

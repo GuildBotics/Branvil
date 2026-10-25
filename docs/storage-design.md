@@ -51,50 +51,58 @@ closure returns `Ok` and aborts otherwise.
 
 ## Schema version
 
-`meta["schema_version"]` is written on creation (currently `15`: members are
-the owner, agents, and runners, whose kind alone decides what they may do, and
-have accounts on upstream hosts, each a token or an app, and the members asked to review the pull requests they open; a ticket has at most one assignee and may name
-an upstream issue, a parent, and tickets it is blocked by; tickets belong to repositories, which hold their labels, the approvals a merge needs, and whether they land
-pull requests by themselves, and
-may have an upstream; repositories belong to workspaces, each with one board,
-on which every ticket is in a lane;
-a pull request may be published upstream (by the owner or by Branvil, which
-tells the webhook once); a CI run holds its commit's own
-pipeline and tree, and attempts record reuse sources and cache keys). A database of any other version is refused at open. One of the
-previous version is upgraded by `branvil admin upgrade` or `branvil restore`
-(`src/upgrade.rs`, the only code that reads the previous shapes; it is
-replaced when the version is raised again), which first keeps a copy of the
-database as it was and, in the transaction that applies the upgrade, sets
-`meta["unchecked"]`; `branvil serve` refuses a database with it until a
-passing `branvil admin check` removes it (`docs/backup-restore.md`,
-"Upgrading"). A database without the entry is not marked, so adding it did
-not change the stored format of any record or raise the version.
+`meta["schema_version"]` is written on creation (currently `16`). The current
+format includes persistent landing queues, each merged pull request's original
+reviewed head distinct from its merge commit, and per-gate notification and
+publication-resume state. CI runs hold their commit's pipeline and tree;
+attempts hold reuse sources and cache keys.
+
+A database of any other version is refused at open. The previous version is
+upgraded by `branvil admin upgrade` or `branvil restore` (`src/upgrade.rs`, the
+only code that reads previous shapes, replaced whenever the version rises).
+The upgrade keeps a copy of the database as it was and sets `meta["unchecked"]`
+in the transaction that applies it. `branvil serve` refuses a marked database
+until a passing `branvil admin check` removes the mark (`docs/backup-restore.md`,
+"Upgrading"). A database without the mark is not marked: introducing this
+check did not change stored records or raise the version.
 
 ## Primary tables
 
 | Table | Key | Value | Written by | Read by |
 | --- | --- | --- | --- | --- |
 | `meta` | `(name)` | schema version; `unchecked` while an upgrade has not passed `branvil admin check` (absent otherwise) | open, upgrade, `admin check` | open, `serve`, `admin upgrade` |
-| `counters` | `(name)` | `u64` | ticket numbers `ticket:<repo>`, PR numbers `pull:<repo>`, `entry` sequence | allocation in the same txn as the insert |
+| `counters` | `(name)` | `u64` | ticket numbers `ticket:<repo>`, PR numbers `pull:<repo>`, `entry` sequence, per-repository landing order `landing:<repo>` | allocation in the same txn as the insert |
 | `members` | `(fold(name))` | member, kind (`owner`, `agent`, `runner`), accounts on upstream hosts (provider, login; the token is a file), reviewers of the pull requests it opens | owner API, `init`, automatic runner | auth, kind checks, upstream |
 | `tokens` | `(token id)` | member, label, SHA-256 of the secret, last use | token API | auth (by id, constant-time hash compare) |
 | `sessions` | `(sha256(session id))` | member, CSRF secret, expiry | entry-code exchange (expired rows pruned there); all deleted when the owner's token file is replaced | cookie auth |
 | `workspaces` | `(workspace id)` | name | workspace API | repository creation, cards, closed |
 | `repos` | `(repo id)` | path, workspace id, default branch, protected branches, required checks, required approvals, `auto_land`, `ci_network`, labels, upstream (provider, repository), revision | repo API | everything under a repository |
 | `tickets` | `(repo id, n)` | ticket incl. its workspace id, its one assignee with `assigned_at` (or none), labels, upstream issue (or none), lane/rank on the workspace's board, its parent (or none) and the tickets it is blocked by, as (repo id, n), state, revision | ticket API, merge | `read(tickets)`, candidates |
-| `comments` | `("ticket", repo id, n, seq)` / `("pull", repo id, n, seq)` | comment with its reactions | comment and reaction API | comments, cards, activity |
-| `pulls` | `(repo id, n)` | pull request record (links, reviewers, reviewed_by, draft, state, merge data, and once published: the host's pull request, what was last sent to it, the host's checks of the pushed head, whether Branvil published it and when the webhook was told) | PR API, merge, publish, the upstream poller, push recording (`updated_at`) | PR reads, patrol, the upstream poller |
+| `comments` | `("ticket", repo id, n, seq)` / `("pull", repo id, n, seq)` | comment with its reactions | comment and reaction API, landing gate failures | comments, cards, activity |
+| `pulls` | `(repo id, n)` | pull request record (links, reviewers, reviewed_by, draft, state, original merged head and base, merge commit, and once published: the host's pull request, what was last sent to it, the host's checks of the pushed head, whether Branvil published it) | PR API, merge, publish, the upstream poller, push recording (`updated_at`) | PR reads, patrol, the upstream poller |
+| `landing` | `(repo id, n)` | base branch, admission time/order, state/time, gate SHA and its base/head inputs, departure reason with jobs/files, notification intent/time, stopped-publication resume intent | landing reconciliation, merge, owner resume/publish, webhook acknowledgment | queue and PR views, gate checks, merge/publish preconditions, CI gate ownership, webhook |
 | `reviews` | `(repo id, n, seq)` | review with reactions | review API | reviews, activity |
 | `threads` | `(repo id, n, root seq)` | path, line, side, commit, resolved | inline-comment API | threads |
 | `inline_comments` | `(repo id, n, root seq, seq)` | thread comment with reactions | inline/reply API | thread comments (contiguous per thread) |
 | `ref_snapshots` | `(repo id, refname)` | last recorded object | `refs::record_refs` | push recording, startup rescan |
 | `ref_journal` | `(journal id)` | repo, ref, expected old/new, operation | merge (before `update-ref`) | completion, startup recovery |
 | `idempotency` | `(fold(member), key)` | request hash, status, response body, time | API middleware | API middleware |
-| `ci_runs` | `(repo id, sha)` | branches that want CI of the commit, tree (unset only for upgraded runs with missing commits), the commit's pipeline (absent / invalid + message / job definitions), cache scope, waiting, superseded by | ref recording (`Ci::on_ref_changes`), PR open/reopen, reconciler, queue admission | checks, claims, retries |
+| `ci_runs` | `(repo id, sha)` | branches or current gates that want CI of the commit, tree (unset only for upgraded runs with missing commits), the commit's pipeline (absent / invalid + message / job definitions), cache scope, waiting, superseded by | ref recording (`Ci::on_ref_changes`), PR open/reopen, reconciler, queue admission | checks, claims, retries |
 | `ci_attempts` | `(attempt id)` | job definition (snapshot), image configuration digest, actual source attempt if reused, cache key of an actual execution, reuse permission (manual retries execute), number, queue sequence, status, conclusion, details, SHA-256 of the lease, lease expiry, cancel requested, runner, cache scope, network, times, interrupted/superseded flags, artifact names and sizes, files pruned | registration, claim, heartbeat, finish, cancel, retry, sweeps | checks, job API, runner API, artifacts |
 
 Each comment, review, and inline comment is its own record, so adding one never
 rewrites a history; a reaction rewrites only its target entry.
+
+Each pull request has at most one `landing` row. A repository-prefix scan sorts
+active rows by their stored `sequence` and groups them by base; departed rows
+remain available for the failure reason, gate checks, and retries. Rejoining
+replaces the row with a new admission time and sequence. These writes leave
+`Pull.revision` and `Pull.updated_at` unchanged. Gate failures and conflicts
+write their reserved-author `branvil` comment in the transaction that records
+the departure. The next ref update removes the gate ref; ref recording and CI
+reconciliation supersede work and repair interrupted registration. A failed
+gate remains reachable through `refs/branvil/failed-gate/<number>` for retry.
+
 
 ## Derived indexes
 
@@ -145,11 +153,15 @@ over the collection, the caller, and every query condition, keyed by
 | create PR | open (head, base) lookup, link validation, number allocation, insert, indexes (concurrent creates make one PR) |
 | review / inline comment | insert + PR activity + involvement; the head was read from Git just before, and the write is linearized at that read |
 | reaction | read-modify-write of the target entry, after checking the entry belongs to the item |
-| merge (DB side) | PR merged/closed, closed-at index, `closes` tickets closed and moved to `done`, journal entry removed |
+| merge (DB side) | PR merged/closed with original reviewed head and merge commit, landing entry left, closed-at index, `closes` tickets closed and moved to `done`, journal entry removed |
+| landing transition | queue entry and, for a gate failure or conflict, its service comment; does not update PR activity |
+| stopped-publication resume | resume intent on the existing landing entry; original upstream refusal remains until the owner publishes again |
+| publication result | upstream record and clearing the landing entry's resume intent |
+| gate notification acknowledgment | `notified_at` only if the entry is still the same passed gate and state time |
 | push recording | ref snapshot diff, `updated_at` of open PRs whose head moved |
 | upstream poll of a pull request | what was sent and read, and a close or reopen the host made; a merge on the host is applied with the merge's own effects (above) in the same transaction |
-| CI registration (after push recording, same repository lock; the pipeline was read from Git before) | run created or the branch added to it, queue bound check, every job's attempt queued (or the run marked waiting) |
-| CI supersession | the branch removed from the old commit's run; when none is left, its queued attempts cancelled and running ones marked cancel-requested |
+| CI registration (after push recording, same repository lock; the pipeline was read from Git before) | run created or the branch/gate added to it, queue bound check, every job's attempt queued (or the run marked waiting) |
+| CI supersession | the branch/gate removed from the old commit's run; when none is left, its queued attempts cancelled and running ones marked cancel-requested |
 | claim | oldest pending attempt → in progress, new lease hash and expiry, pending entry removed, active entry added |
 | heartbeat / finish / artifact record | lease checked (current and unexpired) and the attempt updated in the same transaction; `409` writes nothing |
 | lease sweep | each expired attempt concluded as interrupted and, the first time, its re-queued successor inserted |

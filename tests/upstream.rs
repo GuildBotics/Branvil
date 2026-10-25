@@ -3,6 +3,7 @@
 //! pull request as its author, carrying changes both ways, the host's checks
 //! and logs, the merge on the host, and conditional requests.
 
+use crate::ci::eventually;
 use crate::common;
 
 use common::github::{AppKey, FakeGitHub, Refusal};
@@ -67,6 +68,21 @@ pub(crate) async fn publish(w: &World, number: u64) -> (StatusCode, Value) {
             json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
         )
         .await
+}
+
+async fn resume_publish(w: &World, number: u64) -> Value {
+    let pull = format!("{}/pulls/{number}", w.repo_path());
+    let p = w.server.ok(&pull, &w.owner).await;
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{pull}/landing/resume"),
+            &w.owner,
+            json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    v
 }
 
 fn branvil_tip(w: &World, branch: &str) -> String {
@@ -345,7 +361,14 @@ async fn a_pull_request_is_published_as_its_author_and_follows_the_host_to_the_m
     // The author has no GitHub account yet.
     let (st, v) = publish(&w, n).await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
-    assert_eq!(v["error"]["code"], "no_account");
+    assert_eq!(v["error"]["code"], "not_mergeable");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("landing gate"),
+        "{v}"
+    );
     assert_eq!(gh.tip(GH, "ticket/1"), None);
     let (st, _) = s
         .put(
@@ -597,7 +620,58 @@ async fn a_commit_added_on_the_host_stops_sending_until_published_again() {
         "{got}"
     );
     assert_eq!(gh.tip(GH, "feature").as_deref(), Some(theirs.as_str()));
-    // The owner decides: publishing again replaces what GitHub has.
+    eventually("the stopped publication leaves the queue", || async {
+        s.ok(&pull, &w.owner).await["landing"]["state"] == "left"
+    })
+    .await;
+    let stopped = s.ok(&pull, &w.owner).await;
+    let resume = format!("{pull}/landing/resume");
+    let input = json!({"expected_head": ours, "expected_base": stopped["base_sha"]});
+    let (st, v) = s.post(&resume, &w.aiko, input.clone()).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    for (field, code) in [
+        ("expected_head", "head_moved"),
+        ("expected_base", "base_moved"),
+    ] {
+        let mut stale = input.clone();
+        stale[field] = json!("0".repeat(40));
+        let (st, v) = s.post(&resume, &w.owner, stale).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{v}");
+        assert_eq!(v["error"]["code"], code);
+    }
+    let unchanged = s.ok(&pull, &w.owner).await;
+    assert_eq!(unchanged["landing"], stopped["landing"]);
+    assert_eq!(
+        unchanged["upstream"]["stopped"],
+        stopped["upstream"]["stopped"]
+    );
+
+    // Another pull request now owns the base. Resuming rejoins behind it,
+    // and cannot replace the host branch until its turn and gate pass.
+    git_ok(&w.work, &["checkout", "-q", "main"]);
+    w.push_change("next", "n.txt", "next\n");
+    let next = w.open_pull("next", json!([])).await;
+    let next_path = format!("{}/pulls/{}", w.repo_path(), next["number"]);
+    eventually("the next pull request passes its gate", || async {
+        s.ok(&next_path, &w.owner).await["landing"]["state"] == "passed"
+    })
+    .await;
+    let resumed = resume_publish(&w, n).await;
+    assert_eq!(resumed["landing"]["state"], "waiting", "{resumed}");
+    assert_eq!(resumed["landing"]["position"], 2, "{resumed}");
+    assert_eq!(
+        resumed["upstream"]["stopped"],
+        stopped["upstream"]["stopped"]
+    );
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "not_mergeable");
+    assert_eq!(gh.tip(GH, "feature").as_deref(), Some(theirs.as_str()));
+    let (st, v) = s
+        .post(&format!("{next_path}/close"), &w.owner, json!({}))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // The owner's explicit replacement now passes the same gate as any publish.
     let (st, v) = publish(&w, n).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["upstream"]["stopped"], Value::Null);
@@ -714,12 +788,21 @@ async fn a_first_publish_replaces_only_what_branvil_pushed_and_survives_a_lost_a
         })
     });
     // Publishing again is the owner's decision to replace the branch.
+    resume_publish(&w, n).await;
     let (st, v) = publish(&w, n).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(gh.tip(GH, "feat").as_deref(), Some(ours.as_str()));
     assert_ne!(v["upstream"]["number"], 7);
     assert_eq!(gh.pulls(GH).len(), 2);
     assert_eq!(gh.pull(7).title, "Someone's");
+    let (st, v) = s
+        .post(
+            &format!("{}/pulls/{n}/close", w.repo_path()),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
 
     // The push landed but its answer was lost: GitHub has exactly the head,
     // so publishing goes on.
@@ -742,6 +825,14 @@ async fn a_first_publish_replaces_only_what_branvil_pushed_and_survives_a_lost_a
     let (st, v) = publish(&w, p["number"].as_u64().unwrap()).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert!(v["upstream"]["number"].is_u64(), "{v}");
+    let (st, v) = s
+        .post(
+            &format!("{}/pulls/{}/close", w.repo_path(), p["number"]),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
 
     // The pull request was opened but the answer was lost; a branch name that
     // needs encoding in URLs. The next poll adopts it instead of opening a
@@ -1207,6 +1298,18 @@ async fn branvils_references_are_written_for_the_host_when_published() {
         .await;
     assert_eq!(preview["title"], "Follow-up to #7");
     assert_eq!(preview["body"], expected.as_str());
+    // The first published pull request owns this base's gate until it leaves.
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "not_mergeable");
+    let (st, v) = s
+        .post(
+            &format!("{}/pulls/{}/close", w.repo_path(), first["number"]),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     let (st, v) = publish(&w, n).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let hp = gh.pull(v["upstream"]["number"].as_u64().unwrap());

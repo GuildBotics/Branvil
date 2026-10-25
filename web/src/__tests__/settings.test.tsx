@@ -155,7 +155,7 @@ describe("settings", () => {
 
   it.each([
     { upstream: null, says: /merges an open pull request by itself \(fast-forward\)/ },
-    { upstream: { provider: "github", host: "GitHub", repository: "octo/demo", url: "", reader: { member: "aiko", chosen: false }, following: {} }, says: /publishes an open pull request to GitHub by itself, as its author and once/ },
+    { upstream: { provider: "github", host: "GitHub", repository: "octo/demo", url: "", reader: { member: "aiko", chosen: false }, following: {} }, says: /publishes an open pull request to GitHub by itself, as its author/ },
   ])("turns automatic landing on from the CI tab and says what it does ($says)", async ({ upstream, says }) => {
     const repo = { ...REPO, upstream };
     const fake = fakeApi({
@@ -172,7 +172,7 @@ describe("settings", () => {
     const auto = within(ci).getByRole("switch", { name: /^Land automatically/ });
     expect(auto).not.toBeChecked();
     expect(within(ci).getByText(says)).toBeInTheDocument();
-    expect(within(ci).getByText(/keep it a draft to hold it/)).toBeInTheDocument();
+    expect(within(ci).getByText(/keep it a draft to hold it/i)).toBeInTheDocument();
     await user.click(auto);
     await user.click(within(ci).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(fake.calls("PATCH", "/api/v1/repos/acme/demo")).toHaveLength(1));

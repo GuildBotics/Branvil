@@ -12,8 +12,9 @@ import { ErrorMessage, Notice, Refusal, Sha, StateBadge } from "../../components
 import { useT, type Translate } from "../../i18n";
 import { useChecks, usePublishPreview } from "../../query/hooks";
 import { keys } from "../../query/keys";
+import { GateStage, gatePassed } from "./LandingStatus";
 
-function refusalOf(t: Translate, err: unknown, notReady: "merge.notMergeable" | "publish.notReady"): string {
+function refusalOf(t: Translate, err: unknown, notReady: "merge.notMergeable" | "publish.notReady" | "landing.notReady"): string {
   if (isApiError(err, "head_moved")) return t("merge.headMoved");
   if (isApiError(err, "base_moved")) return t("merge.baseMoved");
   if (isApiError(err, "not_mergeable")) return t(notReady, { message: err.message });
@@ -51,12 +52,29 @@ function Approvals({ pull, required }: { pull: PullRequest; required: number }) 
   );
 }
 
+function LandingStages({ pull, repo, missing }: { pull: PullRequest; repo: Repository; missing: string[] }) {
+  const t = useT();
+  return (
+    <>
+      <Stack gap={4} component="section" aria-label={t("landing.headChecks")}>
+        <Text size="sm" fw={700}>{t("landing.headChecks")}</Text>
+        <RequiredChecks checks={repo.required_checks} missing={missing} />
+      </Stack>
+      <Stack gap={4} component="section" aria-label={t("landing.approvals")}>
+        <Text size="sm" fw={700}>{t("landing.approvals")}</Text>
+        <Approvals pull={pull} required={repo.required_approvals} />
+      </Stack>
+      <GateStage pull={pull} host={repo.upstream != null} />
+    </>
+  );
+}
+
 /** A repository without an upstream merges here (fast-forward). */
 export function MergeCard({ pull, repo }: { pull: PullRequest; repo: Repository }) {
   const t = useT();
   const { required_checks: requiredChecks, required_approvals: requiredApprovals } = repo;
   const missing = useMissingChecks(pull, requiredChecks);
-  const blocked = missing.length > 0 || pull.approvals < requiredApprovals;
+  const blocked = missing.length > 0 || pull.approvals < requiredApprovals || !gatePassed(pull);
   const client = useQueryClient();
   const merge = useMutation({
     mutationFn: () => api.pulls.merge(pull.repository, pull.number, pull.head_sha, pull.base_sha),
@@ -88,8 +106,7 @@ export function MergeCard({ pull, repo }: { pull: PullRequest; repo: Repository 
             {t("merge.draft")}
           </Text>
         )}
-        <RequiredChecks checks={requiredChecks} missing={missing} />
-        <Approvals pull={pull} required={requiredApprovals} />
+        <LandingStages pull={pull} repo={repo} missing={missing} />
         <Group justify="flex-end">
           <Button leftSection={<GitMerge size={16} />} disabled={merge.isPending || pull.draft || !pull.head_sha || !pull.base_sha || blocked} onClick={() => merge.mutate()}>
             {merge.isPending ? t("merge.merging") : t("merge.submit")}
@@ -146,7 +163,8 @@ export function PublishCard({ pull, repo, upstream }: { pull: PullRequest; repo:
   const t = useT();
   const { required_checks: requiredChecks, required_approvals: requiredApprovals } = repo;
   const missing = useMissingChecks(pull, requiredChecks);
-  const blocked = missing.length > 0 || pull.approvals < requiredApprovals;
+  const headReady = missing.length === 0 && pull.approvals >= requiredApprovals;
+  const blocked = !headReady || !gatePassed(pull);
   const client = useQueryClient();
   const host = upstream.host;
   const [editing, setEditing] = useState(false);
@@ -160,6 +178,15 @@ export function PublishCard({ pull, repo, upstream }: { pull: PullRequest; repo:
     onSettled: () => void client.invalidateQueries({ queryKey: keys.pull(pull.repository, pull.number) }),
   });
   const again = x?.stopped != null;
+  const needsResume = again && !pull.landing?.resume_publish;
+  const resume = useMutation({
+    mutationFn: () => api.pulls.resumeLanding(pull.repository, pull.number, pull.head_sha, pull.base_sha),
+    onSuccess: (p) => client.setQueryData(keys.pull(pull.repository, pull.number), p),
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: keys.pull(pull.repository, pull.number) });
+      void client.invalidateQueries({ queryKey: keys.landing(pull.repository) });
+    },
+  });
   const p = preview.data;
   return (
     <Card p="lg" component="section" aria-label={t("publish.title", { host })} style={{ borderColor: "var(--color-brand-border-subtle)" }}>
@@ -198,6 +225,7 @@ export function PublishCard({ pull, repo, upstream }: { pull: PullRequest; repo:
           ) : null)}
         {editing && <TitleBodyEditor pull={pull} host={host} onDone={() => setEditing(false)} />}
         {publish.isError && <Refusal>{refusalOf(t, publish.error, "publish.notReady")}</Refusal>}
+        {resume.isError && <Refusal>{refusalOf(t, resume.error, "landing.notReady")}</Refusal>}
         {!published && repo.auto_land && (
           <Text size="sm" c="dimmed">
             {t("publish.auto", { host })}
@@ -208,18 +236,21 @@ export function PublishCard({ pull, repo, upstream }: { pull: PullRequest; repo:
             {t("publish.draft")}
           </Text>
         )}
-        {!published && (
-          <>
-            <RequiredChecks checks={requiredChecks} missing={missing} />
-            <Approvals pull={pull} required={requiredApprovals} />
-          </>
-        )}
+        <LandingStages pull={pull} repo={repo} missing={missing} />
         {!editing && (
           <Group justify="space-between">
             <Button size="xs" variant="default" leftSection={<Pencil size={14} />} onClick={() => setEditing(true)}>
               {t("publish.edit")}
             </Button>
-            {!published && (
+            {needsResume ? (
+              <Button
+                leftSection={<GitMerge size={16} />}
+                disabled={resume.isPending || pull.draft || !pull.head_sha || !pull.base_sha || !headReady || (p !== undefined && p.login === null)}
+                onClick={() => resume.mutate()}
+              >
+                {t(resume.isPending ? "landing.resuming" : "landing.resume")}
+              </Button>
+            ) : !published && (
               <Button
                 leftSection={<CloudUpload size={16} />}
                 disabled={publish.isPending || pull.draft || !pull.head_sha || !pull.base_sha || blocked || (p !== undefined && p.login === null)}

@@ -762,6 +762,7 @@ async fn sync_pull(
     });
     let login = login_of(&account, host);
     let mut open = None;
+    let mut observed_open = false;
     match (x.number, &reader_token) {
         (_, Err(why)) => x.error = Some(why.clone()),
         (None, Ok(_)) => {
@@ -819,11 +820,13 @@ async fn sync_pull(
                             host.display_name()
                         );
                         pulls::retire_merged_head(app, repo, &merged).await?;
+                        crate::landing::remove_merged_ref(app, repo, number).await?;
                         crate::refs::record_refs_locked(app, repo).await?;
                         return Ok(());
                     }
                 }
                 Ok(hp) => {
+                    observed_open = hp.state == PullState::Open;
                     x.error = None;
                     x.state = hp.state.as_str().into();
                     let here = p.state.as_str();
@@ -867,6 +870,9 @@ async fn sync_pull(
         .await?;
     if changed.is_some() {
         app.events.publish("pull", &repo.path, number.to_string());
+    }
+    if observed_open && same_place {
+        crate::landing::host_observed_open(app, repo, number).await?;
     }
     Ok(())
 }

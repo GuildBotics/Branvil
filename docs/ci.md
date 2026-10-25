@@ -112,10 +112,19 @@ What a job's commands find, as on common CI services:
 Every commit runs its own pipeline: a tip of the default branch and the head
 of an open pull request alike read `.branvil/ci.toml` from that commit. A pull
 request that changes the pipeline runs the changed pipeline as its checks, so
-a mistake in it shows before the merge. A fast-forward merge keeps the head's
-run; jobs with a dependency cache get a new protected attempt (a running
-pull-request attempt is stopped). A squash merge gets its own run. Both kinds
-of new attempts may reuse an earlier successful execution of the same tree.
+a mistake in it shows before the merge. The first pull request in each
+repository/base landing queue also checks the combination of base and head.
+When head contains base, its existing run is the gate. Otherwise Branvil
+creates a commit with parents `[base, head]` and runs that commit's pipeline
+through `refs/branvil/gate/<number>`. A conflict becomes a failed `gate` check;
+CI jobs appear as `gate/<job>` on the pull request. Approvals still apply to
+the original head.
+
+A local merge moves base to that exact gate commit, preserving its run. Jobs
+without a dependency cache keep their gate attempts; jobs with a cache get a
+new protected attempt (a running branch attempt is stopped). A squash merge
+on the upstream gets its own run. New attempts may reuse an earlier successful
+execution of the same tree.
 
 When a runner claims an attempt, the service offers the most recently finished
 successful execution whose files have not been pruned, in the same repository
@@ -180,9 +189,9 @@ What registers a run:
 
 - a push of the default branch or of the head of an open pull request (after
   the push is recorded, `Ci::on_ref_changes`), opening or reopening a pull
-  request, and a merge;
+  request, a merge, and creating or moving a current landing gate ref;
 - the reconciler (at start and every minute), which registers every
-  default-branch tip and open pull request head again:
+  default-branch tip, open pull request head, and current gate ref again:
   a crash between recording a push and registering its run, or a Git failure
   while reading its pipeline, is repaired, and until then the checks say "No
   CI run is registered for this commit yet" (`queued`, never `no checks`).
@@ -197,14 +206,18 @@ current attempts; an attempt of a job the pipeline dropped or defined
 differently stays on its job page as history, never counts as a check, and
 cannot be retried.
 
-Rapid pushes: when a branch moves from commit A to B and no other branch still
-wants A, A is **superseded**: its queued attempts are concluded `cancelled`
+Rapid pushes: when a branch or gate ref moves from commit A to B and no
+other branch or current gate ref still wants A, A is **superseded**: its queued
+attempts are concluded `cancelled`
 ("Superseded: …"), its running attempts are asked to stop (the runner sees
 `cancel: true` on its next heartbeat), and any result a runner still reports
 for A is recorded as `cancelled`. B has its own attempts; a runner may conclude
 one successfully by reusing an actual successful execution of the same tree
 under the conditions above. A commit that becomes a tip again gets fresh
-attempts, eligible for the same claim-time reuse decision.
+attempts, eligible for the same claim-time reuse decision. Leaving a landing
+queue or merging deletes its gate ref and supersedes work no other CI ref
+needs. The reconciler repairs registration after a crash between gate-ref
+creation and CI registration, as it does for branch tips.
 
 Leases and interruptions:
 
@@ -297,16 +310,16 @@ is refused, and nothing outside the work directory is read.
 `cache.paths` are restored into the work directory before the job, and saved
 after a successful job of a run that a protected branch asked for (its cache
 scope is `protected`). When a protected branch comes to want a commit whose
-jobs ran for a pull request (a fast-forward merge), jobs with a cache get
+jobs ran for a pull request or landing gate, jobs with a cache get
 protected attempts (one still running for the pull request is stopped), and an
 attempt still queued takes its run's scope when a runner claims it. These
 attempts execute only when they cannot reuse a result with a recent cache
 save. When the branch moves on before they end, they are superseded and the
 next commit's run may save the cache.
-A pull request's run (`branch:<name>`) restores the
-same entries and saves nothing (its log says `cache not saved`): it cannot
-plant a cache entry that the default branch would use, and its runs never
-push out of the cache the entries every run restores. The key is the SHA-256
+A pull request's run (`branch:<name>`) and a gate's run
+(`branch:gate/<number>`) restore the same entries and save nothing (their logs
+say `cache not saved`): they cannot plant a cache entry that the default branch
+would use, and never push out the entries every run restores. The key is the SHA-256
 of the repository, the job name, the configuration digest of the image the
 job runs on (a new version of the tag does not reuse what the previous one
 built), the user the job runs as (microsandbox records with each file the job
