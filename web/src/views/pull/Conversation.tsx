@@ -126,6 +126,7 @@ export function Conversation({
   activity,
   activityError,
   threads,
+  threadsError,
   kindOf,
   onOpenFile,
 }: {
@@ -133,6 +134,7 @@ export function Conversation({
   activity: Activity | undefined;
   activityError: unknown;
   threads: Thread[] | undefined;
+  threadsError: unknown;
   kindOf: (name: string) => MemberKind | undefined;
   onOpenFile: (path: string) => void;
 }) {
@@ -160,20 +162,27 @@ export function Conversation({
     },
   });
 
-  // A thread takes its place in the timeline when its first comment was posted.
-  // A thread target must not scroll before earlier activity has finished loading.
-  const entries: Entry[] = [
-    ...(activity?.comments ?? []).map((c) => ({ at: c.created_at, comment: c })),
-    ...(activity?.reviews ?? []).map((r) => ({ at: r.submitted_at, review: r })),
-    ...(activity || activityError ? (threads ?? []) : []).map((th) => ({ at: th.comments[0]?.created_at ?? "", thread: th })),
-  ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  // A link target scrolls into view once, when it mounts, so the timeline
+  // appears only when both of its sources have answered: nothing is inserted
+  // above the target afterwards. A thread takes its place in the timeline
+  // when its first comment was posted.
+  const settled = Boolean((activity || activityError) && (threads || threadsError));
+  const entries: Entry[] = settled
+    ? [
+        ...(activity?.comments ?? []).map((c) => ({ at: c.created_at, comment: c })),
+        ...(activity?.reviews ?? []).map((r) => ({ at: r.submitted_at, review: r })),
+        ...(threads ?? []).map((th) => ({ at: th.comments[0]?.created_at ?? "", thread: th })),
+      ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
+    : [];
   const open = pull.state === "open";
   const [beforeHead, afterHead] = t("pull.headMoved").split("{sha}");
 
   return (
     <Card p="lg" component="section" aria-label={t("pull.conversation")}>
       <div className="timeline">
-        {activityError ? <ErrorMessage error={activityError} /> : !activity && <Loading />}
+        {Boolean(activityError) && <ErrorMessage error={activityError} />}
+        {Boolean(threadsError) && <ErrorMessage error={threadsError} />}
+        {!settled && <Loading />}
         {entries.map((e) =>
           "comment" in e ? (
             <CommentView key={e.comment.id} comment={e.comment} url={`${href.pull(repo, number)}#${encodeURIComponent(e.comment.id)}`} kind={kindOf(e.comment.author)} onReact={(reaction, on) => react.mutate({ id: e.comment.id, reaction, on })} />
