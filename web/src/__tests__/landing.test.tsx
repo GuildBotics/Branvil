@@ -70,6 +70,20 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
     expect(queue.querySelector('[data-stage="transit"] [data-pr="3"]')).toBeInTheDocument();
     expect(queue.querySelector('[data-stage="base"]')).toHaveTextContent("release");
   });
+  it.each([true, false].flatMap((host) => ["repo", "pull"].map((view) => ({host, view}))))("keeps the base name outside its marker ($view, upstream=$host)", async ({host, view}) => {
+    const base = "release/next";
+    const l = entry(host ? "owner_merge_host" : "owner_merge", {base});
+    fakeApi(routes(l, {
+      "GET /api/v1/repos/acme/demo": json(200, {...REPO, upstream:host ? REPO.upstream : null}),
+      [`GET ${P}`]: json(200, pull({base, landing:l, approvals:1})),
+    }));
+    renderApp(view === "repo" ? "/acme/demo" : "/acme/demo/-/pulls/3", lang);
+    const region = await screen.findByRole("region", {name:words[view === "repo" ? "landing.queue" : "landing.gate"]});
+    await waitFor(() => expect(region.querySelector('[data-stage="base"]')).toBeInTheDocument());
+    const stop = region.querySelector('[data-stage="base"]') as HTMLElement;
+    expect(stop.querySelector(".landing-marker")).not.toHaveTextContent(base);
+    expect(within(stop).getByText(base).closest(".landing-marker")).toBeNull();
+  });
   it("draws nearest three waiters in reverse order and groups the remainder", async () => {
     const leader = entry("host_checks");
     const items = [leader, ...[4,5,6,7,8].map((n) => landing({ number: n, title: `Waiting ${n}`, state: "waiting", position: n-2, first: leader.first }))];
