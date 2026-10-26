@@ -13,7 +13,7 @@ use crate::domain::{
     self, CommentView, Page, PageReq, ReactionView, comment_view, reaction_views, repo_by_id,
 };
 use crate::error::{AppError, AppResult};
-use crate::git::{FileChange, ZERO_SHA};
+use crate::git::{CommitSummary, FileChange, ZERO_SHA};
 use crate::model::{
     self, InlineComment, JournalEntry, JournalOp, Published, Pull, Repo, Review, Target, Thread,
     TicketLink,
@@ -201,14 +201,25 @@ fn head_of(p: &Pull, tips: &Tips) -> Option<String> {
     }
 }
 
+/// Where a pull request's changes start: its base branch's tip until it is
+/// merged, then the base the merge was made on.
+fn base_of(p: &Pull, tips: &Tips) -> Option<String> {
+    if p.merged {
+        p.merged_base.clone()
+    } else {
+        tips.get(&p.base).cloned()
+    }
+}
+
 /// The diff range a pull request shows: from the merge base to the head, or
 /// what the merge brought in once merged.
 fn diff_range(p: &Pull, tips: &Tips) -> Option<String> {
-    let head = head_of(p, tips)?;
-    if p.merged {
-        return Some(format!("{}..{head}", p.merged_base.as_ref()?));
-    }
-    Some(format!("{}...{head}", tips.get(&p.base)?))
+    let (base, head) = (base_of(p, tips)?, head_of(p, tips)?);
+    Some(if p.merged {
+        format!("{base}..{head}")
+    } else {
+        format!("{base}...{head}")
+    })
 }
 
 async fn changed_files(app: &App, repo: &Repo, p: &Pull, tips: &Tips) -> AppResult<u64> {
@@ -1571,6 +1582,33 @@ pub async fn files(
         .into_iter()
         .enumerate()
         .map(|(i, f)| (Key::new().u(i as u64).bytes(), f))
+        .collect();
+    let (items, next_cursor) = page.slice(positioned);
+    Ok(Page { items, next_cursor })
+}
+
+/// The commits the head has and the base does not, oldest first.
+pub async fn commits(
+    app: &App,
+    caller: &Caller,
+    repo_path: &str,
+    number: u64,
+    page: PageReq,
+) -> AppResult<Page<CommitSummary>> {
+    let (repo, p) = visible(app, caller, repo_path, number).await?;
+    let tips = tips(app, &repo).await?;
+    let all = match base_of(&p, &tips).zip(head_of(&p, &tips)) {
+        Some((base, head)) => {
+            app.git
+                .commits(&app.git.repo_dir(&repo.path), &format!("{base}..{head}"))
+                .await?
+        }
+        None => Vec::new(),
+    };
+    let positioned = all
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| (Key::new().u(i as u64).bytes(), c))
         .collect();
     let (items, next_cursor) = page.slice(positioned);
     Ok(Page { items, next_cursor })

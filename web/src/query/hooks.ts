@@ -140,6 +140,9 @@ export const usePullActivity = (repo: string, number: number) =>
 export const usePullThreads = (repo: string, number: number) =>
   useQuery({ queryKey: keys.pullPart(repo, number, "threads"), queryFn: () => api.pulls.threads(repo, number) });
 
+export const usePullCommits = (repo: string, number: number) =>
+  useQuery({ queryKey: keys.pullPart(repo, number, "commits"), queryFn: () => api.pulls.commits(repo, number) });
+
 /** Keyed by the head sha: the diff changes only when the head does. */
 export const usePullFiles = (repo: string, number: number, headSha: string | undefined) =>
   useQuery({

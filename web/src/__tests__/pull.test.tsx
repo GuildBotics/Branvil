@@ -216,6 +216,7 @@ function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]>
       ],
       next_cursor: null,
     }),
+    [`GET ${P}/commits`]: json(200, { items: [], next_cursor: null }),
     [`GET ${P}/files`]: json(200, {
       items: [{ path: "src/login.rs", previous_path: null, status: "modified", additions: 2, deletions: 1, patch: "@@ -1,2 +1,3 @@\n-old\n+new\n+more", patch_complete: true }],
       next_cursor: null,
@@ -247,7 +248,7 @@ function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]>
 
 describe("pull request review", () => {
   // Each held source has a post earlier than every target, so it lands above the target when it arrives.
-  it.each(["cmt_link", "rev_link", "ic_reply"].flatMap((id) => (["activity", "threads"] as const).map((held) => [id, held] as const)))(
+  it.each(["cmt_link", "rev_link", "ic_reply"].flatMap((id) => (["activity", "threads", "commits"] as const).map((held) => [id, held] as const)))(
     "opens and copies a permanent link to %s once the whole timeline has loaded (%s last), including a resolved thread's reply",
     async (id, held) => {
       const at = (minute: number) => `2026-10-14T10:0${minute}:00.000Z`;
@@ -259,22 +260,23 @@ describe("pull request review", () => {
         id: "ic_first", resolved: true, outdated: true, path: "src/login.rs", line: 12, side: "RIGHT", commit: HEAD,
         comments: [comment("ic_first", 1), { ...comment("ic_reply"), reply_to_id: "ic_first" }],
       }], next_cursor: null };
-      const sources = { activity, threads };
+      const commits = { items: [{ sha: HEAD, author: "review-agent", committed_at: at(2), subject: "Early commit" }], next_cursor: null };
+      const sources = { activity, threads, commits };
       let answer!: (value: ReturnType<typeof json>) => void;
-      fakeApi(pullRoutes({
-        [`GET ${P}/activity`]: held === "activity" ? () => new Promise((resolve) => { answer = resolve; }) : json(200, activity),
-        [`GET ${P}/threads`]: held === "threads" ? () => new Promise((resolve) => { answer = resolve; }) : json(200, threads),
-      }));
+      const route = (source: keyof typeof sources) =>
+        held === source ? () => new Promise<ReturnType<typeof json>>((resolve) => { answer = resolve; }) : json(200, sources[source]);
+      fakeApi(pullRoutes({ [`GET ${P}/activity`]: route("activity"), [`GET ${P}/threads`]: route("threads"), [`GET ${P}/commits`]: route("commits") }));
       // Whether the whole timeline was there each time the target scrolled into view.
       const whole: boolean[] = [];
       vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element) {
-        if (this.id === id) whole.push(["cmt_early", "ic_first", "cmt_link", "rev_link"].every((post) => document.getElementById(post)));
+        if (this.id === id) whole.push(["cmt_early", "ic_first", "cmt_link", "rev_link"].every((post) => document.getElementById(post)) && screen.queryByText("Early commit") !== null);
       });
       const user = userEvent.setup();
       const path = `/acme/demo/-/pulls/3#${id}`;
       const { client } = renderApp(path);
-      const loaded = held === "activity" ? "threads" : "activity";
-      await waitFor(() => expect(client.getQueryData(["repo", "acme/demo", "pull", 3, loaded])).toBeDefined());
+      for (const loaded of (["activity", "threads", "commits"] as const).filter((s) => s !== held)) {
+        await waitFor(() => expect(client.getQueryData(["repo", "acme/demo", "pull", 3, loaded])).toBeDefined());
+      }
       expect(document.getElementById(id)).not.toBeInTheDocument();
       await act(async () => answer(json(200, sources[held])));
       await waitFor(() => expect(document.getElementById(id)).toBeInTheDocument());
@@ -294,14 +296,14 @@ describe("pull request review", () => {
     },
   );
 
-  it.each(["activity", "threads"] as const)("shows the rest of the conversation and the error when %s fails to load", async (failed) => {
+  it.each(["activity", "threads", "commits"] as const)("shows the rest of the conversation and the error when %s fails to load", async (failed) => {
     fakeApi(pullRoutes({ [`GET ${P}/${failed}`]: apiError(404, "not_found", `No ${failed}.`) }));
     renderApp("/acme/demo/-/pulls/3");
     expect(await screen.findByText(`No ${failed}.`)).toBeInTheDocument();
     const timeline = screen.getByText(`No ${failed}.`).closest(".timeline") as HTMLElement;
     await waitFor(() => expect(within(timeline).queryByText("Loading…")).not.toBeInTheDocument());
-    expect(within(timeline).queryByText("Workflow failed") !== null).toBe(failed === "threads");
-    expect(within(timeline).queryByText("Why?") !== null).toBe(failed === "activity");
+    expect(within(timeline).queryByText("Workflow failed") !== null).toBe(failed !== "activity");
+    expect(within(timeline).queryByText("Why?") !== null).toBe(failed !== "threads");
   });
 
   it("shows the description (or 'Not provided'), the files in a drawer, checks with reason and a log in a drawer, and status notices", async () => {
@@ -389,7 +391,7 @@ describe("pull request review", () => {
     expect(await within(files).findByText("+more")).toBeInTheDocument();
   });
 
-  it("places each thread in the conversation at the time its first comment was posted", async () => {
+  it("places each thread at the time its first comment was posted and each commit at the time it was committed", async () => {
     const at = (minute: number) => `2026-10-14T10:0${minute}:00.000Z`;
     const post = (id: string, body: string, minute: number) => ({ id, author: "owner", body, meta: null, created_at: at(minute), reactions: [], url: "" });
     const thread = (id: string, line: number, minute: number) => ({
@@ -410,15 +412,25 @@ describe("pull request review", () => {
           threads: [],
         }),
         [`GET ${P}/threads`]: json(200, { items: [thread("ic_2", 20, 4), thread("ic_1", 12, 2)], next_cursor: null }),
+        [`GET ${P}/commits`]: json(200, {
+          items: [
+            { sha: BASE, author: "aiko", committed_at: at(0), subject: "Initial change" },
+            { sha: HEAD, author: "aiko", committed_at: "2026-10-14T10:03:30.000Z", subject: "Address the review" },
+          ],
+          next_cursor: null,
+        }),
       }),
     );
     renderApp("/acme/demo/-/pulls/3");
     const timeline = (await screen.findByText("Review body")).closest(".timeline") as HTMLElement;
-    const order = ["First comment", "src/login.rs:12", "Review body", "src/login.rs:20", "Last comment"].map((text) => within(timeline).getByText(text));
+    const order = ["Initial change", "First comment", "src/login.rs:12", "Review body", "Address the review", "src/login.rs:20", "Last comment"].map((text) => within(timeline).getByText(text));
     order.reduce((earlier, later) => {
       expect(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       return later;
     });
+    const commit = within(timeline).getByText("Address the review").closest(".timeline-commit") as HTMLElement;
+    expect(within(commit).getByText("aiko committed")).toBeInTheDocument();
+    expect(within(commit).getByRole("link", { name: HEAD.slice(0, 10) })).toHaveAttribute("href", `/acme/demo/-/commits/${HEAD}`);
   });
 
   it.each(["en", "ja"] as const)("sends the displayed head with a review and handles head_moved by reloading (%s)", async (language) => {

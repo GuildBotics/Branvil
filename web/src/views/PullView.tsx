@@ -9,7 +9,7 @@ import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
 import { ReviewersPicker } from "../components/PeoplePicker";
 import { useT } from "../i18n";
-import { useMemberKinds, usePull, usePullActivity, usePullFiles, usePullThreads, useRepo, usePeople } from "../query/hooks";
+import { useMemberKinds, usePull, usePullActivity, usePullCommits, usePullFiles, usePullThreads, useRepo, usePeople } from "../query/hooks";
 import { keys } from "../query/keys";
 import { Link, navigate } from "../router/Router";
 import { href } from "../router/routes";
@@ -26,6 +26,7 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
   const repository = useRepo(repo);
   const activity = usePullActivity(repo, number);
   const threads = usePullThreads(repo, number);
+  const commits = usePullCommits(repo, number);
   const files = usePullFiles(repo, number, pull.data?.head_sha);
   const kindOf = useMemberKinds();
   const [filesOpen, setFilesOpen] = useState<{ focus: string | null } | null>(null);
@@ -129,6 +130,8 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
         activityError={activity.error}
         threads={threads.data?.items}
         threadsError={threads.error}
+        commits={commits.data?.items}
+        commitsError={commits.error}
         kindOf={kindOf}
         onOpenFile={(path) => setFilesOpen({ focus: path })}
       />

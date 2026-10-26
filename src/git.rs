@@ -430,6 +430,37 @@ impl Git {
         text.parse().map_err(AppError::internal)
     }
 
+    /// The commits of `range` (`base..head`), oldest first. The committer date
+    /// is in the stored UTC form, so it sorts with the service's own times.
+    pub async fn commits(&self, dir: &Path, range: &str) -> AppResult<Vec<CommitSummary>> {
+        let text = self
+            .run_ok(
+                Some(dir),
+                &[
+                    "log",
+                    "--reverse",
+                    "--no-color",
+                    "--format=%H%x00%an%x00%cI%x00%s",
+                    range,
+                    "--",
+                ],
+            )
+            .await?;
+        Ok(text
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(4, '\0');
+                let mut next = || parts.next().map(str::to_string);
+                Some(CommitSummary {
+                    sha: next()?,
+                    author: next()?,
+                    committed_at: crate::util::parse_time(&next()?).ok()?,
+                    subject: next()?,
+                })
+            })
+            .collect())
+    }
+
     /// Conditional ref update: moves `refname` to `new` only if it is `old`.
     /// Returns false when the ref was not at `old`.
     pub async fn update_ref(
@@ -545,6 +576,14 @@ impl Git {
         }
         Ok(files)
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CommitSummary {
+    pub sha: String,
+    pub author: String,
+    pub committed_at: String,
+    pub subject: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

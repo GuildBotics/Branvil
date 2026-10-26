@@ -446,6 +446,7 @@ export const en = {
   "pull.repoPulls": "This repository's pull requests",
   "pull.composeReview": "Write a comment or a review (Markdown)",
   "review.by": "Review by {author}",
+  "commit.by": "{author} committed",
   "thread.openFile": "Open in the changed files",
   "ci.open": "Open check {name}",
   "ci.required": "Required",
