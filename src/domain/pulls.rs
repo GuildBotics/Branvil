@@ -181,7 +181,7 @@ pub(crate) fn approvals(states: &[ReviewState]) -> u64 {
     states.iter().filter(|s| s.approves()).count() as u64
 }
 
-type Tips = BTreeMap<String, String>;
+pub(crate) type Tips = BTreeMap<String, String>;
 
 pub async fn tips(app: &App, repo: &Repo) -> AppResult<Tips> {
     app.git.branch_tips(&app.git.repo_dir(&repo.path)).await
@@ -284,7 +284,7 @@ pub async fn pull_view(app: &App, repo: &Repo, p: &Pull, tips: &Tips) -> AppResu
         merge_sha: p.merge_sha.clone(),
         upstream: p.upstream.as_ref().map(published_view),
         revision: p.revision,
-        landing: crate::landing::view(app, repo, p.number).await?,
+        landing: crate::landing::view(app, repo, p.number, tips).await?,
     })
 }
 
@@ -1000,6 +1000,17 @@ pub fn store_published(
     let old = load_pull(w, repo, number)?;
     let mut changed = old.upstream.as_ref() != Some(&published);
     if changed {
+        // Keep the wait clock's publication/error semantics without storing
+        // a second copy of the host's publication flag in Landing.
+        let stage = |x: Option<&Published>| {
+            (
+                x.is_some_and(|x| x.number.is_some() && x.stopped.is_none()),
+                x.and_then(|x| x.error.clone()),
+            )
+        };
+        if stage(old.upstream.as_ref()) != stage(Some(&published)) {
+            crate::landing::publication_changed(w, &repo.id, number)?;
+        }
         let mut p = old.clone();
         p.upstream = Some(published);
         write_pull(w, Some(&old), &p)?;

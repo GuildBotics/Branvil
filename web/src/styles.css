@@ -1472,3 +1472,36 @@ pre {
 .mantine-Switch-track {
   border-radius: 6px !important;
 }
+
+/* One continuous path; each node keeps its explanation below the line. */
+.landing-line { display: flex; align-items: stretch; gap: 0; margin: 16px 0; min-width: 0; }
+.landing-stop { flex: 1; min-width: 0; position: relative; padding: 0 8px 12px; text-align: center; overflow-wrap: anywhere; }
+.landing-stop::before { content: ""; position: absolute; top: 20px; left: 0; right: 0; height: 2px; background: var(--mantine-color-default-border); }
+.landing-stop:first-child::before { left: 50%; }
+.landing-stop:last-child::before { right: 50%; }
+.landing-dot, .landing-square, .landing-place { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 4px 8px; background: var(--mantine-color-body); border: 2px solid var(--mantine-color-default-border); border-radius: 50%; font-size: 12px; }
+.landing-square { border-radius: 4px; min-width: 40px; }
+.landing-place { border-radius: 8px; max-width: 100%; }
+.landing-pr { position: relative; min-width: 0; }
+.landing-pr-highlight .landing-dot { border-color: var(--mantine-primary-color-filled); font-weight: 700; box-shadow: 0 0 0 3px var(--mantine-primary-color-light); }
+.landing-waiters { display: flex; align-items: flex-start; justify-content: flex-end; gap: 6px; }
+.landing-waiters > div { flex: 1; min-width: 0; }
+.landing-marker { position: relative; min-height: 40px; }
+.landing-marker-pr { margin-top: -40px; position: relative; }
+.landing-stop[data-stage="transit"]:empty { min-height: 42px; }
+@media (max-width: 40em) {
+  .landing-line { flex-direction: column; }
+  .landing-stop { flex: none; text-align: left; padding: 0 0 24px 56px; min-height: 64px; }
+  .landing-stop::before, .landing-stop:first-child::before, .landing-stop:last-child::before { top: 0; bottom: 0; left: 20px; right: auto; width: 2px; height: auto; }
+  .landing-stop:last-child::before { bottom: auto; height: 20px; }
+  .landing-stop > .landing-square, .landing-stop > .landing-place, .landing-stop > .landing-pr > .landing-dot { position: absolute; left: -56px; top: 0; }
+  .landing-stop > .landing-square, .landing-stop > .landing-place { left: 0; max-width: 48px; }
+  .landing-stop > .landing-pr { position: relative; }
+  .landing-marker { min-height: 40px; }
+  .landing-marker-pr { margin-top: 0; }
+  .landing-marker > .landing-square, .landing-marker > .landing-place, .landing-marker-pr > .landing-pr > .landing-dot, .landing-marker > .landing-pr > .landing-dot { position: absolute; left: -56px; top: 0; }
+  .landing-waiters { flex-direction: column; justify-content: flex-start; }
+  .landing-waiters > div { width: 100%; }
+  .landing-waiters .landing-pr { min-height: 44px; }
+  .landing-waiters .landing-dot { position: absolute; left: -56px; top: 0; }
+}
