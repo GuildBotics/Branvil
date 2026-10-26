@@ -214,7 +214,13 @@ itself speaks plain HTTP on loopback only).
   link before the VM gets it, collects
   artifacts without following links, and never writes through a link when it
   restores a cache [unit `artifacts_skip_links_and_stay_inside_the_work_directory`,
-  `cache_round_trip_and_eviction`]. See `docs/ci.md`.
+  `cache_round_trip_and_eviction`]. Cache eviction removes superseded generations
+  before another repository or job's current entry, then applies LRU within
+  each group [unit
+  `cache_eviction_removes_superseded_generations_before_other_repositories_and_jobs`,
+  `cache_eviction_orders_superseded_entries_by_use_then_key`,
+  `cache_eviction_orders_distinct_timestamps_before_keys_and_size`,
+  `cache_eviction_breaks_timestamp_ties_by_key_not_size`]. See `docs/ci.md`.
 
 ## Markdown
 
