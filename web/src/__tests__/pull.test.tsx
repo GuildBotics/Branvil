@@ -246,6 +246,42 @@ function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]>
 }
 
 describe("pull request review", () => {
+  it.each(["cmt_link", "rev_link", "ic_reply"])("opens and copies a permanent link to %s, including a resolved thread's reply", async (id) => {
+    const at = "2026-10-14T10:02:00.000Z";
+    const comment = (id: string) => ({ id, author: "review-agent", body: id, meta: null, created_at: at, reactions: [], url: "" });
+    let answer!: (value: ReturnType<typeof json>) => void;
+    const activity = { comments: [comment("cmt_link")], reviews: [{
+      id: "rev_link", author: "review-agent", body: "Review text", verdict: "approve", commit: HEAD, submitted_at: at, reactions: [],
+    }], threads: [] };
+    fakeApi(pullRoutes({
+      [`GET ${P}/activity`]: () => new Promise((resolve) => { answer = resolve; }),
+      [`GET ${P}/threads`]: json(200, { items: [{
+        id: "ic_first", resolved: true, outdated: true, path: "src/login.rs", line: 12, side: "RIGHT", commit: HEAD,
+        comments: [comment("ic_first"), { ...comment("ic_reply"), reply_to_id: "ic_first" }],
+      }], next_cursor: null }),
+    }));
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    const user = userEvent.setup();
+    const path = `/acme/demo/-/pulls/3#${id}`;
+    const { client } = renderApp(path);
+    await waitFor(() => expect(client.getQueryData(["repo", "acme/demo", "pull", 3, "threads"])).toBeDefined());
+    expect(document.getElementById(id)).not.toBeInTheDocument();
+    await act(async () => answer(json(200, activity)));
+    await waitFor(() => expect(document.getElementById(id)).toBeInTheDocument());
+    const target = document.getElementById(id)!;
+    await waitFor(() => expect(scroll.mock.contexts).toContain(target));
+    expect(target).toHaveAttribute("data-target", "true");
+    expect(within(target).getByTitle("Link to this comment")).toHaveAttribute("href", path);
+    await user.click(within(target).getByRole("button", { name: "Copy the comment's URL" }));
+    expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}${path}`);
+    if (id === "ic_reply") {
+      const thread = target.closest("details")!;
+      expect(thread.open).toBe(true);
+      await user.click(thread.querySelector("summary")!);
+      await waitFor(() => expect(thread.open).toBe(false));
+    }
+  });
+
   it("shows the description (or 'Not provided'), the files in a drawer, checks with reason and a log in a drawer, and status notices", async () => {
     const fake = fakeApi(pullRoutes());
     const user = userEvent.setup();

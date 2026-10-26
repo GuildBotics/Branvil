@@ -318,6 +318,12 @@ a:hover {
   border: 1px solid var(--color-border-subtle);
   border-radius: 10px;
   overflow: hidden;
+  scroll-margin-top: 16px;
+}
+
+.comment[data-target] {
+  outline: 2px solid var(--mantine-primary-color-filled);
+  outline-offset: 2px;
 }
 
 .comment .post-head {

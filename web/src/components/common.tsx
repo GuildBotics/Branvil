@@ -8,7 +8,7 @@ import { isApiError } from "../api/client";
 import { REACTIONS, type Comment, type MemberKind, type Reaction, type ReactionEntry } from "../api/types";
 import { useI18n, useT } from "../i18n";
 import { useMemberAvatar, useSession } from "../query/hooks";
-import { Link } from "../router/Router";
+import { Link, useFragmentTarget } from "../router/Router";
 import { href } from "../router/routes";
 import { Markdown } from "./Markdown";
 
@@ -189,14 +189,16 @@ export function Reactions({ reactions, onReact }: { reactions: ReactionEntry[]; 
 }
 
 /** The header strip of a post or comment: who wrote it and when, then any extras. */
-export function PostHead({ author, kind, at, children }: { author: string; kind?: MemberKind; at: string; children?: ReactNode }) {
+export function PostHead({ author, kind, at, url, children }: { author: string; kind?: MemberKind; at: string; url?: string; children?: ReactNode }) {
+  const t = useT();
   return (
     <div className="post-head">
       <MemberAvatar name={author} kind={kind} />
       <strong>{author}</strong>
       <Text span size="xs" c="dimmed">
-        <Time value={at} />
+        {url ? <Link to={url} title={t("comment.link")}><Time value={at} /></Link> : <Time value={at} />}
       </Text>
+      {url && <CopyButton value={new URL(url, window.location.origin).href} label={t("comment.copyUrl")} />}
       {children}
     </div>
   );
@@ -215,12 +217,14 @@ export function Post({ head, children }: { head: ReactNode; children: ReactNode 
 /** A comment; one with `meta.routing == "suppress"` is a status notice. */
 export function CommentView({
   comment,
+  url,
   kind,
   onReact,
   actions,
   children,
 }: {
   comment: Comment;
+  url: string;
   kind?: MemberKind;
   onReact: OnReact;
   actions?: ReactNode;
@@ -228,9 +232,10 @@ export function CommentView({
 }) {
   const t = useT();
   const notice = comment.meta?.["routing"] === "suppress";
+  const target = useFragmentTarget(comment.id);
   return (
-    <article className={notice ? "comment notice" : "comment"} id={comment.id} aria-label={notice ? t("comment.notice") : undefined}>
-      <PostHead author={comment.author} kind={kind} at={comment.created_at}>
+    <article {...target} className={notice ? "comment notice" : "comment"} id={comment.id} aria-label={notice ? t("comment.notice") : undefined}>
+      <PostHead author={comment.author} kind={kind} at={comment.created_at} url={url}>
         {notice && <StateBadge tone="info">{t("comment.notice")}</StateBadge>}
         {actions}
       </PostHead>
