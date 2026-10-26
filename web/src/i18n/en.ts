@@ -140,7 +140,7 @@ export const en = {
   "pull.changes": "Changed files",
   "pull.checks": "Checks",
   "pull.checksOn": "on",
-  "pull.behindBy": "base is {count} commit(s) ahead of the head",
+  "pull.behindBy": "The base branch ({base}) is {count} commit(s) ahead of this PR's branch. Update this PR's branch with the latest base branch.",
   "pull.conversation": "Conversation and reviews",
   "pull.onRevision": "on",
   "pull.olderRevision": "an older revision",

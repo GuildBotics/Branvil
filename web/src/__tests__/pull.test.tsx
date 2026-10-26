@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Check, Checks } from "../api/types";
-import { dictionaries } from "../i18n";
+import { dictionaries, format } from "../i18n";
 import { applyChange } from "../query/events";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { BASE, HEAD, NEW_HEAD, card, pull } from "./fixtures";
@@ -10,6 +10,30 @@ import { BASE, HEAD, NEW_HEAD, card, pull } from "./fixtures";
 const P = "/api/v1/repos/acme/demo/pulls/3";
 const SUCCESS: Check = { name: "test", status: "completed", conclusion: "success" };
 const CHECKS: Checks = { head_sha: HEAD, base_sha: BASE, behind_by: 0, checks: [SUCCESS], checks_expected: true, base_checks: 1 };
+
+describe.each(["en", "ja"] as const)("base branch guidance (%s)", (language) => {
+  it.each([
+    { state: "open", merged: false, draft: false, behind: 1, visible: true },
+    { state: "open", merged: false, draft: true, behind: 3, visible: true },
+    { state: "open", merged: false, draft: false, behind: 0, visible: false },
+    { state: "closed", merged: false, draft: false, behind: 3, visible: false },
+    { state: "closed", merged: true, draft: false, behind: 1, visible: false },
+    { state: "open", merged: true, draft: false, behind: 1, visible: false },
+  ] as const)("state=$state merged=$merged draft=$draft behind=$behind", async ({ state, merged, draft, behind, visible }) => {
+    const base = "release/next";
+    fakeApi(pullRoutes({
+      [`GET ${P}`]: json(200, pull({ state, merged, draft, base })),
+      [`GET ${P}/checks`]: json(200, { ...CHECKS, behind_by: behind }),
+    }));
+    renderApp("/acme/demo/-/pulls/3", language);
+    const checks = within(await screen.findByRole("region", { name: dictionaries[language]["pull.checks"] }));
+    // Wait for the checks response before asserting absence; historical CI remains visible.
+    expect(await checks.findByText("test")).toBeInTheDocument();
+    const message = format(dictionaries[language]["pull.behindBy"], { base, count: behind });
+    if (visible) expect(checks.getByText(message)).toBeInTheDocument();
+    else expect(checks.queryByText(message)).not.toBeInTheDocument();
+  });
+});
 
 describe("related ticket editor", () => {
   it.each(["en", "ja"] as const)("adds, removes and switches links with the opened revision (%s)", async (language) => {

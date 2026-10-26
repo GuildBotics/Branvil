@@ -6,7 +6,7 @@ import { useMutation, useQueryClient, type UseQueryResult } from "@tanstack/reac
 import { ChevronRight, CircleCheck, CircleDashed, CircleX, ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
 import * as api from "../../api/endpoints";
-import type { Check, CheckSet } from "../../api/types";
+import type { Check, CheckSet, PullRequest } from "../../api/types";
 import { ErrorMessage, Loading, Sha, StateBadge, Time, type Tone } from "../../components/common";
 import { useT } from "../../i18n";
 import { useChecks, useCommitChecks, useJob, useJobLog } from "../../query/hooks";
@@ -83,15 +83,15 @@ export function RunTime({ startedAt, finishedAt, expectedSecs }: { startedAt: st
 const isHosted = (c: Check) => !!c.attempt_id && c.attempt === undefined;
 
 /** The checks of the pull request's head; a row opens its drawer. */
-export function ChecksCard({ repo, number, requiredChecks, onOpen }: { repo: string; number: number; requiredChecks: string[]; onOpen: (check: Check) => void }) {
+export function ChecksCard({ repo, pull, requiredChecks, onOpen }: { repo: string; pull: PullRequest; requiredChecks: string[]; onOpen: (check: Check) => void }) {
   const t = useT();
-  const checks = useChecks(repo, number);
+  const checks = useChecks(repo, pull.number);
   const behind = checks.data?.behind_by ?? 0;
   return (
     <CheckList repo={repo} title={t("pull.checks")} query={checks} sha={checks.data?.head_sha} requiredChecks={requiredChecks} onOpen={onOpen}>
-      {behind > 0 && (
+      {pull.state === "open" && !pull.merged && behind > 0 && (
         <Text size="sm" c="dimmed" mb="xs">
-          {t("pull.behindBy", { count: behind })}
+          {t("pull.behindBy", { base: pull.base, count: behind })}
         </Text>
       )}
     </CheckList>
