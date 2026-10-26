@@ -97,17 +97,33 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
 
   const onLinkStart = useCallback((card: Card, e: PointerEvent<HTMLElement>) => startLinkRef.current(card, e), []);
 
-  // Lines follow the cards: redrawn once the layout is done and whenever a card or the figure changes size.
+  // Cards are put level with what they wait for, and lines follow the cards:
+  // done once the layout is and whenever a card or the figure changes size.
   useLayoutEffect(() => {
     const scroll = scrollRef.current;
     const content = contentRef.current;
     if (!scroll || !content) return;
     const draw = () => {
-      const origin = content.getBoundingClientRect();
-      const rects = new Map<string, DOMRect>();
       // A line meets a ticket's own card: an open parent's is its frame's header, as wide as the frame.
-      for (const el of content.querySelectorAll<HTMLElement>("[data-ticket]"))
-        rects.set(el.dataset["ticket"] as string, (el.querySelector(":scope > .rel-card") ?? el).getBoundingClientRect());
+      const cardOf = (el: Element) => (el.querySelector(":scope > .rel-card") ?? el).getBoundingClientRect();
+      const anchors = new Map([...content.querySelectorAll<HTMLElement>("[data-ticket]")].map((el) => [el.dataset["ticket"] as string, el]));
+      // In document order, so what a ticket waits for (in a column to its left) already stands where it stays:
+      // a ticket is pushed down so its card's middle meets the topmost of their middles, its column's order kept.
+      // Only what comes before it counts: a cycle would push its tickets down without end.
+      for (const [ref, el] of anchors) {
+        const card = cardOf(el);
+        const middles = graph.edges.flatMap((e) => {
+          const from = e.to === ref ? anchors.get(e.from) : undefined;
+          if (!from || !(from.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) return [];
+          const r = cardOf(from);
+          return [r.top + r.height / 2];
+        });
+        const natural = card.top - (parseFloat(el.style.marginTop) || 0);
+        const push = middles.length > 0 ? Math.round(Math.min(...middles) - card.height / 2 - natural) : 0;
+        el.style.marginTop = push > 0 ? `${push}px` : "";
+      }
+      const origin = content.getBoundingClientRect();
+      const rects = new Map([...anchors].map(([ref, el]) => [ref, cardOf(el)]));
       for (const g of content.querySelectorAll<SVGGElement>("g[data-from]")) {
         const a = rects.get(g.dataset["from"] as string);
         const b = rects.get(g.dataset["to"] as string);
