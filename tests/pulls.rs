@@ -12,6 +12,111 @@ fn pulls(w: &World) -> String {
 }
 
 #[tokio::test]
+async fn repository_pages_put_recent_updates_first_and_visit_every_matching_pull() {
+    let w = World::new().await;
+    w.push_change("feature", "f.txt", "one");
+    let s = &w.server;
+    let mut closed = Vec::new();
+    for i in 0..32 {
+        let p = w.open_pull("feature", json!([])).await;
+        let (action, token, body) = if i == 31 {
+            (
+                "merge",
+                &w.owner,
+                json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
+            )
+        } else {
+            ("close", &w.aiko, json!({}))
+        };
+        let (st, p) = s
+            .post(
+                &format!("{}/{}/{action}", pulls(&w), p["number"]),
+                token,
+                body,
+            )
+            .await;
+        assert_eq!(st, 200, "{p}");
+        closed.push(p);
+    }
+    w.push_change("feature", "f.txt", "two");
+    let open = w.open_pull("feature", json!([])).await;
+    // An older PR updated recently belongs ahead of recently created PRs.
+    let (st, first) = s
+        .patch(
+            &format!("{}/1", pulls(&w)),
+            &w.aiko,
+            json!({"title": "Recently updated"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{first}");
+    closed[0] = first;
+    for state in ["closed", "all", "open"] {
+        let mut expected = if state == "open" {
+            Vec::new()
+        } else {
+            closed.clone()
+        };
+        if state != "closed" {
+            expected.push(open.clone());
+        }
+        expected.sort_by(|a, b| {
+            b["updated_at"]
+                .as_str()
+                .cmp(&a["updated_at"].as_str())
+                .then_with(|| b["number"].as_u64().cmp(&a["number"].as_u64()))
+        });
+        let mut walked = Vec::new();
+        let mut cursor = String::new();
+        loop {
+            let page = s
+                .ok(
+                    &format!("{}?state={state}&head=feature&base=main{cursor}", pulls(&w)),
+                    &w.aiko,
+                )
+                .await;
+            let rows = page["items"].as_array().unwrap();
+            if walked.is_empty() && state != "open" {
+                assert_eq!(rows.len(), 30);
+                assert_eq!(rows[0]["number"], 1);
+                assert!(
+                    rows.iter()
+                        .any(|p| p["number"] == 32 && p["merged"] == true)
+                );
+            }
+            walked.extend(rows.iter().map(|p| p["number"].as_u64().unwrap()));
+            match page["next_cursor"].as_str() {
+                Some(next) => {
+                    // Cursors cannot silently change their state or branch filters.
+                    for condition in [
+                        "state=all&head=other&base=main",
+                        "state=closed&head=feature&base=other",
+                    ] {
+                        let (st, _) = s
+                            .get(&format!("{}?{condition}&cursor={next}", pulls(&w)), &w.aiko)
+                            .await;
+                        assert_eq!(st, 400);
+                    }
+                    cursor = format!("&cursor={next}");
+                }
+                None => break,
+            }
+        }
+        assert_eq!(
+            walked,
+            expected
+                .iter()
+                .map(|p| p["number"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        );
+    }
+    let empty = s
+        .ok(&format!("{}?state=all&head=missing", pulls(&w)), &w.aiko)
+        .await;
+    assert_eq!(empty["items"], json!([]));
+    assert!(empty["next_cursor"].is_null());
+}
+
+#[tokio::test]
 async fn concurrent_creates_of_one_head_and_base_make_one_pull_request() {
     let w = World::new().await;
     w.push_change("feature", "f.txt", "one");

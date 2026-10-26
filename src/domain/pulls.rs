@@ -538,13 +538,29 @@ pub async fn list(
     let (pulls, next_cursor) = app
         .store
         .read(move |r| {
-            page.scan(r, store::PULLS, &Key::new().s(&r2.id).bytes(), |_, v| {
-                let p: Pull = store::decode(v)?;
-                let ok = (state == "all" || p.state == state)
-                    && q.head.as_ref().is_none_or(|h| &p.head == h)
-                    && q.base.as_ref().is_none_or(|b| &p.base == b);
-                Ok(ok.then_some(p))
-            })
+            let all: Vec<Pull> = r.prefix_all(store::PULLS, &Key::new().s(&r2.id).bytes())?;
+            let mut positioned: Vec<_> = all
+                .into_iter()
+                .filter(|p| {
+                    (state == "all" || p.state == state)
+                        && q.head.as_ref().is_none_or(|h| &p.head == h)
+                        && q.base.as_ref().is_none_or(|b| &p.base == b)
+                })
+                .map(|p| {
+                    // Complement the key so PageReq's ascending positions
+                    // mean newest update first, then largest number first.
+                    let position: Vec<u8> = Key::new()
+                        .s(&p.updated_at)
+                        .u(p.number)
+                        .bytes()
+                        .into_iter()
+                        .map(|b| !b)
+                        .collect();
+                    (position, p)
+                })
+                .collect();
+            positioned.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(page.slice(positioned))
         })
         .await?;
     let tips = tips(app, &repo).await?;
@@ -2041,8 +2057,7 @@ mod tests {
     use crate::model::MemberKind;
     use std::time::Duration;
 
-    #[tokio::test]
-    async fn closing_waits_for_queue_work_and_reopening_releases_the_lock_before_ci() {
+    async fn fixture() -> (tempfile::TempDir, App, Caller, Repo, Pull) {
         let temp = tempfile::tempdir().unwrap();
         let config = Config::load(None, Some(temp.path()), None, None).unwrap();
         let layout = config.layout();
@@ -2115,6 +2130,48 @@ mod tests {
             upstream: None,
             revision: 1,
         };
+        (temp, app, caller, repo, p)
+    }
+
+    #[tokio::test]
+    async fn equal_update_times_page_by_descending_number_without_losing_ties() {
+        let (_temp, app, caller, repo, pull) = fixture().await;
+        app.store
+            .write(move |w| {
+                for number in 1..=35 {
+                    let p = Pull {
+                        number,
+                        updated_at: "2026-10-20T00:00:00.000Z".into(),
+                        ..pull.clone()
+                    };
+                    write_pull(w, None, &p)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        for limit in [1, 30, 100] {
+            let mut cursor = None;
+            let mut seen = Vec::new();
+            loop {
+                let page =
+                    PageReq::new(b"key", "pulls".into(), Some(limit), cursor.as_deref()).unwrap();
+                let result = list(&app, &caller, &repo.path, PullQuery::default(), page)
+                    .await
+                    .unwrap();
+                seen.extend(result.items.into_iter().map(|p| p.number));
+                cursor = result.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(seen, (1..=35).rev().collect::<Vec<_>>());
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_waits_for_queue_work_and_reopening_releases_the_lock_before_ci() {
+        let (_temp, app, caller, repo, p) = fixture().await;
         app.store
             .write(move |w| write_pull(w, None, &p))
             .await

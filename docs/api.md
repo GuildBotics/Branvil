@@ -637,6 +637,11 @@ or last departure, or `null` before it first joins (see "Landing queue").
   close.
   Concurrent creates of the same head and base produce one pull request.
 - `GET /api/v1/repos/{repo}/pulls?state=open&head={branch}&base={branch}` → items.
+  Ordered by `updated_at` descending, then PR number descending for equal
+  timestamps. `state` is `open` (default), `closed`, or `all`; `head` and `base`
+  are optional exact branch filters. Follow `next_cursor` for older results.
+  Cursors locate an update and number, not a snapshot: a PR updated between
+  requests may move ahead of the cursor; refresh from the first page to see it.
 - `GET /api/v1/pulls?involves=me&state=open&draft=false` → items of
   *patrol entry*: the pull request shape plus `"activity"` (below), for every
   open pull request the member authored, is a requested reviewer of, has
