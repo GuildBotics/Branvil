@@ -107,6 +107,8 @@ export const ja: Record<MessageKey, string> = {
   "ticket.blocked": "依存先がすべてクローズされるまで、作業中に移動できません。",
 
   "comment.new": "新しいコメント",
+  "comment.link": "このコメントへのリンク",
+  "comment.copyUrl": "コメントのURLをコピー",
   "comment.submit": "コメントする",
   "comment.notice": "状態通知",
   "comment.edit": "コメントを編集",

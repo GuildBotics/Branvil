@@ -102,7 +102,9 @@ describe("kanban board", () => {
   it("opens a ticket in a drawer over the board at the board's URL, with the ticket's URL to copy; a ticket linked there replaces it", async () => {
     const ticket = (key: string, extra: Partial<Card> = {}) => ({
       [`GET /api/v1/repos/acme/demo/tickets/${key}`]: json(200, card(key, "new", extra)),
-      [`GET /api/v1/repos/acme/demo/tickets/${key}/comments`]: json(200, { items: [], next_cursor: null }),
+      [`GET /api/v1/repos/acme/demo/tickets/${key}/comments`]: json(200, { items: [{
+        id: `cmt_${key}`, author: "comment-agent", body: "Drawer comment", meta: null, created_at: "2026-10-14T10:00:00.000Z", reactions: [], url: "",
+      }], next_cursor: null }),
       [`GET /api/v1/repos/acme/demo/tickets/${key}/pulls`]: json(200, { items: [], next_cursor: null }),
     });
     const three = card("3", "in_progress");
@@ -123,6 +125,9 @@ describe("kanban board", () => {
     expect(within(drawer).queryByRole("link", { name: "Task board" })).not.toBeInTheDocument();
     await user.click(within(drawer).getByRole("button", { name: "Copy the ticket's URL" }));
     expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}/acme/demo/-/tickets/1`);
+    await user.click(await within(drawer).findByRole("button", { name: "Copy the comment's URL" }));
+    expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}/acme/demo/-/tickets/1#cmt_1`);
+    expect(within(drawer).getByTitle("Link to this comment")).toHaveAttribute("href", "/acme/demo/-/tickets/1#cmt_1");
 
     await user.click(within(drawer).getByRole("link", { name: /Title of 3/ }));
     expect(await within(drawer).findByRole("heading", { level: 2, name: /#3 Title of 3/ })).toBeInTheDocument();
