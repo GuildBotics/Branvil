@@ -558,7 +558,8 @@ its lane and assignee changed from the card, the ticket's URL copied from
 the card's menu, which says that it copied and then closes),
 the task flow (the board's cards laid out left to right by their blockers, a
 column's tickets in progress first, then ready, new, and done, each lane in the
-board's order,
+board's order, a ticket pushed down, that order kept, to stand level with the
+topmost ticket it waits for,
 children inside their parent once it is opened, lines drawn in SVG over a CSS
 layout, the new tickets without relations in one frame that looks like an open
 parent's, its header in another colour, laid out where a new ticket would be;

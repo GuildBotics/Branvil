@@ -323,6 +323,32 @@ describe("relations", () => {
     await waitFor(() => expect(edge("1", "9")?.querySelector("path")?.getAttribute("d")).toMatch(/^M 600 40 /));
   });
 
+  it("pushes a ticket down level with the topmost ticket it waits for, never up", async () => {
+    // #9 waits for #1 and #2; #8 waits for #1 and stands below it already.
+    fakeApi(
+      routes({
+        open: [
+          card("1", "ready", { blocks: [ref("9"), ref("8")] }),
+          card("2", "ready", { blocks: [ref("9")] }),
+          card("9", "ready", { blocked_by: [ref("1"), ref("2")] }),
+          card("8", "ready", { blocked_by: [ref("1")] }),
+        ],
+      }),
+    );
+    // jsdom lays nothing out: each card where its column puts it, moved down by its margin.
+    const natural: Record<string, [number, number, number]> = { "acme/demo#1": [0, 300, 80], "acme/demo#2": [0, 400, 80], "acme/demo#9": [400, 0, 120], "acme/demo#8": [400, 600, 80] };
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      const el = this.closest<HTMLElement>("[data-ticket]");
+      const [left, top, height] = natural[el?.dataset["ticket"] ?? ""] ?? [0, 0, 0];
+      return DOMRect.fromRect({ x: left, y: top + (parseFloat(el?.style.marginTop ?? "") || 0), width: 260, height });
+    });
+    await shown();
+    // #9's middle meets #1's (340), not #2's: 340 - 60 = 280.
+    await waitFor(() => expect(anchor("9").style.marginTop).toBe("280px"));
+    expect(edge("1", "9")?.querySelector("path")?.getAttribute("d")).toMatch(/^M 260 340 .* 400 340$/);
+    expect(anchor("8").style.marginTop).toBe("");
+  });
+
   it("offers no line onto the card's own frame or a card inside it", async () => {
     const user = userEvent.setup();
     const fake = fakeApi(routes());
