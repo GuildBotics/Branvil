@@ -142,7 +142,7 @@ export const ja: Record<MessageKey, string> = {
   "pull.changes": "変更ファイル",
   "pull.checks": "チェック",
   "pull.checksOn": "対象",
-  "pull.behindBy": "baseがheadより {count} コミット進んでいます",
+  "pull.behindBy": "ベースのブランチ（{base}）が、この PR のブランチより {count} コミット先に進んでいます。この PR のブランチを最新のベースに追いつかせてください。",
   "pull.conversation": "会話とレビュー",
   "pull.onRevision": "対象",
   "pull.olderRevision": "古いrevision",
