@@ -551,6 +551,16 @@ async fn board_cards(State(app): State<Shared>, c: Caller, P(ws): P<String>, q: 
     Ok(ok(tickets::cards(&app, &c, &ws, query, page).await?))
 }
 
+async fn mentioned_tickets(State(app): State<Shared>, c: Caller, P(ws): P<String>, q: Q) -> R {
+    let page = q.page(&app, &c, &format!("mentioned-tickets\n{}", util::fold(&ws)))?;
+    let query = tickets::MentionQuery {
+        mentions: q.get("mentions"),
+        state: q.get("state"),
+        comments: q.get("comments"),
+    };
+    Ok(ok(tickets::mentioned(&app, &c, &ws, query, page).await?))
+}
+
 async fn board_closed(State(app): State<Shared>, c: Caller, P(ws): P<String>, q: Q) -> R {
     let page = q.page(&app, &c, &format!("closed\n{}", util::fold(&ws)))?;
     let query = tickets::ClosedQuery {
@@ -1207,6 +1217,7 @@ pub fn router(app: Shared) -> Router {
         .route("/workspaces", get(workspaces_list).post(workspaces_create))
         .route("/workspaces/{workspace}", get(workspace_get))
         .route("/workspaces/{workspace}/board/cards", get(board_cards))
+        .route("/workspaces/{workspace}/tickets", get(mentioned_tickets))
         .route("/workspaces/{workspace}/board/closed", get(board_closed))
         .route("/repos", get(repos_list).post(repos_create))
         .route("/repos/{repo}", get(repo_get).patch(repo_patch))

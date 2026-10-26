@@ -571,21 +571,21 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Recreates the immediately preceding schema in a stopped database.
-pub fn as_schema_18(db: &Path) {
-    edit_records(db, "ci_attempts", |a| {
-        a.as_object_mut().unwrap().remove("wait_for_runner");
-        a.as_object_mut().unwrap().remove("auto_retry");
-        a.as_object_mut().unwrap().remove("recovery_notified_at");
-    });
+pub fn as_schema_19(db: &Path) {
+    for table in ["tickets", "comments"] {
+        edit_records(db, table, |record| {
+            record.as_object_mut().unwrap().remove("mentions");
+        });
+    }
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(18);
+            *v = json!(19);
         }
     });
     let database = redb::Database::open(db).unwrap();
     let txn = database.begin_write().unwrap();
     txn.delete_table(redb::TableDefinition::<&[u8], &[u8]>::new(
-        "ix_ci_recovered",
+        "ix_ticket_mentions",
     ))
     .unwrap();
     txn.commit().unwrap();

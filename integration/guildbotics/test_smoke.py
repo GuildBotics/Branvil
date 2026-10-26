@@ -442,6 +442,36 @@ def test_tickets_and_their_relations(world: World) -> None:
     world.run(scenario)
 
 
+def test_mention_shapes_and_workspace_discovery(world: World) -> None:
+    async def scenario(_: CodeHostingService, tickets: TicketService) -> None:
+        ticket = await _create(tickets, "Unassigned summons")
+        await _change(tickets, ticket, body=f"@{MEMBER.upper()} @{MEMBER}")
+        api = world.ticket_api(ticket)
+        token = os.environ[f"{MEMBER.upper()}_BRANVIL_TOKEN"]
+        wire = world.service.call("GET", api, token)
+        assert wire["mentions"] == [MEMBER]
+        await tickets.comment(ticket, f"@{OWNER} please confirm")
+        comments = world.service.call("GET", f"{api}/comments", token)
+        assert comments["items"][0]["mentions"] == [OWNER]
+        discovery = f"/workspaces/{SCOPE}/tickets?mentions=me"
+        page = world.service.call("GET", discovery, token)
+        assert [item["url"] for item in page["items"]] == [ticket]
+        assert page["items"][0]["assignee"] is None
+        assert page["items"][0]["comments"] == comments["items"]
+        await _change(tickets, ticket, body="Mention removed")
+        assert world.service.call("GET", discovery, token)["items"] == []
+
+        # The provider uses the same stored mention data when work is assigned.
+        world.assign(ticket)
+        world.service.call("PUT", f"{api}/board", world.service.owner, {"lane": "in_progress"})
+        await _change(tickets, ticket, body=f"@{MEMBER.upper()}")
+        # Its own earlier comment predates assignment and does not answer it.
+        [task] = await tickets.candidates()
+        assert (task.url, task.trigger_reason) == (ticket, "issue_mention")
+
+    world.run(scenario)
+
+
 def test_a_push_a_pull_request_and_its_merge(world: World) -> None:
     async def scenario(code: CodeHostingService, tickets: TicketService) -> None:
         ticket = await _create(tickets, "Fix login")

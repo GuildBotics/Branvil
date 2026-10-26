@@ -205,6 +205,7 @@ pub struct Ticket {
     pub number: u64,
     pub title: String,
     pub body: String,
+    pub mentions: Vec<String>,
     pub state: String,
     pub state_reason: Option<String>,
     pub author: String,
@@ -264,6 +265,7 @@ pub struct Comment {
     pub seq: u64,
     pub author: String,
     pub body: String,
+    pub mentions: Vec<String>,
     pub meta: Option<serde_json::Value>,
     pub created_at: String,
     pub reactions: Vec<Reaction>,
@@ -583,6 +585,7 @@ pub fn ticket_index(t: &Ticket) -> Vec<IxEntry> {
         store::IX_CARDS,
         Ticket::card_key(&t.workspace, &t.lane, &t.rank, &t.repo, t.number),
     )];
+    out.extend(mention_index(&t.mentions, &t.repo, t.number, 0));
     for label in &t.labels {
         out.push(IxEntry::mark(
             store::IX_TICKET_LABELS,
@@ -654,6 +657,75 @@ pub fn entry_index(id: &str, kind: &str, owner: &str, table_key: &[u8]) -> Vec<I
     }]
 }
 
+/// Mentions belong to each source record, so removing one source cannot
+/// remove another comment's (or the body's) mention of the same member.
+fn mention_index(names: &[String], repo: &str, number: u64, source: u64) -> Vec<IxEntry> {
+    names
+        .iter()
+        .map(|name| {
+            IxEntry::mark(
+                store::IX_TICKET_MENTIONS,
+                Key::new()
+                    .s(&fold(name))
+                    .s(repo)
+                    .u(number)
+                    .u(source)
+                    .bytes(),
+            )
+        })
+        .collect()
+}
+
+pub fn comment_index(c: &Comment, key: &[u8]) -> Vec<IxEntry> {
+    let owner = comment_owner(key).unwrap_or_default();
+    let mut out = entry_index(&c.id, "comment", &owner, key);
+    if let Some(parts) = store::decode_key(key, "ssuu")
+        && parts[0].s() == "ticket"
+    {
+        out.extend(mention_index(
+            &c.mentions,
+            parts[1].s(),
+            parts[2].u(),
+            c.seq,
+        ));
+    }
+    out
+}
+
+/// Resolve only existing member names, preserving occurrence order and the
+/// member's canonical spelling. Boundaries match the ASCII provider grammar.
+pub fn mentions(r: &impl Rd, text: &str) -> AppResult<Vec<String>> {
+    let members = r.prefix_all::<Member>(store::MEMBERS, &[])?;
+    let bytes = text.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut out = Vec::new();
+    for (at, &b) in bytes.iter().enumerate() {
+        if b != b'@' || (at > 0 && (word(bytes[at - 1]) || b".@-".contains(&bytes[at - 1]))) {
+            continue;
+        }
+        for member in &members {
+            let end = at + 1 + member.name.len();
+            if bytes
+                .get(at + 1..end)
+                .is_none_or(|candidate| !candidate.eq_ignore_ascii_case(member.name.as_bytes()))
+            {
+                continue;
+            }
+            if let Some(&next) = bytes.get(end)
+                && (word(next)
+                    || next == b'-'
+                    || (next == b'.' && bytes.get(end + 1).is_some_and(|&b| word(b) || b == b'-')))
+            {
+                continue;
+            }
+            if !out.contains(&member.name) {
+                out.push(member.name.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn idempotency_index(member: &str, key: &str, r: &IdempotencyRecord) -> Vec<IxEntry> {
     vec![IxEntry::mark(
         store::IX_IDEMPOTENCY_TIME,
@@ -710,8 +782,7 @@ pub fn expected_index(r: &impl Rd) -> AppResult<Vec<IxEntry>> {
     }
     for (key, value) in r.prefix_raw(store::COMMENTS, &[], None, usize::MAX)? {
         let c: Comment = store::decode(&value)?;
-        let owner = comment_owner(&key).unwrap_or_default();
-        out.extend(entry_index(&c.id, "comment", &owner, &key));
+        out.extend(comment_index(&c, &key));
     }
     for (key, value) in r.prefix_raw(store::REVIEWS, &[], None, usize::MAX)? {
         let x: Review = store::decode(&value)?;
