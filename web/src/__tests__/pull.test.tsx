@@ -210,6 +210,7 @@ function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]>
       revision: 1,
     }),
     [`GET ${P}`]: json(200, pull()),
+    "GET /api/v1/repos/acme/demo/landing": json(200, { items: [pull().landing] }),
     [`GET ${P}/activity`]: json(200, {
       comments: [
         {
