@@ -461,7 +461,7 @@ export const en = {
   "pulls.updated": "Updated",
   "pulls.noneOpen": "No open pull requests.",
   "pulls.none": "No pull requests.",
-  "pulls.cut": "Only the first 30 of a repository are shown.",
+  "pulls.loadMore": "Load more pull requests",
   "pulls.tipChecks": "Default branch CI",
   "pulls.tipRepositories": "{count} repositories",
   "pulls.tipOfWorkspace": "Default branch CI of {workspace}",

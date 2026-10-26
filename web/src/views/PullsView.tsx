@@ -1,14 +1,12 @@
-import { Card, Group, Select, Stack, Text, TextInput } from "@mantine/core";
-import { useQueries } from "@tanstack/react-query";
+import { Button, Card, Group, Select, Stack, Text, TextInput } from "@mantine/core";
 import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
-import * as api from "../api/endpoints";
 import type { PullRequest } from "../api/types";
 import { ErrorMessage, Loading, MemberAvatar, StateBadge, Time, type Tone } from "../components/common";
 import { PageHeader } from "../components/PageHeader";
 import { useT } from "../i18n";
 import { useChecks, useMemberKinds, useRepos } from "../query/hooks";
-import { keys } from "../query/keys";
+import { usePullList } from "../query/pullList";
 import { Link, navigate } from "../router/Router";
 import { href } from "../router/routes";
 import { rollup, type CiRollup } from "./board/ordering";
@@ -49,17 +47,12 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
     [repos.data, workspace],
   );
   const shown = repo ? [repo] : paths;
-  const lists = useQueries({
-    queries: shown.map((path) => ({ queryKey: keys.repoPulls(path, state), queryFn: () => api.repos.pulls(path, state) })),
-  });
-  const pending = repos.isPending || lists.some((q) => q.isPending);
-  const failed = repos.error ?? lists.find((q) => q.isError)?.error;
-  const cut = lists.some((q) => q.data?.next_cursor);
+  const list = usePullList(shown, state, !repos.isPending);
+  const pending = repos.isPending || list.isPending;
+  const failed = repos.error ?? (list.data ? null : list.error);
   const needle = text.trim().toLowerCase();
-  const pulls = lists
-    .flatMap((q) => q.data?.items ?? [])
-    .filter((p) => !needle || `${p.repository} ${p.label} ${p.title}`.toLowerCase().includes(needle))
-    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  const pulls = (list.data?.pages.flatMap((p) => p.items) ?? [])
+    .filter((p) => !needle || `${p.repository} ${p.label} ${p.title}`.toLowerCase().includes(needle));
 
   return (
     <Stack gap="lg">
@@ -157,10 +150,11 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
             )}
           </div>
         )}
-        {cut && (
-          <Text size="xs" c="dimmed" mt="sm">
-            {t("pulls.cut")}
-          </Text>
+        {list.data && list.error && <ErrorMessage error={list.error} />}
+        {list.hasNextPage && (
+          <Button variant="light" mt="sm" loading={list.isFetching} onClick={() => void list.fetchNextPage()}>
+            {t("pulls.loadMore")}
+          </Button>
         )}
         <TipChecks key={repo ?? ALL_REPOS} workspace={workspace} paths={paths} repo={repo} />
       </Card>

@@ -587,7 +587,11 @@ async fn pulls_create(
 }
 
 async fn pulls_list(State(app): State<Shared>, c: Caller, P(repo): P<String>, q: Q) -> R {
-    let page = q.page(&app, &c, &format!("pulls\n{}", util::fold(&repo)))?;
+    let page = q.page(
+        &app,
+        &c,
+        &format!("pulls-updated-desc\n{}", util::fold(&repo)),
+    )?;
     let query = pulls::PullQuery {
         state: q.get("state"),
         head: q.get("head"),

@@ -463,7 +463,7 @@ export const ja: Record<MessageKey, string> = {
   "pulls.updated": "更新",
   "pulls.noneOpen": "オープンな PR はありません。",
   "pulls.none": "PR はありません。",
-  "pulls.cut": "リポジトリごとに先頭の 30 件だけを表示しています。",
+  "pulls.loadMore": "PR をさらに表示",
   "pulls.tipChecks": "既定ブランチの CI",
   "pulls.tipRepositories": "{count} リポジトリ",
   "pulls.tipOfWorkspace": "{workspace} の既定ブランチの CI",

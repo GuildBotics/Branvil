@@ -506,6 +506,32 @@ def test_a_push_a_pull_request_and_its_merge(world: World) -> None:
     world.run(scenario)
 
 
+def test_open_pull_requests_follow_newest_first_pages(world: World) -> None:
+    async def scenario(code: CodeHostingService, _: TicketService) -> None:
+        await _push(world, code, world.main, "feature")
+        credential = await code.git_credential()
+        assert credential is not None
+        # Distinct bases allow >100 open PRs on one head, crossing the
+        # provider's page size without creating hundreds of commits.
+        world.git.run(
+            "push", "-q", await code.clone_url(REPO),
+            *(f"{world.main}:refs/heads/base-{i}" for i in range(101)),
+            user=credential.username, password=credential.password,
+        )
+        created = []
+        for i in range(101):
+            result = await code.create_pull_request(
+                REPO, "feature", f"base-{i}", f"Change {i}", "",
+                draft=False, tickets=[],
+            )
+            created.append(result.target.url)
+        found = await code.open_pull_requests(REPO, "feature")
+        assert found == list(reversed(created))
+        assert await code.open_pull_requests(REPO, "missing") == []
+
+    world.run(scenario)
+
+
 def test_checks_decide_readiness_of_the_current_head(world: World) -> None:
     async def scenario(code: CodeHostingService, _: TicketService) -> None:
         head = await _push(world, code, world.main, "feature")

@@ -16,6 +16,13 @@ function stale(client: QueryClient, event: Parameters<typeof predicatesFor>[0]) 
 const k = (key: readonly unknown[]) => JSON.stringify(key);
 
 describe("change events", () => {
+  it.each(["pull", "repo", "upstream"] as const)("refreshes merged PR pages for a %s event in any listed repository", (kind) => {
+    const lists = new QueryClient();
+    const shown = keys.pullList(["acme/demo", "acme/web"], "closed");
+    lists.setQueryData(shown, {});
+    lists.setQueryData(keys.pullList(["beta/demo"], "all"), {});
+    expect(stale(lists, { kind, path: "ACME/WEB", id: "1" })).toEqual([k(shown)]);
+  });
   const origin = window.location.origin;
   const client = new QueryClient();
   client.setQueryData(keys.board("acme"), { name: "acme", lanes: [] });
