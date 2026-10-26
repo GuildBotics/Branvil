@@ -15,7 +15,7 @@ import { keys } from "../../query/keys";
 
 type Entry = { at: string; comment: Activity["comments"][number] } | { at: string; review: Review };
 
-function ReviewView({ review, headSha, kind, onReact }: { review: Review; headSha: string; kind?: MemberKind; onReact: OnReact }) {
+function ReviewView({ repo, review, headSha, kind, onReact }: { repo: string; review: Review; headSha: string; kind?: MemberKind; onReact: OnReact }) {
   const t = useT();
   return (
     <article className={`comment ${review.verdict}`} id={review.id} aria-label={t("review.by", { author: review.author })}>
@@ -24,7 +24,7 @@ function ReviewView({ review, headSha, kind, onReact }: { review: Review; headSh
           {t(`verdict.${review.verdict}`)}
         </StateBadge>
         <Text span size="xs" c="dimmed">
-          {t("pull.onRevision")} <Sha value={review.commit} />
+          {t("pull.onRevision")} <Sha repo={repo} value={review.commit} />
           {review.commit !== headSha && ` (${t("pull.olderRevision")})`}
         </Text>
       </PostHead>
@@ -164,6 +164,7 @@ export function Conversation({
       )
     : [];
   const open = pull.state === "open";
+  const [beforeHead, afterHead] = t("pull.headMoved").split("{sha}");
 
   return (
     <Card p="lg" component="section" aria-label={t("pull.conversation")}>
@@ -173,14 +174,14 @@ export function Conversation({
           "comment" in e ? (
             <CommentView key={e.comment.id} comment={e.comment} kind={kindOf(e.comment.author)} onReact={(reaction, on) => react.mutate({ id: e.comment.id, reaction, on })} />
           ) : (
-            <ReviewView key={e.review.id} review={e.review} headSha={pull.head_sha} kind={kindOf(e.review.author)} onReact={(reaction, on) => react.mutate({ id: e.review.id, reaction, on })} />
+            <ReviewView repo={repo} key={e.review.id} review={e.review} headSha={pull.head_sha} kind={kindOf(e.review.author)} onReact={(reaction, on) => react.mutate({ id: e.review.id, reaction, on })} />
           ),
         )}
         {(threads ?? []).map((th) => (
           <ThreadView key={th.id} repo={repo} number={number} thread={th} kindOf={kindOf} onOpenFile={onOpenFile} />
         ))}
         {react.isError && <ErrorMessage error={react.error} />}
-        {headMoved && <Refusal>{t("pull.headMoved", { sha: headMoved.slice(0, 10) })}</Refusal>}
+        {headMoved && <Refusal>{beforeHead}<Sha repo={repo} value={headMoved} />{afterHead}</Refusal>}
         {review.isError && !headMoved && <ErrorMessage error={review.error} />}
         {review.isSuccess && <Notice>{t("pull.reviewSubmitted")}</Notice>}
         <ComposeForm
@@ -192,7 +193,7 @@ export function Conversation({
           hint={
             open && (
               <>
-                {t("pull.reviewingRevision")} <Sha value={pull.head_sha} />
+                {t("pull.reviewingRevision")} <Sha repo={repo} value={pull.head_sha} />
               </>
             )
           }

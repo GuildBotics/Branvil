@@ -67,7 +67,7 @@ export function GateStage({ pull, host }: { pull: PullRequest; host: boolean }) 
       <Text size="sm" fw={700}>{t("landing.gate")}</Text>
       {!landing ? <Text size="sm" c="dimmed">{t("landing.notQueued")}</Text> : (
         <>
-          <Group gap="xs"><LandingBadge landing={landing} host={host} />{landing.gate && <Link to={href.commit(pull.repository, landing.gate)}><Sha value={landing.gate} /></Link>}</Group>
+          <Group gap="xs"><LandingBadge landing={landing} host={host} />{landing.gate && <Sha repo={pull.repository} value={landing.gate} />}</Group>
           {landing.state === "waiting" && landing.first ? <LandingLeader repo={pull.repository} first={landing.first} host={host} /> : (
             <Text size="xs" c="dimmed"><Time value={landing.state_at} />{landing.state !== "left" && <> · <RunTime startedAt={landing.state_at} /></>}</Text>
           )}

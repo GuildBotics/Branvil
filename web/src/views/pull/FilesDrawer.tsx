@@ -110,7 +110,7 @@ export function FilesDrawer({
         <Group gap="sm">
           {t("pull.changes")}
           <Text span size="xs" c="dimmed">
-            <Sha value={baseSha} /> → <Sha value={headSha} />
+            <Sha repo={repo} value={baseSha} /> → <Sha repo={repo} value={headSha} />
           </Text>
         </Group>
       }

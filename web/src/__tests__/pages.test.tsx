@@ -171,8 +171,8 @@ describe("pages", () => {
     expect(await within(checks).findByText("failing")).toBeInTheDocument();
     expect(within(checks).getByText("queued")).toBeInTheDocument();
     expect(await within(checks).findByText("Reason: exit code 101")).toBeInTheDocument();
-    // The commit's own page does not link to itself.
-    expect(within(checks).getByTitle(sha).closest("a")).toBeNull();
+    expect(screen.getByRole("link", { name: sha })).toHaveAttribute("href", `/acme/demo/-/commits/${sha}`);
+    expect(within(checks).getByTitle(sha).closest("a")).toHaveAttribute("href", `/acme/demo/-/commits/${sha}`);
 
     await user.click(within(checks).getByRole("button", { name: "Open check test" }));
     const job = await screen.findByRole("dialog", { name: /test/ });
@@ -198,6 +198,8 @@ describe("pages", () => {
     const label = language === "ja" ? "再利用元" : "Reused from";
     const link = await screen.findByRole("link", { name: new RegExp(label) });
     expect(link).toHaveAttribute("href", "/acme/demo/-/jobs/att_original");
+    expect(screen.getByRole("link", { name: source.sha.slice(0, 10) })).toHaveAttribute("href", `/acme/demo/-/commits/${source.sha}`);
+    expect(link.querySelector("a")).toBeNull();
     expect(screen.getByRole("link", { name: language === "ja" ? "キャッシュの更新" : "Cache refresh" })).toHaveAttribute("href", "/acme/demo/-/jobs/att_refresh");
     const reason = language === "ja" ? "理由" : "Reason";
     expect(screen.queryByText(new RegExp(reason))).not.toBeInTheDocument();
@@ -206,6 +208,8 @@ describe("pages", () => {
     expect(await within(drawer).findByText(label)).toBeInTheDocument();
     expect(within(drawer).queryByText(reason)).not.toBeInTheDocument();
     expect(within(drawer).getByRole("link", { name: /att_original/ })).toHaveAttribute("href", "/acme/demo/-/jobs/att_original");
+    expect(within(drawer).getByRole("link", { name: source.sha.slice(0, 10) })).toHaveAttribute("href", `/acme/demo/-/commits/${source.sha}`);
+    expect(within(drawer).getByRole("link", { name: /att_original/ }).querySelector("a")).toBeNull();
     expect(within(drawer).getByRole("link", { name: "report" })).toHaveAttribute("href", `/api/v1/repos/acme%2Fdemo/commits/${sha}/artifacts/report`);
     expect(await within(drawer).findByText("reused result of att_original")).toBeInTheDocument();
   });
