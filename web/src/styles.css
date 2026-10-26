@@ -347,9 +347,12 @@ a:hover {
   gap: 12px;
 }
 
+/* Indented, so a comment on a line of code stands apart from the conversation's comments. */
 .thread {
   border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-brand-border-subtle);
   border-radius: 6px;
+  margin-left: 32px;
   overflow: hidden;
 }
 

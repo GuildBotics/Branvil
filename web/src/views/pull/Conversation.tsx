@@ -1,5 +1,5 @@
 // A pull request's conversation: comments, reviews, and line threads in one
-// frame, with one box for a comment or a verdict.
+// frame, in the order they were posted, with one box for a comment or a verdict.
 
 import { Anchor, Badge, Button, Card, Group, Text } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -13,7 +13,7 @@ import { Markdown } from "../../components/Markdown";
 import { useT } from "../../i18n";
 import { keys } from "../../query/keys";
 
-type Entry = { at: string; comment: Activity["comments"][number] } | { at: string; review: Review };
+type Entry = { at: string; comment: Activity["comments"][number] } | { at: string; review: Review } | { at: string; thread: Thread };
 
 function ReviewView({ repo, review, headSha, kind, onReact }: { repo: string; review: Review; headSha: string; kind?: MemberKind; onReact: OnReact }) {
   const t = useT();
@@ -158,11 +158,12 @@ export function Conversation({
     },
   });
 
-  const entries: Entry[] = activity
-    ? [...activity.comments.map((c) => ({ at: c.created_at, comment: c })), ...activity.reviews.map((r) => ({ at: r.submitted_at, review: r }))].sort((a, b) =>
-        a.at < b.at ? -1 : a.at > b.at ? 1 : 0,
-      )
-    : [];
+  // A thread takes its place in the timeline when its first comment was posted.
+  const entries: Entry[] = [
+    ...(activity?.comments ?? []).map((c) => ({ at: c.created_at, comment: c })),
+    ...(activity?.reviews ?? []).map((r) => ({ at: r.submitted_at, review: r })),
+    ...(threads ?? []).map((th) => ({ at: th.comments[0]?.created_at ?? "", thread: th })),
+  ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   const open = pull.state === "open";
   const [beforeHead, afterHead] = t("pull.headMoved").split("{sha}");
 
@@ -173,13 +174,12 @@ export function Conversation({
         {entries.map((e) =>
           "comment" in e ? (
             <CommentView key={e.comment.id} comment={e.comment} kind={kindOf(e.comment.author)} onReact={(reaction, on) => react.mutate({ id: e.comment.id, reaction, on })} />
-          ) : (
+          ) : "review" in e ? (
             <ReviewView repo={repo} key={e.review.id} review={e.review} headSha={pull.head_sha} kind={kindOf(e.review.author)} onReact={(reaction, on) => react.mutate({ id: e.review.id, reaction, on })} />
+          ) : (
+            <ThreadView key={e.thread.id} repo={repo} number={number} thread={e.thread} kindOf={kindOf} onOpenFile={onOpenFile} />
           ),
         )}
-        {(threads ?? []).map((th) => (
-          <ThreadView key={th.id} repo={repo} number={number} thread={th} kindOf={kindOf} onOpenFile={onOpenFile} />
-        ))}
         {react.isError && <ErrorMessage error={react.error} />}
         {headMoved && <Refusal>{beforeHead}<Sha repo={repo} value={headMoved} />{afterHead}</Refusal>}
         {review.isError && !headMoved && <ErrorMessage error={review.error} />}

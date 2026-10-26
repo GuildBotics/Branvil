@@ -331,6 +331,38 @@ describe("pull request review", () => {
     expect(await within(files).findByText("+more")).toBeInTheDocument();
   });
 
+  it("places each thread in the conversation at the time its first comment was posted", async () => {
+    const at = (minute: number) => `2026-10-14T10:0${minute}:00.000Z`;
+    const post = (id: string, body: string, minute: number) => ({ id, author: "owner", body, meta: null, created_at: at(minute), reactions: [], url: "" });
+    const thread = (id: string, line: number, minute: number) => ({
+      id,
+      resolved: false,
+      outdated: false,
+      path: "src/login.rs",
+      line,
+      side: "RIGHT",
+      commit: HEAD,
+      comments: [{ ...post(id, `Line ${line}?`, minute), reply_to_id: null }, { ...post(`${id}_reply`, "Later reply", 9), reply_to_id: id }],
+    });
+    fakeApi(
+      pullRoutes({
+        [`GET ${P}/activity`]: json(200, {
+          comments: [post("cmt_1", "First comment", 1), post("cmt_2", "Last comment", 5)],
+          reviews: [{ id: "rev_1", author: "aiko", verdict: "comment", body: "Review body", commit: HEAD, submitted_at: at(3), reactions: [] }],
+          threads: [],
+        }),
+        [`GET ${P}/threads`]: json(200, { items: [thread("ic_2", 20, 4), thread("ic_1", 12, 2)], next_cursor: null }),
+      }),
+    );
+    renderApp("/acme/demo/-/pulls/3");
+    const timeline = (await screen.findByText("Review body")).closest(".timeline") as HTMLElement;
+    const order = ["First comment", "src/login.rs:12", "Review body", "src/login.rs:20", "Last comment"].map((text) => within(timeline).getByText(text));
+    order.reduce((earlier, later) => {
+      expect(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      return later;
+    });
+  });
+
   it.each(["en", "ja"] as const)("sends the displayed head with a review and handles head_moved by reloading (%s)", async (language) => {
     const fake = fakeApi(
       pullRoutes({
