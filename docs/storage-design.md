@@ -51,13 +51,16 @@ closure returns `Ok` and aborts otherwise.
 
 ## Schema version
 
-`meta["schema_version"]` is written on creation (currently `17`). The current
+`meta["schema_version"]` is written on creation (currently `20`). The current
 format includes persistent landing queues, each merged pull request's original
 reviewed head distinct from its merge commit, and per-gate notification and
 publication-resume state. CI runs hold their commit's pipeline and tree;
 attempts hold reuse sources and cache keys. Runs retain the protected branches that
 requested them, whether a required failure awaits notification, and its
 successful webhook delivery time.
+Tickets and conversation comments store their resolved `mentions` lists.
+The 19 → 20 upgrade resolves existing bodies against the stored members,
+writes those lists, and rebuilds the derived indexes in the upgrade transaction.
 
 A database of any other version is refused at open. The previous version is
 upgraded by `branvil admin upgrade` or `branvil restore` (`src/upgrade.rs`, the
@@ -124,6 +127,7 @@ Every index entry of a record comes from one function in `src/model.rs`
 | `ix_member_tokens` | `(member, token id)` | token list/revoke |
 | `ix_cards` | `(workspace id, lane index, rank, repo id, n)` | `candidates` (`GET workspaces/{w}/board/cards?lane=…`), card order, `place` neighbours |
 | `ix_ticket_labels` | `(repo id, label, n)` | `?label=` lists; consistency check for concurrent label changes |
+| `ix_ticket_mentions` | `(fold(member), repo id, n, source)`; source `0` for the ticket body, comment sequence otherwise | workspace `tickets?mentions=me`; each source derives its own entries in `model.rs`, so editing or deleting one never removes another source's mention |
 | `ix_ticket_refs` | `(repo id, n, "parent"|"blocked_by", repo id, n)`: the ticket named, then the one naming it | a ticket's `children` and `blocks`; the open-children check of a completion; the "wait on each other" check of a new relation |
 | `ix_closed_tickets` | `(workspace id, closed_at, repo id, n)` | `closed_since` for tickets |
 | `ix_entries` | `(entry id)` → `{kind, owner, record key}` | reactions, replies: an id is used only with its owning item (`owner` must match) |
@@ -144,7 +148,11 @@ Cards read only the requested lanes' ranges of one workspace's `ix_cards` (the
 `in_progress`); the assignee filter is applied to the tickets of those lanes.
 Placing a card (create, move, merge closing a ticket) reads only
 the two index entries next to the new position, never the whole lane. Ticket
-lists scan one repository's range (or one label's index range). `closed_since`
+lists scan one repository's range (or one label's index range). Mention queries
+read the repository records for the workspace and scan only the requesting
+member's mention ranges in those repositories. Each source remains a separate
+index entry; the reader groups consecutive entries of a ticket, including
+the ticket named by the preceding page's cursor. `closed_since`
 reads the repository records to find the workspace's repositories, whose pull
 requests it lists (GuildBotics calls it to import the board's finished work as
 activity, not on its patrol path). No hot path scans a whole table. Lists follow signed cursors: the cursor is the last position

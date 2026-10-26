@@ -610,6 +610,7 @@ fn review_view(x: &Review, pull_url: &str) -> ReviewView {
 fn inline_view(c: &InlineComment, pull_url: &str) -> ThreadCommentView {
     ThreadCommentView {
         comment: CommentView {
+            mentions: None,
             id: c.id.clone(),
             author: c.author.clone(),
             body: c.body.clone(),

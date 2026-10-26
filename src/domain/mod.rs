@@ -287,6 +287,8 @@ pub struct CommentView {
     pub id: String,
     pub author: String,
     pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<Vec<String>>,
     pub meta: Option<serde_json::Value>,
     pub created_at: String,
     pub reactions: Vec<ReactionView>,
@@ -298,6 +300,7 @@ pub fn comment_view(c: &model::Comment, item_url: &str) -> CommentView {
         id: c.id.clone(),
         author: c.author.clone(),
         body: c.body.clone(),
+        mentions: Some(c.mentions.clone()),
         meta: c.meta.clone(),
         created_at: c.created_at.clone(),
         reactions: reaction_views(&c.reactions),

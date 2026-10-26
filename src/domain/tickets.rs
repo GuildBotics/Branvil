@@ -27,6 +27,7 @@ pub struct TicketView {
     pub key: String,
     pub title: String,
     pub body: String,
+    pub mentions: Vec<String>,
     pub state: String,
     pub state_reason: Option<String>,
     pub author: String,
@@ -215,6 +216,7 @@ pub fn ticket_view(r: &impl Rd, base_url: &str, repo: &Repo, t: &Ticket) -> AppR
         key: t.number.to_string(),
         title: t.title.clone(),
         body: t.body.clone(),
+        mentions: t.mentions.clone(),
         state: t.state.clone(),
         state_reason: t.state_reason.clone(),
         author: t.author.clone(),
@@ -360,6 +362,7 @@ pub async fn create_ticket(
                 workspace: repo.workspace.clone(),
                 number,
                 title: input.title,
+                mentions: model::mentions(w, &input.body)?,
                 body: input.body,
                 state: "open".into(),
                 state_reason: None,
@@ -608,6 +611,7 @@ pub async fn update_ticket(
                 t.title = title;
             }
             if let Some(body) = patch.body {
+                t.mentions = model::mentions(w, &body)?;
                 t.body = body;
             }
             if let Some(issue) = upstream_issue {
@@ -1005,6 +1009,7 @@ pub fn insert_comment(
         id: util::new_id("cmt"),
         seq,
         author: author.to_string(),
+        mentions: model::mentions(w, &body)?,
         body,
         meta,
         created_at: util::now(),
@@ -1017,7 +1022,7 @@ pub fn insert_comment(
         &key,
         None,
         &c,
-        model::entry_index(&c.id, "comment", &target.owner(), &key),
+        model::comment_index(&c, &key),
     )?;
     Ok(c)
 }
@@ -1122,17 +1127,22 @@ pub async fn change_comment(
             let ck = domain::entry_key(&entry)?;
             let mut c: Comment = w.get(store::COMMENTS, &ck)?.ok_or_else(not_found)?;
             caller.require_self_or_owner(&c.author)?;
+            let old_index = model::comment_index(&c, &ck);
             let view = if let Some(body) = body {
+                c.mentions = model::mentions(w, &body)?;
                 c.body = body;
-                w.put(store::COMMENTS, &ck, &c)?;
+                model::put_indexed(
+                    w,
+                    store::COMMENTS,
+                    &ck,
+                    Some(old_index),
+                    &c,
+                    model::comment_index(&c, &ck),
+                )?;
                 Some(comment_view(&c, &ticket_url(&base_url, &repo, old.number)))
             } else {
                 w.del(store::COMMENTS, &ck)?;
-                model::reindex(
-                    w,
-                    model::entry_index(&c.id, "comment", &target.owner(), &ck),
-                    Vec::new(),
-                )?;
+                model::reindex(w, old_index, Vec::new())?;
                 None
             };
             let mut t = old.clone();
@@ -1301,6 +1311,94 @@ pub struct CardQuery {
     pub comments: Option<String>,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct MentionQuery {
+    pub mentions: Option<String>,
+    pub state: Option<String>,
+    pub comments: Option<String>,
+}
+
+/// Mentioned tickets across the workspace, independent of lane or assignee.
+pub async fn mentioned(
+    app: &App,
+    caller: &Caller,
+    workspace: &str,
+    q: MentionQuery,
+    page: PageReq,
+) -> AppResult<Page<CardView>> {
+    if q.mentions.as_deref() != Some("me") {
+        return Err(AppError::invalid("mentions must be me."));
+    }
+    let state = q.state.unwrap_or_else(|| "open".into());
+    if !["open", "closed", "all"].contains(&state.as_str()) {
+        return Err(AppError::invalid("state must be open, closed, or all."));
+    }
+    let with_comments = match q.comments.as_deref() {
+        None | Some("all") => true,
+        Some("none") => false,
+        Some(_) => return Err(AppError::invalid("comments must be all or none.")),
+    };
+    let workspace = repos::visible_workspace(app, caller, workspace).await?;
+    let me = fold(caller.name());
+    let base_url = app.base_url.clone();
+    app.store
+        .read(move |r| {
+            let prefixes = r
+                .prefix_all::<Repo>(store::REPOS, &[])?
+                .into_iter()
+                .filter(|repo| repo.workspace == workspace.id)
+                .map(|repo| Key::new().s(&me).s(&repo.id).bytes())
+                .collect::<Vec<_>>();
+            // Skip the same ticket's other sources, including on the next page.
+            let ticket_id = |key: &[u8]| -> AppResult<(String, u64)> {
+                let parts = store::decode_key(key, "ssuu")
+                    .ok_or_else(|| AppError::internal("bad ticket mention index"))?;
+                Ok((parts[1].s().to_string(), parts[2].u()))
+            };
+            let mut previous = page.after.as_deref().map(ticket_id).transpose()?;
+            let (items, next_cursor) =
+                page.scan_prefixes(r, store::IX_TICKET_MENTIONS, &prefixes, |key, _| {
+                    let id = ticket_id(key)?;
+                    if previous.as_ref() == Some(&id) {
+                        return Ok(None);
+                    }
+                    previous = Some(id.clone());
+                    let t = ticket_by_id(r, &id)?;
+                    if state != "all" && t.state != state {
+                        return Ok(None);
+                    }
+                    let repo = repo_by_id(r, &t.repo)?;
+                    card_view(r, &base_url, &repo, &t, with_comments).map(Some)
+                })?;
+            Ok(Page { items, next_cursor })
+        })
+        .await
+}
+
+fn card_view(
+    r: &impl Rd,
+    base_url: &str,
+    repo: &Repo,
+    t: &Ticket,
+    with_comments: bool,
+) -> AppResult<CardView> {
+    let ticket = ticket_view(r, base_url, repo, t)?;
+    let comments = if with_comments {
+        comments_of(r, &ticket_target(t))?
+            .iter()
+            .map(|c| comment_view(c, &ticket.url))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let pull_requests = linked_pulls(r, base_url, t, false)?;
+    Ok(CardView {
+        ticket,
+        comments,
+        pull_requests,
+    })
+}
+
 pub async fn cards(
     app: &App,
     caller: &Caller,
@@ -1358,21 +1456,7 @@ pub async fn cards(
                     if !matches(&t, &filter, caller.name()) {
                         return Ok(None);
                     }
-                    let view = ticket_view(r, &base_url, &repo, &t)?;
-                    let comments = if with_comments {
-                        comments_of(r, &ticket_target(&t))?
-                            .iter()
-                            .map(|c| comment_view(c, &view.url))
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let pull_requests = linked_pulls(r, &base_url, &t, false)?;
-                    Ok(Some(CardView {
-                        ticket: view,
-                        comments,
-                        pull_requests,
-                    }))
+                    card_view(r, &base_url, &repo, &t, with_comments).map(Some)
                 })?;
             Ok(Page { items, next_cursor })
         })
@@ -1572,6 +1656,7 @@ mod tests {
             number: n,
             title: format!("t{n}"),
             body: String::new(),
+            mentions: Vec::new(),
             state: "open".into(),
             state_reason: None,
             author: "a".into(),

@@ -383,6 +383,7 @@ every ticket is on it, in a lane.
   "key": "3",
   "title": "Fix login",
   "body": "It fails.",
+  "mentions": [],
   "state": "open",
   "state_reason": null,
   "author": "aiko",
@@ -410,6 +411,15 @@ ticket is in: `new`, `ready`, `in_progress`, or `done` (every ticket is a card
 of that board), and `rank` orders it within the lane. `upstream_issue` is the issue the
 ticket stands for on its repository's upstream host, or `null`; publishing a
 pull request that links the ticket writes a line about it there.
+
+`mentions` lists existing Branvil member names mentioned in the body, without
+duplicates, in occurrence order and with their stored spelling. Matching is
+ASCII case-insensitive. A mention is `@name`: before `@` there may not be an
+ASCII letter, digit, `_`, `.`, `@`, or `-`; after the name there may not be an
+ASCII letter, digit, `_`, `-`, or a dot followed by one of those. Thus `@bot.`
+mentions `bot`, while `mail@bot`, `@bot-extra`, and `@bot.example` do not.
+This is literal matching, including inside code and quotations. Names are
+resolved when the body is written; unknown names are not kept as mentions.
 
 Tickets of one workspace relate in two ways, each shown from both sides with
 the other ticket's title and state:
@@ -483,6 +493,7 @@ The comment shape:
 
 ```json
 {"id": "cmt_01JA...", "author": "aiko", "body": "Looking into it.",
+ "mentions": [],
  "meta": {"kind": "workflow_error", "routing": "suppress", "reason": "failed"},
  "created_at": "...", "reactions": [{"author": "ken", "reaction": "ack"}],
  "url": "http://127.0.0.1:7878/acme/demo/-/tickets/3#cmt_01JA..."}
@@ -491,6 +502,8 @@ The comment shape:
 `meta` is an opaque JSON object (at most 4 KiB serialized) a client stores with
 the comment and gets back; it is `null` when none was sent. The GUI shows a
 comment with `meta.routing == "suppress"` as a status notice.
+`mentions` follows the same rules as ticket bodies and is recalculated on
+comment edits. These fields describe conversation comments, not inline threads.
 
 - `GET .../tickets/{number}/comments` → items, oldest first.
 - `POST .../tickets/{number}/comments` `{"body", "meta"?}` → `201` comment.
@@ -511,6 +524,18 @@ comment with `meta.routing == "suppress"` as a status notice.
   takes the caller's own reaction back → `204` (also when there was none).
 
 ### The board of a workspace
+
+- `GET /api/v1/workspaces/{workspace}/tickets?mentions=me&state=open&comments=all` →
+  the card shape below for tickets whose body or any ticket comment mentions
+  the requesting member. `mentions=me` is required; other values are refused.
+  No lane or assignee filter applies, so unassigned tickets in `new` are also
+  returned. Branvil keeps every ticket on its repository's workspace board;
+  discovery does not depend on the board's currently displayed lanes.
+  Only repositories of the named workspace are included. `state` is `open`
+  by default, or `closed` / `all`; `comments` is `all` by default, or `none`.
+  Multiple mentions return one ticket, including across page boundaries.
+  Items are ordered by repository id, then ticket number, and use the usual
+  signed pagination. PR conversation comments are not ticket mentions.
 
 - `GET /api/v1/workspaces/{workspace}/board/cards?lane=ready,in_progress&assignee=me&state=open&comments=all` →
   items of *card*: the ticket shape plus
