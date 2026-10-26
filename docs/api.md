@@ -697,6 +697,11 @@ or last departure, or `null` before it first joins (see "Landing queue").
   for the diff `merge-base(base, head)..head`. `patch` is the unified diff of the
   file from its first `@@` line (`null` for binary files); it is cut at 256 KiB
   with `patch_complete: false`.
+- `GET .../pulls/{number}/commits` → items of
+  `{"sha","author","committed_at","subject"}`, oldest first: the commits of
+  `base..head` (once merged, of what the merge brought in). Every commit here
+  was pushed to Branvil. `committed_at` is the committer date in UTC, the same
+  form as the service's own times.
 - `POST .../pulls/{number}/merge` (owner)
   `{"expected_head": "<sha>", "expected_base": "<sha>"}` → pull request. The pull
   request must be first in its base's landing queue with a passed gate built

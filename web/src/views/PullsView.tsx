@@ -53,6 +53,9 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
   const needle = text.trim().toLowerCase();
   const pulls = (list.data?.pages.flatMap((p) => p.items) ?? [])
     .filter((p) => !needle || `${p.repository} ${p.label} ${p.title}`.toLowerCase().includes(needle));
+  const emptyMessage = needle
+    ? list.hasNextPage ? t("pulls.noLoadedMatches") : t("pulls.noMatches")
+    : state === "open" ? t("pulls.noneOpen") : t("pulls.none");
 
   return (
     <Stack gap="lg">
@@ -113,7 +116,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
               <span role="columnheader">{t("pulls.updated")}</span>
             </div>
             {pulls.length === 0 ? (
-              <div className="empty-row">{state === "open" ? t("pulls.noneOpen") : t("pulls.none")}</div>
+              <div className="empty-row">{emptyMessage}</div>
             ) : (
               pulls.map((p, i) => {
                 const s = p.merged ? "merged" : p.state;

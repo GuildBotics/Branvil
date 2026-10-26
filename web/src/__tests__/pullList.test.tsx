@@ -23,11 +23,55 @@ const row = (repo: string, number: number, second: number) => pull({
 const rows = () => within(screen.getByRole("table", { name: "Pull requests" })).getAllByRole("row").slice(1);
 
 describe("pull request pagination", () => {
+  describe.each(["en", "ja"] as const)("filtered empty results (%s)", (language) => {
+    it.each(["open", "closed", "all"] as const)("distinguishes unread pages from an exhausted %s list", async (state) => {
+      const demo = Array.from({ length: 31 }, (_, i) => ({
+        ...row("acme/demo", 31 - i, 31 - i), state: state === "open" ? "open" as const : "closed" as const,
+        merged: false, landing: null,
+      }));
+      demo[30] = { ...demo[30]!, title: "Needle" };
+      fakeApi({
+        ...shell,
+        "GET /api/v1/repos": page([repository("acme/demo")]),
+        "GET /api/v1/repos/acme/demo/pulls": (req) => {
+          const q = new URLSearchParams(req.search);
+          if (q.get("state") !== state) return page([]);
+          return q.has("cursor") ? page(demo.slice(30)) : page(demo.slice(0, 30), "older");
+        },
+        ...Object.fromEntries(demo.map((p) => [`GET /api/v1/repos/acme/demo/pulls/${p.number}/checks`, json(200, { checks: [] })])),
+      });
+      const user = userEvent.setup();
+      renderApp("/acme/-/pulls", language);
+      if (state !== "open") {
+        const label = language === "ja" ? "状態" : "State";
+        const value = state === "closed" ? language === "ja" ? "クローズ" : "Closed" : language === "ja" ? "すべて" : "Any";
+        await choose(user, label, `${label}: ${value}`);
+      }
+      await screen.findByText("Change 31");
+      const search = screen.getByRole("textbox", { name: language === "ja" ? "テキスト" : "Text" });
+      await user.type(search, "Needle");
+      const partial = language === "ja"
+        ? "読み込んだ PR には一致するものがありません。さらに表示して検索を続けられます。"
+        : "No matching pull requests among those loaded. Load more to continue searching.";
+      expect(screen.getByText(partial)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: language === "ja" ? "PR をさらに表示" : "Load more pull requests" }));
+      await screen.findByText("Needle");
+      expect(search).toHaveValue("Needle");
+      expect(screen.queryByText(partial)).not.toBeInTheDocument();
+      await user.clear(search);
+      await user.type(search, "Missing");
+      expect(screen.getByText(language === "ja" ? "一致する PR はありません。" : "No matching pull requests.")).toBeInTheDocument();
+      await user.clear(search);
+      expect(screen.getByText("Change 31")).toBeInTheDocument();
+      expect(screen.getByText("Needle")).toBeInTheDocument();
+    });
+  });
+
   it.each([false, true])("loads older PRs in global order (workspace: %s), resets state and refetches on events", async (workspace) => {
     const demo = Array.from({ length: 61 }, (_, i) => row("acme/demo", 61 - i, 61 - i));
-    const other = row("acme/web", 1, 31.5);
-    // Keep millisecond precision for the row between demo !31 and !32.
-    other.updated_at = "2026-10-20T00:00:31.500Z";
+    const other = row("acme/web", 1, 10);
+    // This buffered row must wait for newer rows on demo's unread page.
+    other.updated_at = "2026-10-20T00:00:10.500Z";
     const fake = fakeApi({
       ...shell,
       "GET /api/v1/repos": page([repository("acme/demo"), repository("acme/web")]),
@@ -55,7 +99,7 @@ describe("pull request pagination", () => {
     await waitFor(() => expect(rows()).toHaveLength(60));
     await user.click(screen.getByRole("button", { name: "Load more pull requests" }));
     await waitFor(() => expect(rows()).toHaveLength(workspace ? 62 : 61));
-    const expected = workspace ? [...demo.slice(0, 30), other, ...demo.slice(30)] : demo;
+    const expected = workspace ? [...demo.slice(0, 51), other, ...demo.slice(51)] : demo;
     expect(rows().map((r) => r.getAttribute("aria-label"))).toEqual(expected.map((p) => `${p.repository} ${p.label} ${p.title}`));
     expect(screen.queryByRole("button", { name: "Load more pull requests" })).not.toBeInTheDocument();
     expect(fake.calls("GET", "/api/v1/repos/acme/demo/pulls").map((r) => new URLSearchParams(r.search).get("cursor"))).toEqual([null, null, "30", "60"]);

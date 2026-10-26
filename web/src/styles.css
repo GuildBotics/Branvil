@@ -378,6 +378,14 @@ a:hover {
   display: none;
 }
 
+/* A commit is one line between the posts, so a reader sees what was pushed after a review. */
+.timeline-commit {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  padding: 0 12px;
+}
+
 .thread-body {
   display: flex;
   flex-direction: column;

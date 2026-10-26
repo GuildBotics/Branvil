@@ -469,6 +469,23 @@ async fn patrol_files_links_and_draft_rules() {
     let bin = items.iter().find(|f| f["path"] == "bin.dat").unwrap();
     assert_eq!(bin["patch"], Value::Null);
 
+    // Commits: what the head has and the base does not, oldest first, at UTC times.
+    let commits = s.ok(&format!("{base}/commits"), &w.aiko).await;
+    let subjects: Vec<&str> = commits["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["subject"].as_str().unwrap())
+        .collect();
+    assert_eq!(subjects, ["change f.txt", "binary"], "{commits}");
+    assert_eq!(commits["items"][1]["sha"], p["head_sha"]);
+    assert!(
+        commits["items"][0]["committed_at"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+
     // Patrol: author and requested reviewer see it; a review answers the request.
     let (st, v) = s
         .put(&format!("{base}/reviewers/ken"), &w.aiko, json!({}))
@@ -890,6 +907,9 @@ async fn a_merge_deletes_its_head_unless_protected_or_used_by_an_open_pull_reque
     assert_eq!(r.ok(&url, &w.aiko).await["head_sha"], stacked.as_str());
     let files = r.ok(&format!("{url}/files"), &w.aiko).await;
     assert_eq!(files["items"][0]["path"], "s.txt", "{files}");
+    let commits = r.ok(&format!("{url}/commits"), &w.aiko).await;
+    assert_eq!(commits["items"].as_array().unwrap().len(), 1, "{commits}");
+    assert_eq!(commits["items"][0]["subject"], "change s.txt");
 }
 
 async fn needs_approvals(w: &World, n: u64) {

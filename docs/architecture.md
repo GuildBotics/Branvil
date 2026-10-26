@@ -588,6 +588,8 @@ upstream tips. Reused checks keep a separate link to their source job.
 The pull request list shows the server's review states with the same avatars
 and badges as its detail page. It merges repository pages by newest update first,
 retaining unused rows for the next page, and adds 30 rows per "Load more" action.
+Text search filters the loaded rows; an empty filtered page says when older
+pages remain available to continue searching.
 The merge refills empty repository pages before selecting the next row, so older
 rows from one repository cannot appear ahead of unread newer rows from another.
 Pull, repository, and upstream events refetch the loaded pages from the start.
