@@ -1,6 +1,8 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { dictionaries } from "../i18n";
+import { navigate } from "../router/Router";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { choose, pickFromMenu } from "../test/mantine";
 import { ticketNamed } from "../views/ticket/Relations";
@@ -36,6 +38,46 @@ function ticketRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string
 }
 
 describe("ticket view", () => {
+  it.each(["en", "ja"] as const)("links and copies comments, scrolling after loading and on fragment/history navigation (%s)", async (language) => {
+    const comments = ["cmt_1", "cmt_2"].map((id) => ({ id, author: "comment-agent", body: id, meta: null, created_at: at, url: "", reactions: [] }));
+    let answer!: (value: ReturnType<typeof json>) => void;
+    fakeApi(ticketRoutes({
+      [`GET ${TICKET}`]: json(200, card("1", "new")),
+      [`GET ${TICKET}/comments`]: () => new Promise((resolve) => { answer = resolve; }),
+    }));
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    const user = userEvent.setup();
+    const page = "/acme/demo/-/tickets/1";
+    renderApp(`${page}#cmt_2`, language);
+    await waitFor(() => expect(answer).toBeTypeOf("function"));
+    await act(async () => answer(json(200, { items: comments, next_cursor: null })));
+    const target = (await screen.findByText("cmt_2")).closest("article")!;
+    await waitFor(() => expect(scroll.mock.contexts).toContain(target));
+    expect(target).toHaveAttribute("data-target", "true");
+    const link = within(target).getByTitle(dictionaries[language]["comment.link"]);
+    expect(link).toHaveAttribute("href", `${page}#cmt_2`);
+    await user.click(within(target).getByRole("button", { name: dictionaries[language]["comment.copyUrl"] }));
+    expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}${page}#cmt_2`);
+    // Clicking the current fragment again still takes the reader back to it.
+    scroll.mockClear();
+    await user.click(link);
+    expect(scroll.mock.contexts).toContain(target);
+    act(() => navigate(`${page}#cmt_1`));
+    const first = screen.getByText("cmt_1").closest("article")!;
+    expect(scroll.mock.contexts).toContain(first);
+    expect(first).toHaveAttribute("data-target", "true");
+    expect(target).not.toHaveAttribute("data-target");
+    scroll.mockClear();
+    act(() => window.history.back());
+    await waitFor(() => expect(scroll.mock.contexts).toContain(target));
+    scroll.mockClear();
+    act(() => {
+      window.location.hash = "cmt_1";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    await waitFor(() => expect(scroll.mock.contexts).toContain(first));
+  });
+
   it("edits a comment, keeps a failed draft, cancels, and confirms permanent deletion", async () => {
     const comment = { id: "cmt_1", author: "comment-agent", body: "Original comment", meta: { routing: "suppress" }, created_at: at, url: "", reactions: [] };
     let comments = [comment];

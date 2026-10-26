@@ -105,6 +105,8 @@ export const en = {
   "ticket.blocked": "It can be moved to In progress once every ticket it is blocked by is closed.",
 
   "comment.new": "New comment",
+  "comment.link": "Link to this comment",
+  "comment.copyUrl": "Copy the comment's URL",
   "comment.submit": "Comment",
   "comment.notice": "Status notice",
   "comment.edit": "Edit comment",

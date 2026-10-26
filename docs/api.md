@@ -59,13 +59,20 @@ an endpoint, this file changes in the same commit.
 | --- | --- |
 | Ticket | `{base}/{repo}/-/tickets/{number}` |
 | Pull request | `{base}/{repo}/-/pulls/{number}` |
+| Ticket comment | `{base}/{repo}/-/tickets/{number}#{comment_id}` |
+| PR comment, review, or inline reply | `{base}/{repo}/-/pulls/{number}#{entry_id}` |
 | Commit | `{base}/{repo}/-/commits/{sha}` |
 | CI attempt | `{base}/{repo}/-/jobs/{attempt_id}` |
 | Git remote | `{base}/git/{repo}.git` |
 
-Paths in these URLs are not percent-encoded (each name is URL-safe). These URLs
-are what the API returns in `url` fields and what GuildBotics records. The GUI
-serves each of them.
+Paths in these URLs are not percent-encoded (each name is URL-safe). The API's
+`url` fields and GuildBotics' recorded references use these addresses. The GUI
+serves each of them, including reviews addressed by their entry id.
+
+The GUI links each comment's timestamp to its permanent address and offers a
+copy button. Opening a fragment waits for the conversation to load, expands a
+resolved thread when needed, and scrolls to the highlighted entry. URLs copied
+in a ticket drawer use the ticket's page, not the board's address.
 
 ### Authentication
 

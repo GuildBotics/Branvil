@@ -12,14 +12,17 @@ import { CommentView, ComposeForm, ErrorMessage, Loading, Notice, PostHead, Reac
 import { Markdown } from "../../components/Markdown";
 import { useT } from "../../i18n";
 import { keys } from "../../query/keys";
+import { useFragmentTarget } from "../../router/Router";
+import { href } from "../../router/routes";
 
 type Entry = { at: string; comment: Activity["comments"][number] } | { at: string; review: Review };
 
-function ReviewView({ repo, review, headSha, kind, onReact }: { repo: string; review: Review; headSha: string; kind?: MemberKind; onReact: OnReact }) {
+function ReviewView({ repo, number, review, headSha, kind, onReact }: { repo: string; number: number; review: Review; headSha: string; kind?: MemberKind; onReact: OnReact }) {
   const t = useT();
+  const target = useFragmentTarget(review.id);
   return (
-    <article className={`comment ${review.verdict}`} id={review.id} aria-label={t("review.by", { author: review.author })}>
-      <PostHead author={review.author} kind={kind} at={review.submitted_at}>
+    <article {...target} className={`comment ${review.verdict}`} id={review.id} aria-label={t("review.by", { author: review.author })}>
+      <PostHead author={review.author} kind={kind} at={review.submitted_at} url={`${href.pull(repo, number)}#${encodeURIComponent(review.id)}`}>
         <StateBadge tone={review.verdict === "approve" ? "success" : review.verdict === "request_changes" ? "danger" : "neutral"}>
           {t(`verdict.${review.verdict}`)}
         </StateBadge>
@@ -95,26 +98,25 @@ function ThreadView({
           {thread.resolved && <StateBadge tone="success">{t("thread.resolved")}</StateBadge>}
         </Group>
       </summary>
-      {open && (
-        <div className="thread-body">
-          {thread.comments.map((c) => (
-            <CommentView key={c.id} comment={c} kind={kindOf(c.author)} onReact={(reaction, on) => react.mutate({ id: c.id, reaction, on })} />
-          ))}
-          <ComposeForm
-            label={t("thread.reply")}
-            submitLabel={t("thread.replySubmit")}
-            pending={reply.isPending}
-            error={reply.error}
-            onSubmit={(body) => reply.mutateAsync(body)}
-            actions={() => (
-              <Button variant="default" onClick={() => resolve.mutate(!thread.resolved)} disabled={resolve.isPending}>
-                {thread.resolved ? t("thread.unresolve") : t("thread.resolve")}
-              </Button>
-            )}
-          />
-          {(resolve.isError || react.isError) && <ErrorMessage error={resolve.error ?? react.error} />}
-        </div>
-      )}
+      {/* Keep replies mounted so a fragment can reveal a collapsed thread. */}
+      <div className="thread-body">
+        {thread.comments.map((c) => (
+          <CommentView key={c.id} comment={c} url={`${href.pull(repo, number)}#${encodeURIComponent(c.id)}`} kind={kindOf(c.author)} onReact={(reaction, on) => react.mutate({ id: c.id, reaction, on })} />
+        ))}
+        <ComposeForm
+          label={t("thread.reply")}
+          submitLabel={t("thread.replySubmit")}
+          pending={reply.isPending}
+          error={reply.error}
+          onSubmit={(body) => reply.mutateAsync(body)}
+          actions={() => (
+            <Button variant="default" onClick={() => resolve.mutate(!thread.resolved)} disabled={resolve.isPending}>
+              {thread.resolved ? t("thread.unresolve") : t("thread.resolve")}
+            </Button>
+          )}
+        />
+        {(resolve.isError || react.isError) && <ErrorMessage error={resolve.error ?? react.error} />}
+      </div>
     </details>
   );
 }
@@ -172,12 +174,13 @@ export function Conversation({
         {activityError ? <ErrorMessage error={activityError} /> : !activity && <Loading />}
         {entries.map((e) =>
           "comment" in e ? (
-            <CommentView key={e.comment.id} comment={e.comment} kind={kindOf(e.comment.author)} onReact={(reaction, on) => react.mutate({ id: e.comment.id, reaction, on })} />
+            <CommentView key={e.comment.id} comment={e.comment} url={`${href.pull(repo, number)}#${encodeURIComponent(e.comment.id)}`} kind={kindOf(e.comment.author)} onReact={(reaction, on) => react.mutate({ id: e.comment.id, reaction, on })} />
           ) : (
-            <ReviewView repo={repo} key={e.review.id} review={e.review} headSha={pull.head_sha} kind={kindOf(e.review.author)} onReact={(reaction, on) => react.mutate({ id: e.review.id, reaction, on })} />
+            <ReviewView repo={repo} number={number} key={e.review.id} review={e.review} headSha={pull.head_sha} kind={kindOf(e.review.author)} onReact={(reaction, on) => react.mutate({ id: e.review.id, reaction, on })} />
           ),
         )}
-        {(threads ?? []).map((th) => (
+        {/* A thread target must not scroll before earlier activity has finished loading. */}
+        {Boolean(activity || activityError) && (threads ?? []).map((th) => (
           <ThreadView key={th.id} repo={repo} number={number} thread={th} kindOf={kindOf} onOpenFile={onOpenFile} />
         ))}
         {react.isError && <ErrorMessage error={react.error} />}

@@ -10,6 +10,7 @@ import { Markdown } from "../../components/Markdown";
 import { useT } from "../../i18n";
 import { useSession } from "../../query/hooks";
 import { keys } from "../../query/keys";
+import { href } from "../../router/routes";
 
 export function TicketComment({ repo, ticketKey, comment, kind, onReact }: {
   repo: string;
@@ -35,7 +36,7 @@ export function TicketComment({ repo, ticketKey, comment, kind, onReact }: {
     },
   });
   return (
-    <CommentView comment={comment} kind={kind} onReact={onReact} actions={allowed && !editing && (
+    <CommentView comment={comment} url={`${href.ticket(repo, ticketKey)}#${encodeURIComponent(comment.id)}`} kind={kind} onReact={onReact} actions={allowed && !editing && (
       <Group gap={4} ml="auto">
         <ActionIcon variant="subtle" color="gray" aria-label={t("comment.edit")} disabled={change.isPending} onClick={() => { change.reset(); setEditing(true); }}>
           <Pencil size={16} />
