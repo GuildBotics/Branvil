@@ -149,6 +149,8 @@ export interface Ticket {
   author: string;
   assignee: Assignee | null;
   labels: string[];
+  /** A person works on it interactively: members leave it to them. */
+  interactive: boolean;
   /** The issue it stands for on its repository's upstream host. */
   upstream_issue: string | null;
   /** The lane on its workspace's board (every ticket is on it). */

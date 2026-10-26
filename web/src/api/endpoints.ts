@@ -122,6 +122,7 @@ export interface TicketPatch {
   body?: string;
   add_labels?: string[];
   remove_labels?: string[];
+  interactive?: boolean;
   state?: "open" | "closed";
   state_reason?: "completed" | "not_planned" | null;
   upstream_issue?: string | null;

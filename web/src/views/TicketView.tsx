@@ -1,4 +1,4 @@
-import { ActionIcon, Anchor, Button, Card, Chip, Group, Menu, Select, Stack, Text, TextInput } from "@mantine/core";
+import { ActionIcon, Anchor, Button, Card, Chip, Group, Menu, Select, Stack, Switch, Text, TextInput } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Pencil } from "lucide-react";
 import { useState } from "react";
@@ -179,6 +179,13 @@ export function TicketView({ repo, ticketKey, drawer }: { repo: string; ticketKe
                   </Group>
                 )}
               </Stack>
+              <Switch
+                label={t("ticket.interactive")}
+                description={t("ticket.interactiveHelp")}
+                checked={tk.interactive}
+                disabled={update.isPending}
+                onChange={(e) => update.mutate({ interactive: e.currentTarget.checked })}
+              />
               {repoQuery.data?.upstream && (
                 <UpstreamIssueField
                   host={repoQuery.data.upstream.host}

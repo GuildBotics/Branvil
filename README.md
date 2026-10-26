@@ -157,6 +157,10 @@ on a pull request's page the requests are changed one by one.
 A ticket has at most one assignee: the agent that works on it. GuildBotics'
 provider takes a ticket as an agent's work when that agent is its assignee, so
 assigning another agent replaces the assignee instead of adding a second one.
+The Interactive switch on a ticket's page marks it as worked on by the owner
+with an agent at hand, and the board badges its card. GuildBotics' provider
+then never takes up the ticket, nor the agent's own pull requests that link
+it; reviewing those pull requests goes on as usual.
 
 ## Git
 

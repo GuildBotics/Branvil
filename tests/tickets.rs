@@ -1344,3 +1344,94 @@ async fn a_merge_closes_a_parent_only_with_its_children() {
     );
     assert_eq!(s.ok(&path_of(&child), &w.aiko).await["state"], "closed");
 }
+
+/// Whether ticket 1 is interactive, as its read, the board's cards, and ken's
+/// mentions show it.
+async fn interactive_as_read(w: &World) -> Vec<Value> {
+    let s = &w.server;
+    vec![
+        s.ok(&format!("{}/1", tickets_path()), &w.aiko).await["interactive"].clone(),
+        s.ok(&format!("/workspaces/{WS}/board/cards"), &w.aiko)
+            .await["items"][0]["interactive"]
+            .clone(),
+        s.ok(&format!("/workspaces/{WS}/tickets?mentions=me"), &w.ken)
+            .await["items"][0]["interactive"]
+            .clone(),
+    ]
+}
+
+#[tokio::test]
+async fn a_ticket_is_interactive_only_while_a_member_says_so() {
+    let w = World::new().await;
+    let s = &w.server;
+    let created = w.ticket("Pair on it").await;
+    assert_eq!(created["interactive"], false);
+    let one = format!("{}/1", tickets_path());
+    s.patch(&one, &w.aiko, json!({"body": "@ken"})).await;
+    assert_eq!(interactive_as_read(&w).await, vec![json!(false); 3]);
+    for on in [true, false] {
+        let revision = s.ok(&one, &w.aiko).await["revision"].as_u64().unwrap();
+        let (st, v) = s.patch(&one, &w.ken, json!({"interactive": on})).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["ticket"]["interactive"], on);
+        assert_eq!(v["ticket"]["revision"], revision + 1);
+        assert_eq!(interactive_as_read(&w).await, vec![json!(on); 3]);
+    }
+    // Setting it as it is changes nothing.
+    let revision = s.ok(&one, &w.aiko).await["revision"].clone();
+    let (_, v) = s.patch(&one, &w.ken, json!({"interactive": false})).await;
+    assert_eq!(v["ticket"]["revision"], revision);
+    let (st, _) = s.patch(&one, &w.ken, json!({"interactive": "yes"})).await;
+    assert_eq!(st, 400);
+}
+
+#[tokio::test]
+async fn upgrade_leaves_every_ticket_not_interactive() {
+    let mut w = World::new().await;
+    w.ticket("First").await;
+    w.ticket("Second").await;
+    w.server.stop();
+    let db = w.server.data.join("branvil.redb");
+    as_schema_21(&db);
+    let old = tables(&db);
+    for (command, expected, says) in [
+        ("upgrade", 3, "2 ticket(s) upgraded as not interactive"),
+        ("check", 0, "indexes: ok"),
+    ] {
+        let out = std::process::Command::new(BIN)
+            .args(["admin", command, "--data-dir"])
+            .arg(&w.server.data)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.status.code(), Some(expected), "{text}");
+        assert!(text.contains(says), "{text}");
+    }
+    let tickets = records(&db, "tickets");
+    assert_eq!(tickets.len(), 2);
+    assert!(tickets.iter().all(|t| t["interactive"] == false));
+    let copy = std::fs::read_dir(&w.server.data)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("branvil-schema-21-")
+        })
+        .unwrap();
+    assert_eq!(tables(&copy), old);
+    w.restart(&[]);
+    let one = format!("{}/1", tickets_path());
+    assert_eq!(w.server.ok(&one, &w.aiko).await["interactive"], false);
+    let (st, v) = w
+        .server
+        .patch(&one, &w.ken, json!({"interactive": true}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["ticket"]["interactive"], true);
+}

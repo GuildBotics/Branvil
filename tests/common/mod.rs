@@ -571,13 +571,13 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Recreates the immediately preceding schema in a stopped database.
-pub fn as_schema_20(db: &Path) {
-    edit_records(db, "landing", |record| {
-        record["published"] = json!(false);
+pub fn as_schema_21(db: &Path) {
+    edit_records(db, "tickets", |record| {
+        record.as_object_mut().unwrap().remove("interactive");
     });
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(20);
+            *v = json!(21);
         }
     });
 }
