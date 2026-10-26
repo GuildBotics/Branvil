@@ -76,12 +76,12 @@ fn first(
     head: &str,
 ) -> LandingFirst {
     let x = published(repo, p);
-    let detail = x.and_then(|x| x.error.clone()).or_else(|| e.error.clone());
+    let detail = x.and_then(|x| x.error.clone());
     let (next, next_detail) = if e.state != "passed" {
         ("gate", None)
     } else if repo.upstream.is_none() {
         if repo.auto_land && e.error.is_some() {
-            ("owner_fix_auto", detail)
+            ("owner_fix_auto", e.error.clone())
         } else {
             (
                 if repo.auto_land {
@@ -123,7 +123,7 @@ fn first(
     } else if x.is_some() {
         ("publishing", detail)
     } else if repo.auto_land && e.error.is_some() {
-        ("owner_fix_auto", detail)
+        ("owner_fix_auto", e.error.clone())
     } else if repo.auto_land && p.upstream.is_none() {
         ("publishing", detail)
     } else {
@@ -1146,5 +1146,103 @@ mod tests {
         e.resume_publish = false;
         p.upstream.as_mut().unwrap().repository = "previous/upstream".into();
         assert_eq!(next(&repo, &p, &e, &following), "owner_publish");
+    }
+
+    #[test]
+    fn next_details_belong_to_the_actor_that_can_still_make_progress() {
+        let (mut repo, mut p, mut e) = fixture();
+        let mut following = Following::default();
+        e.error = Some("no_account: an earlier automatic attempt failed".into());
+        let auto_failure = e.error.clone();
+        for upstream in [false, true] {
+            repo.upstream = upstream.then(|| Upstream {
+                provider: "test-host".into(),
+                repository: "remote/demo".into(),
+                reader: Reader {
+                    member: "reader".into(),
+                    chosen: false,
+                },
+            });
+            repo.auto_land = true;
+            let f = first(&repo, &p, &e, &following, "head");
+            assert_eq!(f.next, "owner_fix_auto");
+            assert_eq!(f.next_detail, auto_failure);
+            repo.auto_land = false;
+            let f = first(&repo, &p, &e, &following, "head");
+            assert_eq!(
+                f.next,
+                if upstream {
+                    "owner_publish"
+                } else {
+                    "owner_merge"
+                }
+            );
+            assert_eq!(f.next_detail, None);
+        }
+
+        for auto in [false, true] {
+            repo.auto_land = auto;
+            // Every publication path has taken ownership away from autoland,
+            // including records for a previous upstream and manual resends.
+            for (state, numbered, current_head, current_upstream, stopped, resume, expected) in [
+                ("open", false, true, true, false, false, "publishing"),
+                ("open", true, false, true, false, false, "publishing"),
+                ("open", true, true, true, false, false, "owner_merge_host"),
+                ("closed", true, true, true, false, false, "host_closed"),
+                ("merged", true, true, true, false, false, "following"),
+                ("open", true, true, false, false, false, "owner_publish"),
+                ("open", true, true, true, true, false, "owner_publish"),
+                ("open", true, true, true, false, true, "owner_publish"),
+            ] {
+                let mut x = publication();
+                x.state = state.into();
+                x.number = numbered.then_some(2);
+                x.pushed = Some(
+                    if current_head {
+                        "head"
+                    } else {
+                        "previous-head"
+                    }
+                    .into(),
+                );
+                if !current_upstream {
+                    x.repository = "previous/upstream".into();
+                }
+                x.stopped = stopped.then(|| "host sending stopped".into());
+                p.upstream = Some(x);
+                e.resume_publish = resume;
+                for host_error in [None, Some("current host error".to_string())] {
+                    p.upstream.as_mut().unwrap().error = host_error.clone();
+                    let f = first(&repo, &p, &e, &following, "head");
+                    assert_eq!(f.next, expected);
+                    let detail = if !current_upstream || state == "merged" {
+                        None
+                    } else if stopped {
+                        Some("host sending stopped".into())
+                    } else {
+                        host_error
+                    };
+                    assert_eq!(f.next_detail, detail, "{auto} {expected}");
+                }
+            }
+        }
+        e.resume_publish = false;
+        p.upstream = Some(publication());
+        p.upstream.as_mut().unwrap().checks = vec![HostCheck {
+            id: "host-1".into(),
+            name: "host/test".into(),
+            status: "queued".into(),
+            conclusion: None,
+            url: None,
+            summary: None,
+        }];
+        let f = first(&repo, &p, &e, &following, "head");
+        assert_eq!(f.next, "host_checks");
+        assert_eq!(f.next_detail, None);
+        p.upstream.as_mut().unwrap().state = "merged".into();
+        following.stopped = Some("following stopped".into());
+        let f = first(&repo, &p, &e, &following, "head");
+        assert_eq!(f.next, "owner_fix_following");
+        assert_eq!(f.next_detail, following.stopped);
     }
 }

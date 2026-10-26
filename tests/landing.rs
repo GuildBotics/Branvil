@@ -689,6 +689,7 @@ async fn queue_api_exposes_titles_and_migrates_every_eligibility_reason() {
     edit_records(&db, "landing", |e| {
         let n = e["number"].as_u64().unwrap() as usize;
         e["state"] = json!("left");
+        e["error"] = json!("old copied upstream error");
         e["reason"] = json!({"code":"ineligible","message":reasons[n-1].0,"files":[],"jobs":[]});
     });
     for (command, code) in [("upgrade", 3), ("check", 0)] {
@@ -708,6 +709,7 @@ async fn queue_api_exposes_titles_and_migrates_every_eligibility_reason() {
     assert_eq!(entries.len(), 4);
     for e in &entries {
         assert!(e.get("published").is_none());
+        assert!(e["error"].is_null());
         assert_eq!(
             e["reason"]["code"],
             reasons[e["number"].as_u64().unwrap() as usize - 1].1

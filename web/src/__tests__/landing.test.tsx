@@ -1,11 +1,14 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { MantineProvider } from "@mantine/core";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Landing, LandingNext, Repository } from "../api/types";
-import { dictionaries } from "../i18n";
+import { dictionaries, I18nProvider } from "../i18n";
 import { applyChange } from "../query/events";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { BASE, HEAD, landing, pull } from "./fixtures";
+import { theme } from "../theme";
+import { LandingBadge, LandingReason } from "../views/pull/LandingStatus";
 
 const P = "/api/v1/repos/acme/demo/pulls/3";
 const REPO: Repository = {
@@ -129,17 +132,38 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
     expect(within(gate).getByText("Title 3")).toBeInTheDocument();
     expect(within(gate).queryByText("Title 2")).not.toBeInTheDocument();
   });
-  it("labels and updates the elapsed wait", async () => {
+  it("keeps the recorded clock and its label when only the next action changes", async () => {
     vi.useFakeTimers({toFake:["Date","setInterval","clearInterval"]});
     vi.setSystemTime(new Date("2026-10-25T10:01:00Z"));
-    const l=entry("owner_merge_host",{first:{...entry("owner_merge_host").first!,state_at:"2026-10-25T10:00:00Z"}});
-    fakeApi(routes(l));
-    renderApp("/acme/demo",lang);
+    let l=entry("owner_merge_host",{first:{...entry("owner_merge_host").first!,state_at:"2026-10-25T10:00:00Z"}});
+    fakeApi(routes(l, {"GET /api/v1/repos/acme/demo/landing": () => json(200, {items: [l]})}));
+    const {client} = renderApp("/acme/demo",lang);
     const queue=await screen.findByRole("region",{name:words["landing.queue"]});
-    expect(await within(queue).findByText(words["landing.hostElapsed"].replace("{host}","GitHub"),{exact:false})).toBeInTheDocument();
+    const recorded = lang === "ja" ? "検問・公開状態の記録から" : "Since the recorded gate/publishing update:";
+    expect(await within(queue).findByText(recorded, {exact:false})).toBeInTheDocument();
     expect(within(queue).getByText(lang==="ja"?"1分0秒":"1m 0s")).toBeInTheDocument();
     act(()=>vi.advanceTimersByTime(2000));
-    expect(within(queue).getByText(lang==="ja"?"1分2秒":"1m 2s")).toBeInTheDocument();
+    for (const next of NEXT) {
+      l = {...l, first: {...l.first!, next}};
+      act(() => applyChange({kind:"pull", path:"acme/demo", id:"3"}, client));
+      await within(queue).findByText(label(next));
+      expect(within(queue).getByText(recorded, {exact:false})).toBeInTheDocument();
+      expect(within(queue).getByText(lang==="ja"?"1分2秒":"1m 2s")).toBeInTheDocument();
+    }
+  });
+  it.each([
+    ["conflict", "warning"], ["gate_failed", "warning"], ["host_failed", "warning"],
+    ["publish_stopped", "warning"], ["already_in_base", "warning"], ["empty_head", "warning"],
+    ["publish_requirements", "warning"], ["head_checks", "warning"], ["approvals", "warning"],
+    ["head_moved", "neutral"], ["base_moved", "neutral"], ["closed", "neutral"],
+    ["draft", "neutral"], ["merged", "success"],
+  ] as const)("uses the departure reason for both the badge and detail tone (%s)", (code, tone) => {
+    const l = landing({state:"left", position:null, first:null, reason:{code,message:"Service English",files:[],jobs:[]}});
+    render(<MantineProvider theme={theme} env="test"><I18nProvider initial={lang}><LandingBadge landing={l} /><LandingReason landing={l} /></I18nProvider></MantineProvider>);
+    const badge = screen.getByText(words["landing.left"]);
+    expect(badge.closest(".mantine-Badge-root")).toHaveStyle(`--badge-color: var(--mantine-color-${tone}-light-color)`);
+    const reason = screen.getByText(words[`landing.reason.${code}`]);
+    expect(reason).toHaveStyle(tone === "neutral" ? "color: var(--mantine-color-dimmed)" : `color: var(--color-${tone}-text)`);
   });
   it("uses Branvil's icon for service comments",async()=>{
     fakeApi(routes(null,{[`GET ${P}/activity`]:json(200,{comments:[{id:"gate_failure",author:"branvil",body:"Gate failed",created_at:"2026-10-25T10:00:00Z",reactions:[],meta:null,url:""}],reviews:[],threads:[]})}));

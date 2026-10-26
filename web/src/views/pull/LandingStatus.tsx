@@ -1,6 +1,6 @@
 import { Anchor, Group, Stack, Text } from "@mantine/core";
 import type { Landing, LandingFirst, PullRequest, Repository } from "../../api/types";
-import { ErrorMessage, Loading, Sha, StateBadge } from "../../components/common";
+import { ErrorMessage, Loading, Sha, StateBadge, type Tone } from "../../components/common";
 import { useT, type MessageKey } from "../../i18n";
 import { useChecks, useLanding } from "../../query/hooks";
 import { Link } from "../../router/Router";
@@ -8,12 +8,14 @@ import { href } from "../../router/routes";
 import { RunTime } from "./Checks";
 
 const humanTurn = (first: LandingFirst) => first.next.startsWith("owner_") || first.next === "host_closed";
+const moved = (code: string) => ["head_moved", "base_moved"].includes(code);
+const reasonTone = (code?: string): Tone => code === "merged" ? "success" : !code || moved(code) || ["closed", "draft"].includes(code) ? "neutral" : "warning";
 
 export function LandingBadge({ landing, host = "" }: { landing: Landing; host?: string }) {
   const t = useT();
   const first = landing.position === 1 ? landing.first : null;
   return (
-    <StateBadge tone={landing.state === "left" ? "neutral" : first && humanTurn(first) ? "warning" : "neutral"}>
+    <StateBadge tone={landing.state === "left" ? reasonTone(landing.reason?.code) : first && humanTurn(first) ? "warning" : "neutral"}>
       {first ? t(`landing.badge.${first.next}`, { host, base: landing.base }) : landing.state === "waiting" ? t("landing.position", { position: landing.position ?? "—" }) : t(`landing.${landing.state}`)}
     </StateBadge>
   );
@@ -33,7 +35,7 @@ export function LandingLeader({ repo, first, host, base }: { repo: string; first
         <Anchor href={first.host_url} target="_blank" rel="noopener noreferrer" size="sm">{t("landing.action")}</Anchor>
       ) : <Link to={href.pull(repo, first.number)}>{t("landing.action")}</Link>)}
       <Text size="xs" c="dimmed">
-        {first.next === "owner_merge_host" ? t("landing.hostElapsed", { host }) : t("landing.elapsed", { stage: t(`landing.stage.${first.next}`) })}{" "}
+        {t("landing.elapsed")}{" "}
         <RunTime startedAt={first.state_at} />
       </Text>
     </Stack>
@@ -45,12 +47,12 @@ export function LandingReason({ landing }: { landing: Landing }) {
   const t = useT();
   const reason = landing.reason;
   if (!reason) return null;
-  const moved = ["head_moved", "base_moved"].includes(reason.code);
+  const tone = reasonTone(reason.code);
   const key = REASONS.includes(reason.code as typeof REASONS[number]) ? `landing.reason.${reason.code}` as MessageKey : "landing.reason.unknown";
-  const recovery = reason.code === "gate_failed" ? "landing.retryGate" : reason.code === "host_failed" ? "landing.retryHost" : reason.code === "publish_stopped" ? "landing.publishAgain" : ["already_in_base", "empty_head"].includes(reason.code) ? "landing.closePull" : moved ? "landing.waitRejoin" : "landing.rejoin";
+  const recovery = reason.code === "gate_failed" ? "landing.retryGate" : reason.code === "host_failed" ? "landing.retryHost" : reason.code === "publish_stopped" ? "landing.publishAgain" : ["already_in_base", "empty_head"].includes(reason.code) ? "landing.closePull" : moved(reason.code) ? "landing.waitRejoin" : "landing.rejoin";
   return (
     <Stack gap={4} style={{ overflowWrap: "anywhere" }}>
-      <Text size="sm" c={reason.code === "merged" ? "var(--color-success-text)" : moved ? "dimmed" : "var(--color-warning-text)"}>{t(key)}</Text>
+      <Text size="sm" c={tone === "neutral" ? "dimmed" : `var(--color-${tone}-text)`}>{t(key)}</Text>
       {reason.code === "publish_stopped" && <Text size="sm">{reason.message}</Text>}
       {reason.jobs.length > 0 && <Text size="sm">{t("landing.failedJobs", { jobs: reason.jobs.join(", ") })}</Text>}
       {reason.files.length > 0 && <Text size="sm">{t("landing.conflicts", { files: reason.files.join(", ") })}</Text>}

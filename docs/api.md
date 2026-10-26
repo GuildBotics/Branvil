@@ -755,6 +755,11 @@ blocked next action or a temporary upstream error, or `null`. `error` persists
 the last automatic publish/merge failure across restarts. Repeated identical
 failures do not reset the clock or emit duplicate events. Head/base movement
 races are retried without storing a failure. Successful retries clear it.
+The stored automatic failure is used for `next_detail` only while the next
+action is `owner_fix_auto`. Once a manual action, the published host record,
+or following owns progress, only that actor's current details are shown.
+The 20 → 21 upgrade clears the old copied landing error; the original host
+error remains on the published record.
 `Landing.published` and `LandingFirst.published` no longer exist.
 
 | `first.next` | Next action |
@@ -773,8 +778,13 @@ races are retried without storing a failure. Successful retries clear it.
 
 Failed completed host checks cause departure with `host_failed`; `neutral` and
 `skipped` count as successful host conclusions.
-`queued_at` records admission, `state_at` records the latest state or publication-stage change,
+`queued_at` records admission, `state_at` records the latest state,
+publication-stage/error, or automatic-result change,
 and `sequence` orders admissions even when their timestamps match. These
+timestamps do not track the start of each `next` action: host checks, host
+closure/merge, and following changes do not reset `state_at`. It has no
+recorded event type, so clients label it as a recorded gate/publishing update,
+not a host publication, check start, or following start time. These
 updates do not change a pull request's `revision` or `updated_at`. Advancing
 base preserves active entries' admission times, sequences, and order.
 

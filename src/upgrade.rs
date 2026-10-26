@@ -1,4 +1,4 @@
-//! 20 → 21: remove the publication flag and split landing eligibility reasons.
+//! 20 → 21: remove copied publication state and split landing eligibility reasons.
 //! Only the preceding schema is supported.
 
 use crate::config::Layout;
@@ -21,6 +21,9 @@ pub fn upgrade(layout: &Layout) -> anyhow::Result<Option<Upgraded>> {
                 .as_object_mut()
                 .ok_or_else(|| anyhow::anyhow!("invalid landing entry"))?
                 .remove("published");
+            // This used to mirror Published.error. Automatic failures have
+            // their own lifetime now; the host's error stays on Published.
+            value["error"] = serde_json::Value::Null;
             if value["reason"]["code"] == "ineligible" {
                 value["reason"]["code"] = match value["reason"]["message"].as_str() {
                     Some("The head adds nothing to the base.") => "empty_head",
