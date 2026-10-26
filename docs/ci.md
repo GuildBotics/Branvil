@@ -426,9 +426,11 @@ the superseded one goes first. Entries of deleted or renamed repositories and
 jobs remain current because nothing supersedes them. They are evicted only
 after all superseded entries, when the limit still requires it.
 
-On the first save after deploying owner records, entries without a repository
-and job record are removed even below the limit. Each cached job must rebuild
-its cache once after deployment.
+On the first save after upgrading to a runner that records each entry's
+repository and job, entries without that record are removed even below the
+limit. Each cached job must rebuild its cache once after the upgrade.
+Entries with unreadable or invalid records are also removed on the next save,
+so a damaged record cannot stop eviction of other entries.
 
 ## The runner
 

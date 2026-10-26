@@ -406,15 +406,14 @@ fn evict(cache_root: &Path, max_bytes: u64, saved_entry: &Path) -> io::Result<()
         if e.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
-        let owner: CacheOwner = match fs::read(path.join(OWNER)) {
-            Ok(data) => serde_json::from_slice(&data).map_err(io::Error::other)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                // Entries from before owner records cannot be grouped. Drop
-                // them on the first save, even when the cache fits the budget.
-                fs::remove_dir_all(&path)?;
-                continue;
-            }
-            Err(e) => return Err(e),
+        let Some(owner) = fs::read(path.join(OWNER))
+            .ok()
+            .and_then(|data| serde_json::from_slice::<CacheOwner>(&data).ok())
+        else {
+            // Missing, unreadable, or invalid records cannot be grouped.
+            // Remove the entry even below budget so it cannot stall eviction.
+            fs::remove_dir_all(&path)?;
+            continue;
         };
         if let Ok(saved) = fs::metadata(path.join(SAVED)).and_then(|m| m.modified()) {
             // saved_at is recorded before the write lock: the save that just
@@ -841,25 +840,66 @@ mod tests {
     }
 
     #[test]
-    fn cache_first_save_removes_entries_without_owner_records_even_below_budget() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("cache");
-        let legacy = root.join("legacy");
-        fs::create_dir_all(legacy.join("paths")).unwrap();
-        fs::write(legacy.join("paths/file"), b"old").unwrap();
-        mark_saved(&legacy, SystemTime::now());
-        let work = dir.path().join("work");
-        fs::create_dir(&work).unwrap();
-        let def = CacheDef {
-            paths: vec![],
-            key_files: vec![],
-        };
-        let store = Cache::new(root.clone());
-        store
-            .save("new", &owner("r", "j"), &def, &work, u64::MAX)
-            .unwrap();
-        assert!(!legacy.exists());
-        assert!(root.join("new").exists());
+    fn cache_save_removes_ungroupable_entries_and_continues_enforcing_the_budget() {
+        for bad_owner in [
+            "missing",
+            "empty",
+            "malformed",
+            "missing-job",
+            "wrong-type",
+            "directory",
+        ] {
+            for budget in [u64::MAX, 0] {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path().join("cache");
+                let invalid = root.join("invalid");
+                fs::create_dir_all(invalid.join("paths")).unwrap();
+                fs::write(invalid.join("paths/file"), b"old").unwrap();
+                mark_saved(&invalid, SystemTime::now());
+                match bad_owner {
+                    "missing" => {}
+                    "directory" => fs::create_dir(invalid.join(OWNER)).unwrap(),
+                    _ => fs::write(
+                        invalid.join(OWNER),
+                        match bad_owner {
+                            "empty" => "",
+                            "malformed" => "{",
+                            "missing-job" => r#"{"repo":"r"}"#,
+                            "wrong-type" => r#"{"repo":"r","job":1}"#,
+                            _ => unreachable!(),
+                        },
+                    )
+                    .unwrap(),
+                }
+                let work = dir.path().join("work");
+                fs::create_dir_all(work.join("target")).unwrap();
+                fs::write(work.join("target/object"), b"object").unwrap();
+                let def = CacheDef {
+                    paths: vec!["target".into()],
+                    key_files: vec![],
+                };
+                let store = Cache::new(root.clone());
+                // The invalid entry must not poison this or a later save.
+                for key in ["new", "next"] {
+                    assert_eq!(
+                        store
+                            .save(key, &owner("r", "j"), &def, &work, budget)
+                            .unwrap(),
+                        6,
+                        "owner: {bad_owner}, budget: {budget}"
+                    );
+                    assert!(!invalid.exists(), "owner: {bad_owner}, budget: {budget}");
+                    let restored = dir.path().join(format!("restore-{key}"));
+                    assert_eq!(
+                        store.restore(key, &def, &restored).unwrap(),
+                        (budget != 0).then_some(6)
+                    );
+                    if budget != 0 {
+                        assert_eq!(fs::read(restored.join("target/object")).unwrap(), b"object");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
