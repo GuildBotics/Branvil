@@ -2,7 +2,7 @@
 //! or publishes their passed leaders. Each automatic gate pass is told to
 //! the owner's webhook, since people merge upstream pull requests there.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -32,8 +32,6 @@ pub struct Autoland {
     client: reqwest::Client,
     /// Why the last send to the webhook failed (the next sweep tries again).
     problem: Mutex<Option<String>>,
-    /// `<repo> !<n>` → why landing it last failed unexpectedly.
-    failures: Mutex<HashMap<String, String>>,
 }
 
 impl Default for Autoland {
@@ -41,7 +39,6 @@ impl Default for Autoland {
         Self {
             client: crate::webhook::client(),
             problem: Mutex::new(None),
-            failures: Mutex::default(),
         }
     }
 }
@@ -174,6 +171,8 @@ async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<
             expected_head: tips.get(&p.head).cloned().unwrap_or_default(),
             expected_base: tips.get(&p.base).cloned().unwrap_or_default(),
         };
+        let attempted_head = input.expected_head.clone();
+        let attempted_base = input.expected_base.clone();
         let (done, landed) = match repo.upstream {
             None => (
                 "merged",
@@ -185,24 +184,23 @@ async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<
             ),
         };
         let what = format!("{} !{}", repo.path, p.number);
-        match landed {
-            Ok(_) => tracing::info!("autoland: {what} {done}"),
-            // Not yet: the next change or tick tries again.
-            Err(e)
-                if ["not_mergeable", "head_moved", "base_moved", "no_account"]
-                    .contains(&e.code) =>
-            {
-                tracing::debug!("autoland: {what}: {e}")
+        let failure = match landed {
+            Ok(_) => {
+                tracing::info!("autoland: {what} {done}");
+                None
             }
-            Err(e) => {
-                let mut failures = app.autoland.failures.lock().unwrap();
-                if failures.insert(what.clone(), e.message.clone()) != Some(e.message.clone()) {
-                    tracing::warn!("autoland: {what}: {e}");
-                }
-                continue;
-            }
-        }
-        app.autoland.failures.lock().unwrap().remove(&what);
+            Err(e) if ["head_moved", "base_moved"].contains(&e.code) => continue,
+            Err(e) => Some(format!("{}: {}", e.code, e.message)),
+        };
+        crate::landing::record_auto_result(
+            app,
+            repo,
+            p.number,
+            &attempted_head,
+            &attempted_base,
+            failure,
+        )
+        .await?;
     }
     // Publishing may have stopped. Reconcile it before offering a merge.
     crate::landing::sweep_repo(app, repo).await?;

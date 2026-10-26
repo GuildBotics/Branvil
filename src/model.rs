@@ -362,8 +362,7 @@ pub struct Landing {
     pub notify: bool,
     /// Owner explicitly resumed a stopped publication through its next gate.
     pub resume_publish: bool,
-    /// Last observed publication stage; state_at also dates changes here.
-    pub published: bool,
+    /// Last automatic publish/merge failure, persisted across restarts.
     pub error: Option<String>,
 }
 

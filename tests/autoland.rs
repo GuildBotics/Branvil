@@ -642,7 +642,7 @@ async fn a_changed_upstream_never_notifies_the_old_publication_or_republishes_au
     swept(&w, &other).await;
     let retained = pull(&w, n).await;
     assert_eq!(retained["landing"]["state"], "passed");
-    assert_eq!(retained["landing"]["published"], false);
+    assert_eq!(retained["landing"]["first"]["next"], "owner_publish");
     assert_eq!(retained["upstream"]["repository"], GH);
     assert!(hook.received().is_empty(), "{:?}", hook.received());
     assert!(retained["landing"]["notified_at"].is_null());
@@ -734,4 +734,49 @@ async fn a_webhook_that_hangs_holds_landing_in_another_repository_up_once_at_mos
             .all(|(_, b)| b["text"].as_str().unwrap().starts_with("PR one ")),
         "{received:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_automatic_missing_credential_is_persisted_and_clears_after_repair() {
+    let (mut w, _gh) = followed().await;
+    with_aiko_account(&w).await;
+    w.push_change("feature", "f.txt", "feature");
+    let n = number(&w.open_pull("feature", json!([])).await);
+    eventually("gate passed", || async {
+        pull(&w, n).await["landing"]["state"] == "passed"
+    })
+    .await;
+    // Model restoring a backup: account metadata survives, credentials do not.
+    w.server.stop();
+    std::fs::remove_file(w.server.data.join("secrets/accounts/aiko.github.json")).unwrap();
+    auto_land_on(&w, REPO);
+    w.restart(&[]);
+    eventually("stored automatic failure", || async {
+        pull(&w, n).await["landing"]["first"]["next"] == "owner_fix_auto"
+    })
+    .await;
+    let failed = pull(&w, n).await;
+    assert!(
+        failed["landing"]["first"]["next_detail"]
+            .as_str()
+            .unwrap()
+            .contains("no_account")
+    );
+    w.server.stop();
+    let entry = records(&w.server.data.join("branvil.redb"), "landing")
+        .into_iter()
+        .find(|e| e["number"] == n)
+        .unwrap();
+    assert_eq!(entry["error"], failed["landing"]["error"]);
+    w.restart(&[]);
+    assert_eq!(
+        pull(&w, n).await["landing"]["first"]["next"],
+        "owner_fix_auto"
+    );
+    with_aiko_account(&w).await;
+    eventually("repaired publication", || async {
+        pull(&w, n).await["landing"]["first"]["next"] == "owner_merge_host"
+    })
+    .await;
+    assert!(pull(&w, n).await["landing"]["error"].is_null());
 }

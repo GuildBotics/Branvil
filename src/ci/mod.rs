@@ -1206,7 +1206,6 @@ mod tests {
             notified_at: None,
             notify: false,
             resume_publish: false,
-            published: false,
             error: None,
         };
         let saved = entry.clone();

@@ -733,27 +733,63 @@ A pull request's `landing` has the same entry shape:
 
 ```json
 {
-  "repo": "<repository id>", "number": 3, "base": "main",
+  "repo": "<repository id>", "number": 3, "title": "Feature", "base": "main",
+  "pull_state": "open", "draft": false,
   "queued_at": "2026-10-25T09:00:00.000Z", "sequence": 7,
   "state": "gating", "state_at": "2026-10-25T09:02:00.000Z",
   "gate": "<40 hex>", "base_sha": "<40 hex>", "head_sha": "<40 hex>",
   "reason": null, "notify": false, "notified_at": null, "resume_publish": false,
-  "published": false, "error": null,
+  "error": null,
   "position": 1,
   "first": {"number": 3, "state": "gating",
-            "state_at": "2026-10-25T09:02:00.000Z", "published": false, "error": null}
+            "state_at": "2026-10-25T09:02:00.000Z", "error": null,
+            "next": "gate", "host_url": null, "next_detail": null}
 }
 ```
 
 Each repository/base branch has one queue, in admission order. The response
 places active entries before departed entries, ordered by `sequence` within
 each group. `position` is one-based within the entry's base queue, or `null`
-after departure. `first` describes that base queue's first active pull request
-(or `null` if none). `published` distinguishes a host pull request waiting for
-merge from one awaiting publication; `error` is the temporary publication error,
-if any. Both are the landing task's last observation of the publication stage.
-`queued_at` records admission, `state_at` records the latest state or publication-stage change,
+after departure. `title`, `pull_state`, and `draft` reflect the current pull
+request, including departed entries. `first` describes that base queue's first
+active pull request; it is `null` on departed entries or when none exists.
+Only `first` has `next`, computed from the current upstream, current branch head,
+published host record, host checks, and following state. `host_url` is the
+current upstream's PR URL, or `null`. `next_detail` gives the reason for a
+blocked next action or a temporary upstream error, or `null`. `error` persists
+the last automatic publish/merge failure across restarts. Repeated identical
+failures do not reset the clock or emit duplicate events. Head/base movement
+races are retried without storing a failure. Successful retries clear it.
+The stored automatic failure is used for `next_detail` only while the next
+action is `owner_fix_auto`. Once a manual action, the published host record,
+or following owns progress, only that actor's current details are shown.
+The 20 → 21 upgrade clears the old copied landing error; the original host
+error remains on the published record.
+`Landing.published` and `LandingFirst.published` no longer exist.
+
+| `first.next` | Next action |
+|---|---|
+| `gate` | Wait for gate creation or required gate CI. |
+| `publishing` | Wait for Branvil to send the current head or create the host PR (including retries). |
+| `owner_publish` | Owner publishes/re-publishes from the PR page: automatic publishing is off, a previous upstream was used, sending was refused/stopped, or `resume_publish` is set. |
+| `host_checks` | Current head is on the host and at least one host check is not `completed`. |
+| `owner_merge_host` | Owner merges on the host; the current head is there and no check is pending. No checks read also means this value; required checks remain enforced by the host's branch protection. |
+| `following` | Host PR merged; wait for Branvil to bring that merge into the base. |
+| `owner_fix_following` | Owner restores following; `next_detail` holds its stopped/error reason. |
+| `host_closed` | Host PR closed without merging; owner decides whether to reopen it or close the Branvil PR. |
+| `owner_fix_auto` | Owner repairs an automatic publish/merge failure; `next_detail` includes the stored reason (including missing credentials or failed pushes). |
+| `auto_merge` | No upstream and automatic merging enabled; wait for Branvil. |
+| `owner_merge` | No upstream and automatic merging disabled; owner merges from the PR page. |
+
+Failed completed host checks cause departure with `host_failed`; `neutral` and
+`skipped` count as successful host conclusions.
+`queued_at` records admission, `state_at` records the latest state,
+publication-stage/error, or automatic-result change,
 and `sequence` orders admissions even when their timestamps match. These
+timestamps do not track the start of each `next` action: host checks, host
+closure/merge, and following changes do not reset `state_at`. It has no
+recorded event type, so clients label it as a recorded gate/publishing update,
+not a host publication, check start, or following start time. These
 updates do not change a pull request's `revision` or `updated_at`. Advancing
 base preserves active entries' admission times, sequences, and order.
 
@@ -764,7 +800,12 @@ base preserves active entries' admission times, sequences, and order.
 - `left`: removed from the queue. `reason` is
   `{"code","message","jobs":[...],"files":[...]}`. Reasons include `gate_failed`,
   `conflict`, `host_failed`, `publish_stopped`, `head_moved`, `base_moved`,
-  `closed`, `draft`, `ineligible`, `already_in_base`, and `merged`.
+  `closed`, `draft`, `empty_head` (head adds no changes), `publish_requirements`
+  (default base/author host account missing), `head_checks` (required head checks
+  not successful), `approvals` (not enough head approvals), `already_in_base`,
+  and `merged`. `ineligible` is no longer returned. Clients translate codes
+  rather than displaying `message`; `publish_stopped` may show its message as
+  additional detail.
 
 Admission requires an open, ready pull request whose head adds changes to
 base, whose required head checks passed, and whose head has enough approvals.

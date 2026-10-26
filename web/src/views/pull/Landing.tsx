@@ -28,11 +28,18 @@ function useMissingChecks(pull: PullRequest, requiredChecks: string[]): string[]
   return requiredChecks.filter((name) => !current?.checks.some((c) => c.name === name && c.status === "completed" && c.conclusion === "success"));
 }
 
-function RequiredChecks({ checks, missing }: { checks: string[]; missing: string[] }) {
+function RequiredChecks({ pull, checks, missing }: { pull: PullRequest; checks: string[]; missing: string[] }) {
+  const query = useChecks(pull.repository, pull.number, checks.length > 0);
+  const current = !query.isError && query.data?.head_sha === pull.head_sha ? query.data : undefined;
   const t = useT();
   return (
     <Stack gap={4}>
       <Text size="sm">{checks.length ? t("merge.requiredChecks", { checks: checks.join(", ") }) : t("merge.noRequiredChecks")}</Text>
+      {checks.map((name) => {
+        const check = current?.checks.find((c) => c.name === name);
+        const state = !current ? "checking" : !check ? "check.missing" : check.status !== "completed" ? "check.running" : check.conclusion === "success" ? "check.success" : "check.failure";
+        return <Text key={name} size="sm">{name} · {t(`landing.${state}`)}</Text>;
+      })}
       {missing.length > 0 && (
         <Text size="sm" c="var(--color-warning-text)">
           {t("merge.checksNotSucceeded", { checks: missing.join(", ") })}
@@ -58,13 +65,13 @@ function LandingStages({ pull, repo, missing }: { pull: PullRequest; repo: Repos
     <>
       <Stack gap={4} component="section" aria-label={t("landing.headChecks")}>
         <Text size="sm" fw={700}>{t("landing.headChecks")}</Text>
-        <RequiredChecks checks={repo.required_checks} missing={missing} />
+        <RequiredChecks pull={pull} checks={repo.required_checks} missing={missing} />
       </Stack>
       <Stack gap={4} component="section" aria-label={t("landing.approvals")}>
         <Text size="sm" fw={700}>{t("landing.approvals")}</Text>
         <Approvals pull={pull} required={repo.required_approvals} />
       </Stack>
-      <GateStage pull={pull} host={repo.upstream != null} />
+      <GateStage pull={pull} repository={repo} />
     </>
   );
 }

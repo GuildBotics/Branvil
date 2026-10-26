@@ -239,7 +239,7 @@ async fn query_deduplicates_pages_and_tracks_each_source_independently() {
 }
 
 #[tokio::test]
-async fn upgrade_resolves_old_bodies_and_comments_and_rebuilds_the_index() {
+async fn upgrade_preserves_resolved_mentions_and_their_index() {
     let mut w = World::new().await;
     w.ticket("Old body").await;
     w.ticket("Old comment").await;
@@ -253,7 +253,7 @@ async fn upgrade_resolves_old_bodies_and_comments_and_rebuilds_the_index() {
     let before = w.server.ok(&query(), &w.aiko).await;
     w.server.stop();
     let db = w.server.data.join("branvil.redb");
-    as_schema_19(&db);
+    as_schema_20(&db);
     let old = tables(&db);
     for (command, expected) in [("upgrade", 3), ("check", 0), ("upgrade", 0)] {
         let out = std::process::Command::new(BIN)
@@ -284,7 +284,7 @@ async fn upgrade_resolves_old_bodies_and_comments_and_rebuilds_the_index() {
             p.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("branvil-schema-19-")
+                .starts_with("branvil-schema-20-")
         })
         .unwrap();
     assert_eq!(tables(&copy), old);

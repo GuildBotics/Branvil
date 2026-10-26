@@ -14,7 +14,7 @@ const IMAGE: &str = "docker.io/library/alpine:3.22";
 const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
 #[tokio::test]
-async fn schema_19_upgrade_preserves_attempts_and_indexes_pending_failure_notices() {
+async fn schema_20_upgrade_preserves_attempts_and_indexes_pending_failure_notices() {
     let mut w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;
     let head = land(
@@ -32,7 +32,7 @@ async fn schema_19_upgrade_preserves_attempts_and_indexes_pending_failure_notice
     let db = data.join("branvil.redb");
     let attempts = records(&db, "ci_attempts");
     let pulls = records(&db, "pulls");
-    as_schema_19(&db);
+    as_schema_20(&db);
     let before = tables(&db);
     let admin = |what: &str| {
         let out = std::process::Command::new(BIN)
@@ -52,7 +52,7 @@ async fn schema_19_upgrade_preserves_attempts_and_indexes_pending_failure_notice
     assert!(admin("check").1.contains("branvil admin upgrade"));
     let (code, output) = admin("upgrade");
     assert_eq!(code, 3, "{output}");
-    assert!(output.contains("from schema version 19 to 20"), "{output}");
+    assert!(output.contains("from schema version 20 to 21"), "{output}");
     assert_eq!(records(&db, "ci_attempts"), attempts);
     assert_eq!(records(&db, "pulls"), pulls);
     let runs = records(&db, "ci_runs");
@@ -67,7 +67,7 @@ async fn schema_19_upgrade_preserves_attempts_and_indexes_pending_failure_notice
             p.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("branvil-schema-19-")
+                .starts_with("branvil-schema-20-")
         })
         .unwrap();
     assert_eq!(tables(&backup), before);
@@ -294,7 +294,7 @@ async fn cache_refresh_never_changes_main_checks_or_required_readiness() {
             .iter()
             .any(|a| a["cache_refresh"] == refresh_id)
     );
-    as_schema_19(&db);
+    as_schema_20(&db);
     for (command, expected) in [("upgrade", 3), ("check", 0)] {
         let out = std::process::Command::new(BIN)
             .args(["admin", command, "--data-dir"])

@@ -132,7 +132,7 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
                     <Group gap={4} role="cell" wrap="nowrap">
                       <StateBadge tone={s === "closed" ? "neutral" : "success"}>{t(`pull.state.${s}`)}</StateBadge>
                       {p.draft && <StateBadge tone="warning">{t("pull.draft")}</StateBadge>}
-                      {p.state === "open" && p.landing && <LandingBadge landing={p.landing} host={repoOf(p.repository)?.upstream != null} />}
+                      {p.state === "open" && p.landing && <LandingBadge landing={p.landing} host={repoOf(p.repository)?.upstream?.host} />}
                     </Group>
                     <span role="cell">{p.state === "open" && <CiCell pull={p} load={i < CI_BUDGET} />}</span>
                     <Group gap={6} role="cell" wrap="nowrap">

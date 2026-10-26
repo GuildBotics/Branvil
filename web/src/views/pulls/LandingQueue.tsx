@@ -5,48 +5,38 @@ import { useT } from "../../i18n";
 import { useLanding, useRepo } from "../../query/hooks";
 import { Link } from "../../router/Router";
 import { href } from "../../router/routes";
-import { LandingBadge, LandingLeader, LandingReason } from "../pull/LandingStatus";
+import { LandingReason, QueueLine } from "../pull/LandingStatus";
 
 export function LandingQueue({ repo }: { repo: string }) {
   const t = useT();
   const query = useLanding(repo);
   const repository = useRepo(repo);
-  const host = repository.data?.upstream != null;
-  const active = query.data?.items.filter((l) => l.state !== "left") ?? [];
-  const left = query.data?.items.filter((l) => l.state === "left") ?? [];
-  const bases = [...new Set(active.map((l) => l.base))];
+  const items = query.data?.items ?? [];
+  const active = items.filter((l) => l.state !== "left");
+  const left = items.filter((l) => l.state === "left" && l.pull_state === "open" && !l.draft && !["merged", "closed", "draft"].includes(l.reason?.code ?? ""));
+  const merged = items.filter((l) => l.state === "left" && l.reason?.code === "merged" && !l.draft);
+  const bases = [...new Set(items.map((l) => l.base))];
   const row = (l: Landing) => (
     <Stack key={l.number} gap={6} component="li">
-      <Group gap="sm">
-        <Link to={href.pull(repo, l.number)}>!{l.number}</Link>
-        <LandingBadge landing={l} host={host} />
-        <Text size="xs" c="dimmed">{t("landing.queuedAt")} <Time value={l.queued_at} /></Text>
-      </Group>
-      {l.position === 1 && l.first && <LandingLeader repo={repo} first={l.first} host={host} />}
-      {l.state === "left" && <LandingReason landing={l} />}
+      <Group gap="sm"><Link to={href.pull(repo, l.number)}>!{l.number} {l.title}</Link><Time value={l.state_at} /></Group>
+      <LandingReason landing={l} />
     </Stack>
   );
   return (
     <Card p="lg" component="section" aria-label={t("landing.queue")}>
       <Stack gap="md">
         <Title order={3}>{t("landing.queue")}</Title>
-        {query.isError ? <ErrorMessage error={query.error} /> : query.isPending ? <Loading /> : (
+        {query.isError || repository.isError ? <ErrorMessage error={query.error ?? repository.error} /> : query.isPending || !repository.data ? <Loading /> : (
           <>
             {active.length === 0 && <Text size="sm" c="dimmed">{t("landing.empty")}</Text>}
             {bases.map((base) => (
               <section key={base} aria-label={base}>
                 <Text size="sm" fw={700}>{base}</Text>
-                <Stack component="ol" gap="md" pl="md" my="xs">
-                  {active.filter((l) => l.base === base).sort((a, b) => (a.position ?? 0) - (b.position ?? 0)).map(row)}
-                </Stack>
+                <QueueLine repo={repo} entries={active.filter((l) => l.base === base)} repository={repository.data} />
+                {left.some((l) => l.base === base) && <section aria-label={t("landing.left")}><Text fw={600}>{t("landing.left")}</Text><Stack component="ul" gap="md" pl="md">{left.filter((l) => l.base === base).map(row)}</Stack></section>}
+                {merged.some((l) => l.base === base) && <section aria-label={t("landing.recent", { base })}><Text fw={600} c="var(--color-success-text)">{t("landing.recent", { base })}</Text><Stack component="ul" gap="sm" pl="md">{merged.filter((l) => l.base === base).sort((a, b) => b.state_at.localeCompare(a.state_at)).slice(0, 3).map(row)}</Stack></section>}
               </section>
             ))}
-            {left.length > 0 && (
-              <section aria-label={t("landing.left")}>
-                <Text size="sm" fw={700}>{t("landing.left")}</Text>
-                <Stack component="ul" gap="md" pl="md" my="xs">{left.map(row)}</Stack>
-              </section>
-            )}
           </>
         )}
       </Stack>

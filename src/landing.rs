@@ -52,53 +52,148 @@ pub struct LandingFirst {
     pub state: String,
     pub state_at: String,
     pub error: Option<String>,
-    pub published: bool,
+    pub next: String,
+    pub host_url: Option<String>,
+    pub next_detail: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
 pub struct LandingView {
     #[serde(flatten)]
     pub entry: Landing,
+    pub title: String,
+    pub pull_state: String,
+    pub draft: bool,
     pub position: Option<u64>,
     pub first: Option<LandingFirst>,
 }
 
-fn views(r: &impl Rd, repo: &Repo) -> AppResult<Vec<LandingView>> {
+fn first(
+    repo: &Repo,
+    p: &Pull,
+    e: &Landing,
+    following: &crate::upstream::Following,
+    head: &str,
+) -> LandingFirst {
+    let x = published(repo, p);
+    let detail = x.and_then(|x| x.error.clone());
+    let (next, next_detail) = if e.state != "passed" {
+        ("gate", None)
+    } else if repo.upstream.is_none() {
+        if repo.auto_land && e.error.is_some() {
+            ("owner_fix_auto", e.error.clone())
+        } else {
+            (
+                if repo.auto_land {
+                    "auto_merge"
+                } else {
+                    "owner_merge"
+                },
+                None,
+            )
+        }
+    } else if x.is_some_and(|x| x.state == "merged") {
+        match following
+            .stopped
+            .clone()
+            .or_else(|| following.error.clone())
+        {
+            Some(why) => ("owner_fix_following", Some(why)),
+            None => ("following", None),
+        }
+    } else if e.resume_publish
+        || p.upstream.is_some() && x.is_none()
+        || x.is_some_and(|x| x.stopped.is_some())
+    {
+        (
+            "owner_publish",
+            x.and_then(|x| x.stopped.clone()).or(detail),
+        )
+    } else if x.is_some_and(|x| x.state == "closed") {
+        ("host_closed", detail)
+    } else if let Some(x) = x.filter(|x| x.number.is_some() && x.pushed.as_deref() == Some(head)) {
+        (
+            if x.checks.iter().any(|c| c.status != "completed") {
+                "host_checks"
+            } else {
+                "owner_merge_host"
+            },
+            x.error.clone(),
+        )
+    } else if x.is_some() {
+        ("publishing", detail)
+    } else if repo.auto_land && e.error.is_some() {
+        ("owner_fix_auto", e.error.clone())
+    } else if repo.auto_land && p.upstream.is_none() {
+        ("publishing", detail)
+    } else {
+        ("owner_publish", detail)
+    };
+    LandingFirst {
+        number: e.number,
+        state: e.state.clone(),
+        state_at: e.state_at.clone(),
+        error: e.error.clone(),
+        next: next.into(),
+        host_url: x.and_then(|x| x.url.clone()),
+        next_detail,
+    }
+}
+
+fn views(
+    r: &impl Rd,
+    repo: &Repo,
+    following: &crate::upstream::Following,
+    tips: &pulls::Tips,
+) -> AppResult<Vec<LandingView>> {
     let entries = all(r, &repo.id)?;
     let mut queues = std::collections::BTreeMap::new();
     for entry in entries.iter().filter(|e| e.state != "left") {
-        queues.entry(&entry.base).or_insert_with(|| first(entry));
+        if !queues.contains_key(&entry.base) {
+            let p = pulls::load_pull(r, repo, entry.number)?;
+            queues.insert(
+                entry.base.clone(),
+                first(
+                    repo,
+                    &p,
+                    entry,
+                    following,
+                    tips.get(&p.head).map(String::as_str).unwrap_or_default(),
+                ),
+            );
+        }
     }
     let mut positions = std::collections::BTreeMap::new();
     entries
-        .iter()
+        .into_iter()
         .map(|entry| {
+            let p = pulls::load_pull(r, repo, entry.number)?;
             let position = (entry.state != "left").then(|| {
-                let next = positions.entry(&entry.base).or_insert(0);
+                let next = positions.entry(entry.base.clone()).or_insert(0);
                 *next += 1;
                 *next
             });
             Ok(LandingView {
-                entry: entry.clone(),
+                title: p.title,
+                pull_state: p.state,
+                draft: p.draft,
+                first: position.and_then(|_| queues.get(&entry.base).cloned()),
+                entry,
                 position,
-                first: queues.get(&entry.base).cloned(),
             })
         })
         .collect()
 }
 
-fn first(e: &Landing) -> LandingFirst {
-    LandingFirst {
-        number: e.number,
-        state: e.state.clone(),
-        state_at: e.state_at.clone(),
-        published: e.published,
-        error: e.error.clone(),
-    }
-}
-
-pub async fn view(app: &App, repo: &Repo, number: u64) -> AppResult<Option<LandingView>> {
+pub async fn view(
+    app: &App,
+    repo: &Repo,
+    number: u64,
+    tips: &pulls::Tips,
+) -> AppResult<Option<LandingView>> {
+    let following = app.upstream.following(&repo.id);
     let repo = repo.clone();
+    let tips = tips.clone();
     app.store
         .read(move |r| {
             let Some(entry) = current(r, &repo.id, number)? else {
@@ -112,10 +207,27 @@ pub async fn view(app: &App, repo: &Repo, number: u64) -> AppResult<Option<Landi
                 .iter()
                 .position(|e| e.number == number)
                 .map(|i| i as u64 + 1);
+            let first = match (position, queue.first()) {
+                (Some(_), Some(e)) => {
+                    let p = pulls::load_pull(r, &repo, e.number)?;
+                    Some(first(
+                        &repo,
+                        &p,
+                        e,
+                        &following,
+                        tips.get(&p.head).map(String::as_str).unwrap_or_default(),
+                    ))
+                }
+                _ => None,
+            };
+            let p = pulls::load_pull(r, &repo, number)?;
             Ok(Some(LandingView {
                 entry,
                 position,
-                first: queue.first().map(first),
+                first,
+                title: p.title,
+                pull_state: p.state,
+                draft: p.draft,
             }))
         })
         .await
@@ -127,7 +239,12 @@ async fn queue_get(
     Path(path): Path<String>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
     let repo = domain::repos::visible(&app, &c, &path).await?;
-    let items = app.store.read(move |r| views(r, &repo)).await?;
+    let following = app.upstream.following(&repo.id);
+    let tips = pulls::tips(&app, &repo).await?;
+    let items = app
+        .store
+        .read(move |r| views(r, &repo, &following, &tips))
+        .await?;
     Ok(axum::Json(serde_json::json!({"items":items})))
 }
 
@@ -177,7 +294,7 @@ async fn eligibility(
             .await?
     {
         return Ok(Some(reason(
-            "ineligible",
+            "empty_head",
             "The head adds nothing to the base.",
         )));
     }
@@ -195,7 +312,7 @@ async fn eligibility(
             .await?;
         if p.base != repo.default_branch || !account {
             return Ok(Some(reason(
-                "ineligible",
+                "publish_requirements",
                 "Publishing requires the default base and an author account on the host.",
             )));
         }
@@ -208,12 +325,12 @@ async fn eligibility(
             .any(|c| c.name == *name && c.succeeded())
     }) {
         return Ok(Some(reason(
-            "ineligible",
+            "head_checks",
             "Required head checks have not succeeded.",
         )));
     }
     if pulls::approvals(&pulls::read_review_states(app, p, head).await?) < repo.required_approvals {
-        return Ok(Some(reason("ineligible", "The head needs more approvals.")));
+        return Ok(Some(reason("approvals", "The head needs more approvals.")));
     }
     Ok(None)
 }
@@ -224,13 +341,6 @@ pub(crate) fn published<'a>(repo: &Repo, p: &'a Pull) -> Option<&'a Published> {
             .as_ref()
             .is_some_and(|up| up.same_place(&x.provider, &x.repository))
     })
-}
-
-fn publication(repo: &Repo, p: &Pull) -> (bool, Option<String>) {
-    let Some(x) = published(repo, p) else {
-        return (false, None);
-    };
-    (x.number.is_some() && x.stopped.is_none(), x.error.clone())
 }
 
 fn published_problem(repo: &Repo, p: &Pull, head: &str, resume: bool) -> Option<LandingReason> {
@@ -273,6 +383,32 @@ async fn save(app: &App, repo: &Repo, e: Landing, comment: Option<String>) -> Ap
         })
         .await?;
     app.events.publish("pull", &repo.path, number.to_string());
+    Ok(())
+}
+
+/// Persist automatic failures only for the gate that was actually attempted.
+/// Identical failures do not emit another event (nor reset the wait clock).
+pub async fn record_auto_result(
+    app: &App,
+    repo: &Repo,
+    number: u64,
+    head: &str,
+    base: &str,
+    error: Option<String>,
+) -> AppResult<()> {
+    let lock = app.repo_lock(&repo.id);
+    let _guard = lock.lock().await;
+    let id = repo.id.clone();
+    if let Some(mut e) = app.store.read(move |r| current(r, &id, number)).await?
+        && e.state == "passed"
+        && e.head_sha == head
+        && e.base_sha == base
+        && e.error != error
+    {
+        e.error = error;
+        e.state_at = util::now();
+        save(app, repo, e, None).await?;
+    }
     Ok(())
 }
 
@@ -426,7 +562,6 @@ pub async fn resume_publish(
                 notified_at: None,
                 notify: false,
                 resume_publish: false,
-                published: false,
                 error: None,
             }
         }
@@ -441,6 +576,16 @@ pub fn clear_resume_publish(w: &Wtx, repo: &str, number: u64) -> AppResult<()> {
         && e.resume_publish
     {
         e.resume_publish = false;
+        w.put(store::LANDING, &Pull::key(repo, number), &e)?;
+    }
+    Ok(())
+}
+
+pub fn publication_changed(w: &Wtx, repo: &str, number: u64) -> AppResult<()> {
+    if let Some(mut e) = current(w, repo, number)?
+        && e.state == "passed"
+    {
+        e.state_at = util::now();
         w.put(store::LANDING, &Pull::key(repo, number), &e)?;
     }
     Ok(())
@@ -509,16 +654,7 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
         );
         let id = repo.id.clone();
         let number = p.number;
-        let mut old = app.store.read(move |r| current(r, &id, number)).await?;
-        if let Some(e) = old.as_mut().filter(|e| e.state == "passed") {
-            let (published, error) = publication(repo, p);
-            if e.published != published || e.error != error {
-                e.published = published;
-                e.error = error;
-                e.state_at = util::now();
-                save(app, repo, e.clone(), None).await?;
-            }
-        }
+        let old = app.store.read(move |r| current(r, &id, number)).await?;
         // A host merge may already have advanced the base before the poller
         // records mark_merged. Keep the passed gate until that record arrives.
         if let Some(e) = &old
@@ -593,7 +729,6 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
                     e.state = "waiting".into();
                     e.notified_at = None;
                     e.notify = false;
-                    e.published = false;
                     e.error = None;
                     save(app, repo, e, None).await?;
                 }
@@ -683,7 +818,6 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
                 notified_at: None,
                 notify: false,
                 resume_publish: old.as_ref().is_some_and(|e| e.resume_publish),
-                published: false,
                 error: None,
             },
             None,
@@ -780,9 +914,6 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
                 e.state = "passed".into();
                 e.state_at = util::now();
                 e.notify = repo.auto_land && repo.upstream.is_some();
-                if let Some(p) = pulls.iter().find(|p| p.number == e.number) {
-                    (e.published, e.error) = publication(repo, p);
-                }
                 save(app, repo, e, None).await?;
             }
         } else if e.state == "passed" {
@@ -790,7 +921,6 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
             e.state_at = util::now();
             e.notify = false;
             e.notified_at = None;
-            e.published = false;
             e.error = None;
             save(app, repo, e, None).await?;
         }
@@ -888,4 +1018,231 @@ pub async fn checks(app: &App, repo: &Repo, number: u64) -> AppResult<Vec<Check>
         c.name = format!("gate/{}", c.name);
     }
     Ok(checks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{HostCheck, Reader, Upstream};
+    use crate::upstream::Following;
+    use serde_json::json;
+
+    fn fixture() -> (Repo, Pull, Landing) {
+        let repo = serde_json::from_value(json!({
+            "id":"r", "path":"acme/demo", "workspace":"w", "default_branch":"main", "protected_branches":[],
+            "required_checks":[], "required_approvals":0, "auto_land":true, "ci_network":false, "labels":[],
+            "upstream":null, "revision":1, "created_at":"now"
+        })).unwrap();
+        let pull = serde_json::from_value(json!({
+            "repo":"r", "number":1, "title":"Feature", "body":"", "state":"open", "merged":false, "draft":false,
+            "author":"test-agent", "head":"feature", "base":"main", "reviewers":[], "tickets":[], "labels":[],
+            "reviewed_by":[], "ready_at":null, "created_at":"now", "updated_at":"now", "closed_at":null,
+            "merged_at":null, "merge_sha":null, "merged_head":null, "merged_base":null, "upstream":null, "revision":1
+        })).unwrap();
+        let entry = serde_json::from_value(json!({
+            "repo":"r", "number":1, "base":"main", "queued_at":"now", "sequence":1, "state":"passed", "state_at":"now",
+            "gate":"head", "base_sha":"base", "head_sha":"head", "reason":null, "notified_at":null,
+            "notify":false, "resume_publish":false, "error":null
+        })).unwrap();
+        (repo, pull, entry)
+    }
+
+    fn publication() -> Published {
+        serde_json::from_value(json!({
+            "provider":"test-host", "repository":"remote/demo", "account":"test-agent", "number":2,
+            "url":"https://host.test/pulls/2", "state":"open", "pushed":"head", "sent_title":"Feature", "sent_body":"",
+            "sent_state":"open", "checks":[], "published_at":"now", "error":null, "stopped":null, "auto":true
+        })).unwrap()
+    }
+
+    #[test]
+    fn next_follows_the_actual_publish_and_merge_decisions() {
+        let (mut repo, mut p, mut e) = fixture();
+        let mut following = Following::default();
+        let next = |r: &Repo, p: &Pull, e: &Landing, f: &Following| first(r, p, e, f, "head").next;
+        assert_eq!(next(&repo, &p, &e, &following), "auto_merge");
+        repo.auto_land = false;
+        assert_eq!(next(&repo, &p, &e, &following), "owner_merge");
+        repo.upstream = Some(Upstream {
+            provider: "test-host".into(),
+            repository: "remote/demo".into(),
+            reader: Reader {
+                member: "reader".into(),
+                chosen: false,
+            },
+        });
+        assert_eq!(next(&repo, &p, &e, &following), "owner_publish");
+        repo.auto_land = true;
+        assert_eq!(next(&repo, &p, &e, &following), "publishing");
+        for state in ["waiting", "gating"] {
+            e.state = state.into();
+            assert_eq!(next(&repo, &p, &e, &following), "gate");
+        }
+        e.state = "passed".into();
+        e.error = Some("no_account: restore the credential".into());
+        assert_eq!(next(&repo, &p, &e, &following), "owner_fix_auto");
+        assert!(
+            first(&repo, &p, &e, &following, "head")
+                .next_detail
+                .unwrap()
+                .contains("no_account")
+        );
+        e.error = None;
+        p.upstream = Some(publication());
+        assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host"); // no host checks read
+        assert_eq!(
+            first(&repo, &p, &e, &following, "head").host_url.as_deref(),
+            Some("https://host.test/pulls/2")
+        );
+        assert_eq!(
+            first(&repo, &p, &e, &following, "new-head").next,
+            "publishing"
+        );
+        for conclusion in ["success", "neutral", "skipped"] {
+            p.upstream.as_mut().unwrap().checks = vec![HostCheck {
+                id: "1".into(),
+                name: "host/test".into(),
+                status: "completed".into(),
+                conclusion: Some(conclusion.into()),
+                url: None,
+                summary: None,
+            }];
+            assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host");
+        }
+        p.upstream.as_mut().unwrap().checks[0].status = "queued".into();
+        assert_eq!(next(&repo, &p, &e, &following), "host_checks");
+        p.upstream.as_mut().unwrap().state = "closed".into();
+        assert_eq!(
+            first(&repo, &p, &e, &following, "new-head").next,
+            "host_closed"
+        );
+        p.upstream.as_mut().unwrap().state = "merged".into();
+        assert_eq!(next(&repo, &p, &e, &following), "following");
+        for stopped in [false, true] {
+            following = Following::default();
+            if stopped {
+                following.stopped = Some("diverged".into());
+            } else {
+                following.error = Some("cannot fetch".into());
+            }
+            let first = first(&repo, &p, &e, &following, "head");
+            assert_eq!(first.next, "owner_fix_following");
+            assert_eq!(
+                first.next_detail,
+                following.stopped.clone().or(following.error.clone())
+            );
+        }
+        following = Following::default();
+        p.upstream = Some(publication());
+        p.upstream.as_mut().unwrap().number = None;
+        p.upstream.as_mut().unwrap().error = Some("opening PR failed; poll retries".into());
+        e.error = Some("earlier automatic create failed".into());
+        assert_eq!(next(&repo, &p, &e, &following), "publishing");
+        p.upstream.as_mut().unwrap().stopped = Some("host refused".into());
+        assert_eq!(next(&repo, &p, &e, &following), "owner_publish");
+        p.upstream.as_mut().unwrap().stopped = None;
+        e.resume_publish = true;
+        assert_eq!(next(&repo, &p, &e, &following), "owner_publish");
+        e.resume_publish = false;
+        p.upstream.as_mut().unwrap().repository = "previous/upstream".into();
+        assert_eq!(next(&repo, &p, &e, &following), "owner_publish");
+    }
+
+    #[test]
+    fn next_details_belong_to_the_actor_that_can_still_make_progress() {
+        let (mut repo, mut p, mut e) = fixture();
+        let mut following = Following::default();
+        e.error = Some("no_account: an earlier automatic attempt failed".into());
+        let auto_failure = e.error.clone();
+        for upstream in [false, true] {
+            repo.upstream = upstream.then(|| Upstream {
+                provider: "test-host".into(),
+                repository: "remote/demo".into(),
+                reader: Reader {
+                    member: "reader".into(),
+                    chosen: false,
+                },
+            });
+            repo.auto_land = true;
+            let f = first(&repo, &p, &e, &following, "head");
+            assert_eq!(f.next, "owner_fix_auto");
+            assert_eq!(f.next_detail, auto_failure);
+            repo.auto_land = false;
+            let f = first(&repo, &p, &e, &following, "head");
+            assert_eq!(
+                f.next,
+                if upstream {
+                    "owner_publish"
+                } else {
+                    "owner_merge"
+                }
+            );
+            assert_eq!(f.next_detail, None);
+        }
+
+        for auto in [false, true] {
+            repo.auto_land = auto;
+            // Every publication path has taken ownership away from autoland,
+            // including records for a previous upstream and manual resends.
+            for (state, numbered, current_head, current_upstream, stopped, resume, expected) in [
+                ("open", false, true, true, false, false, "publishing"),
+                ("open", true, false, true, false, false, "publishing"),
+                ("open", true, true, true, false, false, "owner_merge_host"),
+                ("closed", true, true, true, false, false, "host_closed"),
+                ("merged", true, true, true, false, false, "following"),
+                ("open", true, true, false, false, false, "owner_publish"),
+                ("open", true, true, true, true, false, "owner_publish"),
+                ("open", true, true, true, false, true, "owner_publish"),
+            ] {
+                let mut x = publication();
+                x.state = state.into();
+                x.number = numbered.then_some(2);
+                x.pushed = Some(
+                    if current_head {
+                        "head"
+                    } else {
+                        "previous-head"
+                    }
+                    .into(),
+                );
+                if !current_upstream {
+                    x.repository = "previous/upstream".into();
+                }
+                x.stopped = stopped.then(|| "host sending stopped".into());
+                p.upstream = Some(x);
+                e.resume_publish = resume;
+                for host_error in [None, Some("current host error".to_string())] {
+                    p.upstream.as_mut().unwrap().error = host_error.clone();
+                    let f = first(&repo, &p, &e, &following, "head");
+                    assert_eq!(f.next, expected);
+                    let detail = if !current_upstream || state == "merged" {
+                        None
+                    } else if stopped {
+                        Some("host sending stopped".into())
+                    } else {
+                        host_error
+                    };
+                    assert_eq!(f.next_detail, detail, "{auto} {expected}");
+                }
+            }
+        }
+        e.resume_publish = false;
+        p.upstream = Some(publication());
+        p.upstream.as_mut().unwrap().checks = vec![HostCheck {
+            id: "host-1".into(),
+            name: "host/test".into(),
+            status: "queued".into(),
+            conclusion: None,
+            url: None,
+            summary: None,
+        }];
+        let f = first(&repo, &p, &e, &following, "head");
+        assert_eq!(f.next, "host_checks");
+        assert_eq!(f.next_detail, None);
+        p.upstream.as_mut().unwrap().state = "merged".into();
+        following.stopped = Some("following stopped".into());
+        let f = first(&repo, &p, &e, &following, "head");
+        assert_eq!(f.next, "owner_fix_following");
+        assert_eq!(f.next_detail, following.stopped);
+    }
 }

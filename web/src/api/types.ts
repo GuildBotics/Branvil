@@ -249,9 +249,13 @@ export interface PullRequest {
 
 export type LandingState = "waiting" | "gating" | "passed" | "left";
 
+export type LandingNext = "gate" | "publishing" | "owner_publish" | "host_checks" | "owner_merge_host" | "following" | "owner_fix_following" | "host_closed" | "owner_fix_auto" | "auto_merge" | "owner_merge";
+
 export interface LandingFirst {
   number: number;
-  published: boolean;
+  next: LandingNext;
+  host_url: string | null;
+  next_detail: string | null;
   state: LandingState;
   state_at: string;
   error: string | null;
@@ -260,10 +264,12 @@ export interface LandingFirst {
 /** One pull request in its base branch's landing queue. */
 export interface Landing {
   number: number;
+  title: string;
+  pull_state: "open" | "closed";
+  draft: boolean;
   base: string;
   queued_at: string;
   resume_publish: boolean;
-  published: boolean;
   error: string | null;
   state: LandingState;
   state_at: string;
