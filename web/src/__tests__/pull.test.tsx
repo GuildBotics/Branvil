@@ -246,40 +246,62 @@ function pullRoutes(extra: Record<string, Parameters<typeof fakeApi>[0][string]>
 }
 
 describe("pull request review", () => {
-  it.each(["cmt_link", "rev_link", "ic_reply"])("opens and copies a permanent link to %s, including a resolved thread's reply", async (id) => {
-    const at = "2026-10-14T10:02:00.000Z";
-    const comment = (id: string) => ({ id, author: "review-agent", body: id, meta: null, created_at: at, reactions: [], url: "" });
-    let answer!: (value: ReturnType<typeof json>) => void;
-    const activity = { comments: [comment("cmt_link")], reviews: [{
-      id: "rev_link", author: "review-agent", body: "Review text", verdict: "approve", commit: HEAD, submitted_at: at, reactions: [],
-    }], threads: [] };
-    fakeApi(pullRoutes({
-      [`GET ${P}/activity`]: () => new Promise((resolve) => { answer = resolve; }),
-      [`GET ${P}/threads`]: json(200, { items: [{
+  // Each held source has a post earlier than every target, so it lands above the target when it arrives.
+  it.each(["cmt_link", "rev_link", "ic_reply"].flatMap((id) => (["activity", "threads"] as const).map((held) => [id, held] as const)))(
+    "opens and copies a permanent link to %s once the whole timeline has loaded (%s last), including a resolved thread's reply",
+    async (id, held) => {
+      const at = (minute: number) => `2026-10-14T10:0${minute}:00.000Z`;
+      const comment = (id: string, minute = 3) => ({ id, author: "review-agent", body: id, meta: null, created_at: at(minute), reactions: [], url: "" });
+      const activity = { comments: [comment("cmt_early", 0), comment("cmt_link")], reviews: [{
+        id: "rev_link", author: "review-agent", body: "Review text", verdict: "approve", commit: HEAD, submitted_at: at(3), reactions: [],
+      }], threads: [] };
+      const threads = { items: [{
         id: "ic_first", resolved: true, outdated: true, path: "src/login.rs", line: 12, side: "RIGHT", commit: HEAD,
-        comments: [comment("ic_first"), { ...comment("ic_reply"), reply_to_id: "ic_first" }],
-      }], next_cursor: null }),
-    }));
-    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
-    const user = userEvent.setup();
-    const path = `/acme/demo/-/pulls/3#${id}`;
-    const { client } = renderApp(path);
-    await waitFor(() => expect(client.getQueryData(["repo", "acme/demo", "pull", 3, "threads"])).toBeDefined());
-    expect(document.getElementById(id)).not.toBeInTheDocument();
-    await act(async () => answer(json(200, activity)));
-    await waitFor(() => expect(document.getElementById(id)).toBeInTheDocument());
-    const target = document.getElementById(id)!;
-    await waitFor(() => expect(scroll.mock.contexts).toContain(target));
-    expect(target).toHaveAttribute("data-target", "true");
-    expect(within(target).getByTitle("Link to this comment")).toHaveAttribute("href", path);
-    await user.click(within(target).getByRole("button", { name: "Copy the comment's URL" }));
-    expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}${path}`);
-    if (id === "ic_reply") {
-      const thread = target.closest("details")!;
-      expect(thread.open).toBe(true);
-      await user.click(thread.querySelector("summary")!);
-      await waitFor(() => expect(thread.open).toBe(false));
-    }
+        comments: [comment("ic_first", 1), { ...comment("ic_reply"), reply_to_id: "ic_first" }],
+      }], next_cursor: null };
+      const sources = { activity, threads };
+      let answer!: (value: ReturnType<typeof json>) => void;
+      fakeApi(pullRoutes({
+        [`GET ${P}/activity`]: held === "activity" ? () => new Promise((resolve) => { answer = resolve; }) : json(200, activity),
+        [`GET ${P}/threads`]: held === "threads" ? () => new Promise((resolve) => { answer = resolve; }) : json(200, threads),
+      }));
+      // Whether the whole timeline was there each time the target scrolled into view.
+      const whole: boolean[] = [];
+      vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element) {
+        if (this.id === id) whole.push(["cmt_early", "ic_first", "cmt_link", "rev_link"].every((post) => document.getElementById(post)));
+      });
+      const user = userEvent.setup();
+      const path = `/acme/demo/-/pulls/3#${id}`;
+      const { client } = renderApp(path);
+      const loaded = held === "activity" ? "threads" : "activity";
+      await waitFor(() => expect(client.getQueryData(["repo", "acme/demo", "pull", 3, loaded])).toBeDefined());
+      expect(document.getElementById(id)).not.toBeInTheDocument();
+      await act(async () => answer(json(200, sources[held])));
+      await waitFor(() => expect(document.getElementById(id)).toBeInTheDocument());
+      const target = document.getElementById(id)!;
+      await waitFor(() => expect(whole).not.toHaveLength(0));
+      expect(whole).toEqual([true]);
+      expect(target).toHaveAttribute("data-target", "true");
+      expect(within(target).getByTitle("Link to this comment")).toHaveAttribute("href", path);
+      await user.click(within(target).getByRole("button", { name: "Copy the comment's URL" }));
+      expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}${path}`);
+      if (id === "ic_reply") {
+        const thread = target.closest("details")!;
+        expect(thread.open).toBe(true);
+        await user.click(thread.querySelector("summary")!);
+        await waitFor(() => expect(thread.open).toBe(false));
+      }
+    },
+  );
+
+  it.each(["activity", "threads"] as const)("shows the rest of the conversation and the error when %s fails to load", async (failed) => {
+    fakeApi(pullRoutes({ [`GET ${P}/${failed}`]: apiError(404, "not_found", `No ${failed}.`) }));
+    renderApp("/acme/demo/-/pulls/3");
+    expect(await screen.findByText(`No ${failed}.`)).toBeInTheDocument();
+    const timeline = screen.getByText(`No ${failed}.`).closest(".timeline") as HTMLElement;
+    await waitFor(() => expect(within(timeline).queryByText("Loading…")).not.toBeInTheDocument());
+    expect(within(timeline).queryByText("Workflow failed") !== null).toBe(failed === "threads");
+    expect(within(timeline).queryByText("Why?") !== null).toBe(failed === "activity");
   });
 
   it("shows the description (or 'Not provided'), the files in a drawer, checks with reason and a log in a drawer, and status notices", async () => {
@@ -365,6 +387,38 @@ describe("pull request review", () => {
     await user.click(await screen.findByRole("button", { name: "src/login.rs:12" }));
     const files = await screen.findByRole("dialog", { name: /Changed files/ });
     expect(await within(files).findByText("+more")).toBeInTheDocument();
+  });
+
+  it("places each thread in the conversation at the time its first comment was posted", async () => {
+    const at = (minute: number) => `2026-10-14T10:0${minute}:00.000Z`;
+    const post = (id: string, body: string, minute: number) => ({ id, author: "owner", body, meta: null, created_at: at(minute), reactions: [], url: "" });
+    const thread = (id: string, line: number, minute: number) => ({
+      id,
+      resolved: false,
+      outdated: false,
+      path: "src/login.rs",
+      line,
+      side: "RIGHT",
+      commit: HEAD,
+      comments: [{ ...post(id, `Line ${line}?`, minute), reply_to_id: null }, { ...post(`${id}_reply`, "Later reply", 9), reply_to_id: id }],
+    });
+    fakeApi(
+      pullRoutes({
+        [`GET ${P}/activity`]: json(200, {
+          comments: [post("cmt_1", "First comment", 1), post("cmt_2", "Last comment", 5)],
+          reviews: [{ id: "rev_1", author: "aiko", verdict: "comment", body: "Review body", commit: HEAD, submitted_at: at(3), reactions: [] }],
+          threads: [],
+        }),
+        [`GET ${P}/threads`]: json(200, { items: [thread("ic_2", 20, 4), thread("ic_1", 12, 2)], next_cursor: null }),
+      }),
+    );
+    renderApp("/acme/demo/-/pulls/3");
+    const timeline = (await screen.findByText("Review body")).closest(".timeline") as HTMLElement;
+    const order = ["First comment", "src/login.rs:12", "Review body", "src/login.rs:20", "Last comment"].map((text) => within(timeline).getByText(text));
+    order.reduce((earlier, later) => {
+      expect(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      return later;
+    });
   });
 
   it.each(["en", "ja"] as const)("sends the displayed head with a review and handles head_moved by reloading (%s)", async (language) => {

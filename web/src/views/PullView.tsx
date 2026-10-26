@@ -128,6 +128,7 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
         activity={activity.data}
         activityError={activity.error}
         threads={threads.data?.items}
+        threadsError={threads.error}
         kindOf={kindOf}
         onOpenFile={(path) => setFilesOpen({ focus: path })}
       />
