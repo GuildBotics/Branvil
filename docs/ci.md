@@ -329,7 +329,7 @@ repository, commit, job, and links to failed and successful attempts.
 | jobs at once | 1 (`ci.executor.max_jobs`) | per runner; the runner claims a job only when it can start it, so the others wait in the service's queue. Jobs at once use that many times the CPUs and memory, and the disk of that many work directories (each with its restored cache, and a copy of it in the cache while it is saved) |
 | stop wait | 3600 s (`ci.stop_wait_secs`) | how long a stopping service waits for its running jobs ("Stopping the service" above) |
 | job time limit | 3600 s (`ci.executor.max_timeout_secs`) | the limit of a job that gives no `timeout_secs`; a larger `timeout_secs` is lowered to it, and the log says so |
-| dependency cache | 2048 MiB (`ci.executor.cache_max_mib`) | least recently used entries are removed |
+| dependency cache | 2048 MiB (`ci.executor.cache_max_mib`) | superseded generations are removed before current entries; least recently used first within each group |
 | retention | 30 days (`ci.retention_days`) | logs and artifacts of attempts finished earlier are deleted; the attempt records stay |
 | runners per work directory | 1 | a lock file refuses a second runner |
 
@@ -382,14 +382,15 @@ the content of `cache.key_files`. Copies never write through a symbolic link
 at the destination. The cache lives in `<runner work dir>/cache/`.
 
 A job finds no entry (`no cache entry yet`) when no protected branch's run
-has saved one for its key yet: its `cache.key_files` differ from those a
-protected branch last ran with (a pull request that changes a lock file
-builds its dependencies again on every push until a protected branch has run
-with that file), its image tag has a new version, or the entry was evicted.
-The cache holds one entry per job with a cache of every repository the runner
-serves. While a protected branch's run saves the entries of a new lock file,
-pull requests still restore the previous ones, so a `cache_max_mib` of twice
-their total keeps both until the pull requests catch up.
+has saved one for its key yet, or the entry was evicted. Changing a lock file
+or image version needs a matching protected save before pull requests can
+restore it. A pull request with an older lock file can still restore an older
+generation while that entry remains in the cache.
+The cache can hold multiple generations for each repository and job the runner
+serves. Set `cache_max_mib` to at least the total size of one generation of all
+cached jobs: below that, even current entries can be evicted. Extra capacity
+keeps older generations for pull requests that have not taken a lock-file
+change and for protected branches with different lock files.
 
 Each complete save records its time alongside the cached contents before
 they replace the old entry. Restoring updates the last-use time for eviction
@@ -400,11 +401,36 @@ refresh. A matching tree and image imply the
 same key, so this check uses the source execution's recorded key without
 fetching or checking out the source.
 
-Restoring and saving both explicitly record the last-use time. Eviction removes
-the oldest timestamps first. For equal timestamps, the entry just saved is
-removed last; other entries are removed in cache-key order, regardless of size.
+Each entry records its repository and job alongside its contents, in the same
+temporary directory that replaces the entry on save. For each repository and
+job, the entry just saved is current, even if another generation has a later
+save timestamp (the timestamp is recorded before acquiring the write lock).
+For other repository/job pairs, the latest save timestamp selects the current
+entry, with the greatest cache key breaking ties. Entries without a save
+timestamp are superseded.
+
+When the byte limit is exceeded, eviction removes superseded generations
+first, then current entries only after no superseded generations remain.
+Restoring and saving both explicitly record the last-use time. Within each
+of these two groups, eviction removes the oldest last-use timestamps first.
+For equal timestamps, the entry just saved is removed last; other entries
+are removed in cache-key order, regardless of size.
 The byte limit still applies to the saved entry: an entry larger than the limit
 is removed too.
+
+Protected branches with different lock files share a repository/job pair:
+the last save becomes current and the other generation becomes superseded.
+The same applies when an older commit's save or retry finishes after a newer
+commit's save. Both generations remain while capacity permits; under pressure
+the superseded one goes first. Entries of deleted or renamed repositories and
+jobs remain current because nothing supersedes them. They are evicted only
+after all superseded entries, when the limit still requires it.
+
+On the first save after upgrading to a runner that records each entry's
+repository and job, entries without that record are removed even below the
+limit. Each cached job must rebuild its cache once after the upgrade.
+Entries with unreadable or invalid records are also removed on the next save,
+so a damaged record cannot stop eviction of other entries.
 
 ## The runner
 

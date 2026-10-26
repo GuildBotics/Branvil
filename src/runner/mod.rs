@@ -1008,7 +1008,11 @@ impl Runner {
                 let (store, def, from, key) =
                     (self.cache.clone(), cache.clone(), work.clone(), key.clone());
                 let max = limits.cache_max_mib << 20;
-                match blocking(move || store.save(&key, &def, &from, max)).await {
+                let owner = workspace::CacheOwner {
+                    repo: c.repo.clone(),
+                    job: job.name.clone(),
+                };
+                match blocking(move || store.save(&key, &owner, &def, &from, max)).await {
                     Ok(bytes) => {
                         say(format!("cache saved in {} ({bytes} bytes)", ms(saving))).await
                     }

@@ -3,6 +3,7 @@
 //! the work directory was written by the job, so nothing here follows a
 //! symbolic link: links are skipped (artifacts) or copied as links (cache).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -254,7 +255,15 @@ fn tree_size(path: &Path) -> u64 {
 
 const USED: &str = ".branvil-used";
 const SAVED: &str = ".branvil-saved";
+const OWNER: &str = ".branvil-owner";
 pub const CACHE_REFRESH_SECS: u64 = 24 * 60 * 60;
+
+/// The repository and job whose cache generations share an eviction priority.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct CacheOwner {
+    pub repo: String,
+    pub job: String,
+}
 
 fn record_use(entry: &Path, used: SystemTime) -> io::Result<()> {
     fs::File::create(entry.join(USED))?.set_modified(used)
@@ -330,20 +339,22 @@ impl Cache {
     }
 
     /// Saves the cached paths of a successful job under `key`, then removes
-    /// the least recently used entries beyond `max_bytes`.
+    /// superseded generations before current entries beyond `max_bytes`.
     pub fn save(
         &self,
         key: &str,
+        owner: &CacheOwner,
         cache: &CacheDef,
         work: &Path,
         max_bytes: u64,
     ) -> io::Result<u64> {
-        self.save_with_clock(key, cache, work, max_bytes, SystemTime::now)
+        self.save_with_clock(key, owner, cache, work, max_bytes, SystemTime::now)
     }
 
     fn save_with_clock(
         &self,
         key: &str,
+        owner: &CacheOwner,
         cache: &CacheDef,
         work: &Path,
         max_bytes: u64,
@@ -363,6 +374,7 @@ impl Cache {
                 }
             }
             fs::create_dir_all(&tmp)?;
+            fs::write(tmp.join(OWNER), serde_json::to_vec(owner)?)?;
             let saved_at = now();
             record_use(&tmp, saved_at)?;
             fs::File::create(tmp.join(SAVED))?.set_modified(saved_at)?;
@@ -381,27 +393,66 @@ impl Cache {
 }
 
 fn evict(cache_root: &Path, max_bytes: u64, saved_entry: &Path) -> io::Result<()> {
-    let mut entries: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+    struct Entry {
+        owner: CacheOwner,
+        used: SystemTime,
+        size: u64,
+        path: PathBuf,
+    }
+    let mut entries = Vec::new();
+    let mut current = BTreeMap::new();
     for e in fs::read_dir(cache_root)?.flatten() {
         let path = e.path();
         if e.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
+        let Some(owner) = fs::read(path.join(OWNER))
+            .ok()
+            .and_then(|data| serde_json::from_slice::<CacheOwner>(&data).ok())
+        else {
+            // Missing, unreadable, or invalid records cannot be grouped.
+            // Remove the entry even below budget so it cannot stall eviction.
+            fs::remove_dir_all(&path)?;
+            continue;
+        };
+        if let Ok(saved) = fs::metadata(path.join(SAVED)).and_then(|m| m.modified()) {
+            // saved_at is recorded before the write lock: the save that just
+            // acquired it wins over even a later timestamp in its group.
+            let candidate = (path == saved_entry, saved, path.clone());
+            let active = current.entry(owner.clone()).or_insert(candidate.clone());
+            if candidate > *active {
+                *active = candidate;
+            }
+        }
         let used = fs::metadata(path.join(USED))
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        entries.push((used, tree_size(&path), path));
+        entries.push(Entry {
+            owner,
+            used,
+            size: tree_size(&path),
+            path,
+        });
     }
+    let is_current = |e: &Entry| current.get(&e.owner).is_some_and(|v| v.2 == e.path);
+    // Exhaust superseded generations before evicting any current entry.
     // A save is the latest use when timestamps tie (e.g. on a coarse
     // filesystem). Other ties are broken by key, independently of size.
-    entries.sort_by(|a, b| (a.0, a.2 == saved_entry, &a.2).cmp(&(b.0, b.2 == saved_entry, &b.2)));
-    let mut total: u64 = entries.iter().map(|e| e.1).sum();
-    for (_, size, path) in entries {
+    entries.sort_by(|a, b| {
+        (is_current(a), a.used, a.path == saved_entry, &a.path).cmp(&(
+            is_current(b),
+            b.used,
+            b.path == saved_entry,
+            &b.path,
+        ))
+    });
+    let mut total: u64 = entries.iter().map(|e| e.size).sum();
+    for entry in entries {
         if total <= max_bytes {
             break;
         }
-        fs::remove_dir_all(&path)?;
-        total -= size;
+        fs::remove_dir_all(&entry.path)?;
+        total -= entry.size;
     }
     Ok(())
 }
@@ -409,6 +460,28 @@ fn evict(cache_root: &Path, max_bytes: u64, saved_entry: &Path) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owner(repo: &str, job: &str) -> CacheOwner {
+        CacheOwner {
+            repo: repo.into(),
+            job: job.into(),
+        }
+    }
+
+    fn mark_owner(entry: &Path, repo: &str, job: &str) {
+        fs::write(
+            entry.join(OWNER),
+            serde_json::to_vec(&owner(repo, job)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn mark_saved(entry: &Path, saved: SystemTime) {
+        fs::File::create(entry.join(SAVED))
+            .unwrap()
+            .set_modified(saved)
+            .unwrap();
+    }
 
     #[test]
     fn cache_save_age_tracks_complete_saves_and_survives_restore_and_eviction() {
@@ -424,7 +497,7 @@ mod tests {
         let saved = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         assert_eq!(cache.saved_age("k", saved).unwrap(), None);
         cache
-            .save_with_clock("k", &def, &work, 1 << 20, || saved)
+            .save_with_clock("k", &owner("r", "j"), &def, &work, 1 << 20, || saved)
             .unwrap();
         let now = saved + Duration::from_secs(CACHE_REFRESH_SECS);
         assert_eq!(
@@ -448,7 +521,9 @@ mod tests {
         // A cache written before save timestamps were recorded needs a new save.
         fs::remove_file(cache.root.join("k").join(SAVED)).unwrap();
         assert_eq!(cache.saved_age("k", now).unwrap(), None);
-        cache.save_with_clock("k", &def, &work, 0, || now).unwrap();
+        cache
+            .save_with_clock("k", &owner("r", "j"), &def, &work, 0, || now)
+            .unwrap();
         assert_eq!(
             cache.saved_age("k", now).unwrap(),
             None,
@@ -588,7 +663,7 @@ mod tests {
             "the image's digest is in the key"
         );
         Cache::new(root.clone())
-            .save(&k1, &cache, &work, 1 << 20)
+            .save(&k1, &owner("acme/demo", &job.name), &cache, &work, 1 << 20)
             .unwrap();
         let fresh = dir.path().join("fresh");
         fs::create_dir_all(&fresh).unwrap();
@@ -609,9 +684,240 @@ mod tests {
         assert_ne!(k1, k2, "key files are in the key");
         // A limit that fits only one entry keeps the newest.
         Cache::new(root.clone())
-            .save(&k2, &cache, &fresh, 8)
+            .save(
+                &k2,
+                &owner("acme/demo", &job.name),
+                &cache,
+                &fresh,
+                tree_size(&root.join(&k1)),
+            )
             .unwrap();
         assert!(!root.join(&k1).exists());
+        assert!(root.join(&k2).exists());
+    }
+
+    #[test]
+    fn cache_eviction_removes_superseded_generations_before_other_repositories_and_jobs() {
+        for other in [owner("r2", "build"), owner("r1", "tests")] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Cache::new(dir.path().join("cache"));
+            let work = dir.path().join("work");
+            fs::create_dir_all(work.join("target")).unwrap();
+            fs::write(work.join("target/file"), b"object").unwrap();
+            let def = CacheDef {
+                paths: vec!["target".into()],
+                key_files: vec![],
+            };
+            let first = owner("r1", "build");
+            let time = |n| SystemTime::UNIX_EPOCH + Duration::from_secs(n);
+            store
+                .save_with_clock("k1", &first, &def, &work, u64::MAX, || time(1))
+                .unwrap();
+            store
+                .save_with_clock("other", &other, &def, &work, u64::MAX, || time(2))
+                .unwrap();
+            // Restoring an old generation makes it newer by use than the other
+            // group's only entry. Plain LRU would evict that current entry.
+            record_use(&store.root.join("k1"), time(3)).unwrap();
+            let budget = tree_size(&store.root.join("k1")) + tree_size(&store.root.join("other"));
+            store
+                .save_with_clock("k2", &first, &def, &work, budget, || time(4))
+                .unwrap();
+            assert!(!store.root.join("k1").exists());
+            assert!(store.root.join("other").exists());
+            assert!(store.root.join("k2").exists());
+        }
+    }
+
+    #[test]
+    fn cache_save_retains_and_restores_old_generations_when_they_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Cache::new(dir.path().join("cache"));
+        let work = dir.path().join("work");
+        fs::create_dir_all(work.join("target")).unwrap();
+        let def = CacheDef {
+            paths: vec!["target".into()],
+            key_files: vec![],
+        };
+        let owner = owner("r", "j");
+        fs::write(work.join("target/file"), b"old").unwrap();
+        store.save("old", &owner, &def, &work, u64::MAX).unwrap();
+        fs::write(work.join("target/file"), b"new").unwrap();
+        store.save("new", &owner, &def, &work, u64::MAX).unwrap();
+        assert!(store.root.join("new").exists());
+        assert_eq!(store.restore("old", &def, &work).unwrap(), Some(3));
+        assert_eq!(fs::read(work.join("target/file")).unwrap(), b"old");
+    }
+
+    #[test]
+    fn cache_save_is_current_even_when_another_generation_has_a_later_save_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Cache::new(dir.path().join("cache"));
+        let work = dir.path().join("work");
+        fs::create_dir_all(work.join("target")).unwrap();
+        fs::write(work.join("target/file"), b"object").unwrap();
+        let def = CacheDef {
+            paths: vec!["target".into()],
+            key_files: vec![],
+        };
+        let owner = owner("r", "j");
+        let time = |n| SystemTime::UNIX_EPOCH + Duration::from_secs(n);
+        store
+            .save_with_clock("later", &owner, &def, &work, u64::MAX, || time(20))
+            .unwrap();
+        let budget = tree_size(&store.root.join("later"));
+        store
+            .save_with_clock("saved", &owner, &def, &work, budget, || time(10))
+            .unwrap();
+        assert!(!store.root.join("later").exists());
+        assert!(store.root.join("saved").exists());
+    }
+
+    #[test]
+    fn cache_eviction_selects_other_groups_by_save_time_then_key() {
+        for (a_saved, b_saved, current) in [
+            (Some(3), Some(2), "a"),
+            (Some(2), Some(3), "b"),
+            (Some(2), Some(2), "b"),
+            (None, Some(2), "b"),
+            (Some(2), None, "a"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            for (key, saved) in [("a", a_saved), ("b", b_saved), ("saved", Some(1))] {
+                let entry = root.join(key);
+                fs::create_dir(&entry).unwrap();
+                fs::write(entry.join("data"), b"object").unwrap();
+                mark_owner(&entry, "r", if key == "saved" { "other" } else { "j" });
+                if let Some(n) = saved {
+                    mark_saved(&entry, SystemTime::UNIX_EPOCH + Duration::from_secs(n));
+                }
+                // The superseded entry has the most recent use; save time
+                // and key order, rather than use, must select the current one.
+                record_use(
+                    &entry,
+                    SystemTime::UNIX_EPOCH
+                        + Duration::from_secs(if key == current { 1 } else { 10 }),
+                )
+                .unwrap();
+            }
+            let superseded = if current == "a" { "b" } else { "a" };
+            let budget = tree_size(&root.join(current)) + tree_size(&root.join("saved"));
+            evict(root, budget, &root.join("saved")).unwrap();
+            assert!(root.join(current).exists(), "current: {current}");
+            assert!(!root.join(superseded).exists());
+            assert!(root.join("saved").exists());
+        }
+    }
+
+    #[test]
+    fn cache_eviction_orders_superseded_entries_by_use_then_key() {
+        for tied in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            // No save timestamps: all are superseded even though each has
+            // a different owner. Size never breaks timestamp ties.
+            for (key, size, seconds) in [("a", 4, 3), ("b", 1, 2), ("c", 2, 1)] {
+                let entry = root.join(key);
+                fs::create_dir(&entry).unwrap();
+                fs::write(entry.join("data"), vec![0; size]).unwrap();
+                mark_owner(&entry, "r", key);
+                record_use(
+                    &entry,
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(if tied { 1 } else { seconds }),
+                )
+                .unwrap();
+            }
+            let total: u64 = ["a", "b", "c"]
+                .iter()
+                .map(|k| tree_size(&root.join(k)))
+                .sum();
+            evict(root, total - 1, &root.join("none")).unwrap();
+            for key in ["a", "b", "c"] {
+                assert_eq!(root.join(key).exists(), key != if tied { "a" } else { "c" });
+            }
+        }
+    }
+
+    #[test]
+    fn cache_save_removes_ungroupable_entries_and_continues_enforcing_the_budget() {
+        for bad_owner in [
+            "missing",
+            "empty",
+            "malformed",
+            "missing-job",
+            "wrong-type",
+            "directory",
+        ] {
+            for budget in [u64::MAX, 0] {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path().join("cache");
+                let invalid = root.join("invalid");
+                fs::create_dir_all(invalid.join("paths")).unwrap();
+                fs::write(invalid.join("paths/file"), b"old").unwrap();
+                mark_saved(&invalid, SystemTime::now());
+                match bad_owner {
+                    "missing" => {}
+                    "directory" => fs::create_dir(invalid.join(OWNER)).unwrap(),
+                    _ => fs::write(
+                        invalid.join(OWNER),
+                        match bad_owner {
+                            "empty" => "",
+                            "malformed" => "{",
+                            "missing-job" => r#"{"repo":"r"}"#,
+                            "wrong-type" => r#"{"repo":"r","job":1}"#,
+                            _ => unreachable!(),
+                        },
+                    )
+                    .unwrap(),
+                }
+                let work = dir.path().join("work");
+                fs::create_dir_all(work.join("target")).unwrap();
+                fs::write(work.join("target/object"), b"object").unwrap();
+                let def = CacheDef {
+                    paths: vec!["target".into()],
+                    key_files: vec![],
+                };
+                let store = Cache::new(root.clone());
+                // The invalid entry must not poison this or a later save.
+                for key in ["new", "next"] {
+                    assert_eq!(
+                        store
+                            .save(key, &owner("r", "j"), &def, &work, budget)
+                            .unwrap(),
+                        6,
+                        "owner: {bad_owner}, budget: {budget}"
+                    );
+                    assert!(!invalid.exists(), "owner: {bad_owner}, budget: {budget}");
+                    let restored = dir.path().join(format!("restore-{key}"));
+                    assert_eq!(
+                        store.restore(key, &def, &restored).unwrap(),
+                        (budget != 0).then_some(6)
+                    );
+                    if budget != 0 {
+                        assert_eq!(fs::read(restored.join("target/object")).unwrap(), b"object");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cache_eviction_falls_back_to_current_lru_after_removing_all_superseded_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for (key, job, used) in [("old", "j", 3), ("new", "j", 4), ("other", "other", 1)] {
+            let entry = root.join(key);
+            fs::create_dir(&entry).unwrap();
+            fs::write(entry.join("data"), b"object").unwrap();
+            mark_owner(&entry, "r", job);
+            mark_saved(&entry, SystemTime::UNIX_EPOCH);
+            record_use(&entry, SystemTime::UNIX_EPOCH + Duration::from_secs(used)).unwrap();
+        }
+        evict(root, tree_size(&root.join("new")), &root.join("new")).unwrap();
+        assert!(!root.join("old").exists());
+        assert!(!root.join("other").exists());
+        assert!(root.join("new").exists());
     }
 
     #[test]
@@ -623,12 +929,21 @@ mod tests {
             let entry = root.join(key);
             fs::create_dir(&entry).unwrap();
             fs::write(entry.join("data"), vec![0; size]).unwrap();
+            // Distinct jobs: no superseded generations, so eviction is LRU.
+            mark_owner(&entry, "r", key);
+            mark_saved(&entry, SystemTime::UNIX_EPOCH);
             fs::File::create(entry.join(USED))
                 .unwrap()
                 .set_modified(used)
                 .unwrap();
         }
-        evict(root, 6, &root.join("c")).unwrap();
+        evict(
+            root,
+            tree_size(&root.join("a")) + tree_size(&root.join("b")) + tree_size(&root.join("c"))
+                - 1,
+            &root.join("c"),
+        )
+        .unwrap();
         assert!(!root.join("a").exists(), "equal timestamps evict by key");
         assert!(root.join("b").exists());
         assert!(root.join("c").exists());
@@ -648,7 +963,7 @@ mod tests {
         fs::create_dir(&fresh).unwrap();
         fs::write(work.join("target/object"), b"object").unwrap();
         Cache::new(root.clone())
-            .save("z-old", &cache, &work, 100)
+            .save("z-old", &owner("r", "old"), &cache, &work, 100)
             .unwrap();
         assert_eq!(
             Cache::new(root.clone())
@@ -668,7 +983,14 @@ mod tests {
         // timestamp, and its key sorts before the restored entry's key.
         assert_eq!(
             Cache::new(root.clone())
-                .save_with_clock("a-new", &cache, &fresh, 6, || restored_at)
+                .save_with_clock(
+                    "a-new",
+                    &owner("r", "new"),
+                    &cache,
+                    &fresh,
+                    tree_size(&root.join("z-old")),
+                    || restored_at
+                )
                 .unwrap(),
             6
         );
@@ -699,13 +1021,22 @@ mod tests {
             let entry = root.join(key);
             fs::create_dir(&entry).unwrap();
             fs::write(entry.join("data"), vec![0; size]).unwrap();
+            // Distinct jobs: no superseded generations, so eviction is LRU.
+            mark_owner(&entry, "r", key);
+            mark_saved(&entry, SystemTime::UNIX_EPOCH);
             record_use(
                 &entry,
                 SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
             )
             .unwrap();
         }
-        evict(root, 6, &root.join("c")).unwrap();
+        evict(
+            root,
+            tree_size(&root.join("a")) + tree_size(&root.join("b")) + tree_size(&root.join("c"))
+                - 1,
+            &root.join("c"),
+        )
+        .unwrap();
         assert!(root.join("a").exists());
         assert!(root.join("b").exists());
         assert!(
@@ -736,7 +1067,9 @@ mod tests {
                 let (cache, def) = (cache.clone(), def.clone());
                 std::thread::spawn(move || {
                     for _ in 0..10 {
-                        cache.save("k", &def, &work, 1 << 30).unwrap();
+                        cache
+                            .save("k", &owner("r", "j"), &def, &work, 1 << 30)
+                            .unwrap();
                     }
                 })
             })
