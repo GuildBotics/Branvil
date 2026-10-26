@@ -1019,6 +1019,16 @@ The stream ends when the service shuts down. The service subscribes to the
 same changes itself to land pull requests automatically ("Landing
 automatically").
 
+The GUI shares one credentialed stream across tabs of the same origin: a Web
+Lock elects the tab that owns it, and a BroadcastChannel distributes changes,
+resets, and connection state. Closing that tab releases the lock so another
+tab connects. Each tab refetches its shown queries when it joins a connected
+stream, when the stream reconnects or changes owner, and on reset. All tabs
+warn after the shared connection has been down for five seconds. Navigating
+away releases participation; a page restored from the back/forward cache
+rejoins and catches up. This requires Web Locks and BroadcastChannel in the
+browser (the service's loopback HTTP origin is a secure context).
+
 ## Administration (owner)
 
 Everything here needs the owner, except reading what publishing would post

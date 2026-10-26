@@ -8,6 +8,7 @@ import type { Query, QueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import type { Card, ChangeEvent, Checks, PullRequest } from "../api/types";
 import { routeOfUrl } from "../router/routes";
+import { subscribeChangeStream } from "./changeStream";
 
 type Predicate = (query: Query) => boolean;
 
@@ -110,67 +111,66 @@ export function applyChange(event: ChangeEvent, client: QueryClient): void {
   void client.invalidateQueries({ predicate: (q) => predicates.some((p) => p(q)) });
 }
 
-const MAX_BACKOFF_MS = 30_000;
 /** How long the stream may be down before the GUI warns: a moment's drop (waking from sleep, a restart of the service) is not worth one. */
 export const LOST_AFTER_MS = 5_000;
 
 /**
- * Keeps one EventSource open while `enabled`. On every (re)open and on
- * `reset`, refetches what is shown so a missed event cannot leave the view
- * stale; reconnects with a bounded exponential backoff. Returns whether the
- * stream has been down for `LOST_AFTER_MS`, the view possibly stale since.
+ * Shares one EventSource across tabs while `enabled`. On joining, reconnect,
+ * takeover, and `reset`, refetches shown queries to cover missed events.
+ * Returns whether the shared stream has been down for `LOST_AFTER_MS`.
  */
 export function useChangeStream(client: QueryClient, enabled: boolean): boolean {
   const [lost, setLost] = useState(false);
 
   useEffect(() => {
     if (!enabled || typeof EventSource === "undefined") return;
-    let source: EventSource | null = null;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     let lostTimer: ReturnType<typeof setTimeout> | undefined;
-    let backoff = 1000;
-    let opened = false;
-    let stopped = false;
+    let connected = false;
+    let unsubscribe: (() => void) | undefined;
 
     const refetchShown = () => void client.invalidateQueries();
 
-    const connect = () => {
-      source = new EventSource("/api/v1/events", { withCredentials: true });
-      source.onopen = () => {
-        backoff = 1000;
-        clearTimeout(lostTimer);
-        lostTimer = undefined;
-        setLost(false);
-        // The first open follows the initial fetches; later opens are reconnects.
-        if (opened) refetchShown();
-        opened = true;
-      };
-      source.addEventListener("change", (e) => {
-        try {
-          applyChange(JSON.parse((e as MessageEvent<string>).data) as ChangeEvent, client);
-        } catch {
+    const start = () => {
+      if (unsubscribe) return;
+      unsubscribe = subscribeChangeStream((message) => {
+        if (message.type === "status") {
+          clearTimeout(lostTimer);
+          if (message.downSince === null) {
+            setLost(false);
+            if (!connected) refetchShown();
+            connected = true;
+          } else {
+            connected = false;
+            lostTimer = setTimeout(() => setLost(true), Math.max(0, LOST_AFTER_MS - (Date.now() - message.downSince)));
+          }
+        } else if (message.type === "reset") {
           refetchShown();
+        } else {
+          try {
+            applyChange(JSON.parse(message.data) as ChangeEvent, client);
+          } catch {
+            refetchShown();
+          }
         }
       });
-      source.addEventListener("reset", refetchShown);
-      source.onerror = () => {
-        lostTimer ??= setTimeout(() => setLost(true), LOST_AFTER_MS);
-        if (source && source.readyState === EventSource.CLOSED && !stopped) {
-          source.close();
-          timer = setTimeout(connect, backoff);
-          backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
-        }
-      };
     };
-
-    connect();
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
+    const stop = () => {
       clearTimeout(lostTimer);
-      source?.close();
+      unsubscribe?.();
+      unsubscribe = undefined;
+      connected = false;
+    };
+    // Release before navigating, including entry into the back/forward cache;
+    // a restored page must join again and catch up on missed changes.
+    window.addEventListener("pagehide", stop);
+    window.addEventListener("pageshow", start);
+    start();
+    return () => {
+      window.removeEventListener("pagehide", stop);
+      window.removeEventListener("pageshow", start);
+      stop();
     };
   }, [client, enabled]);
 
-  return lost;
+  return enabled && lost;
 }

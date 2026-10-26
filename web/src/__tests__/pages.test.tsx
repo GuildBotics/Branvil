@@ -368,6 +368,11 @@ describe("pages", () => {
   it("says nothing while the page is connected, and warns once the connection has been lost for a while", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.stubGlobal("EventSource", FakeEventSource);
+    // This page test has one document; cross-tab exclusivity and delivery are
+    // covered by changeStream.test.tsx. jsdom does not implement Web Locks.
+    vi.stubGlobal("navigator", { locks: {
+      request: async (_name: string, _options: LockOptions, callback: () => Promise<void>) => callback(),
+    } });
     fakeApi({ ...SHELL, "GET /api/v1/admin/diagnostics": json(200, { upstream: { state: "following", problems: [] } }) });
     renderApp("/-/settings/members");
     await screen.findByRole("list", { name: "Members" });
