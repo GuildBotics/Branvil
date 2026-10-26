@@ -1,7 +1,7 @@
 import { Card, Stack, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import type { Check } from "../api/types";
-import { CopyButton, ErrorMessage, Loading, Time } from "../components/common";
+import { CopyButton, ErrorMessage, Loading, Sha, Time } from "../components/common";
 import { PageHeader } from "../components/PageHeader";
 import { useT } from "../i18n";
 import { useCommit } from "../query/hooks";
@@ -28,7 +28,7 @@ export function CommitView({ repo, sha, openJob }: { repo: string; sha: string; 
         meta={
           <>
             <span>{repo}</span>
-            <code className="sha">{commit.data?.sha ?? sha}</code>
+            <Sha repo={repo} value={commit.data?.sha ?? sha} full />
             <CopyButton value={commit.data?.sha ?? sha} />
           </>
         }
@@ -57,11 +57,7 @@ export function CommitView({ repo, sha, openJob }: { repo: string; sha: string; 
                 ) : (
                   commit.data.parents.map((p) => (
                     <span key={p}>
-                      <Link to={href.commit(repo, p)}>
-                        <code className="sha" title={p}>
-                          {p.slice(0, 10)}
-                        </code>
-                      </Link>{" "}
+                      <Sha repo={repo} value={p} />{" "}
                     </span>
                   ))
                 )}

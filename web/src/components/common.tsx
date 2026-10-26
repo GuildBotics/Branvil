@@ -8,6 +8,8 @@ import { isApiError } from "../api/client";
 import { REACTIONS, type Comment, type MemberKind, type Reaction, type ReactionEntry } from "../api/types";
 import { useI18n, useT } from "../i18n";
 import { useMemberAvatar, useSession } from "../query/hooks";
+import { Link } from "../router/Router";
+import { href } from "../router/routes";
 import { Markdown } from "./Markdown";
 
 /** What a secret field shows while one is saved (the secret itself is never shown), as in GuildBotics Desktop. */
@@ -69,12 +71,15 @@ export function Time({ value, date }: { value: string | null | undefined; date?:
   );
 }
 
-export function Sha({ value }: { value: string }) {
+/** Every displayed commit ID opens that repository's commit page. */
+export function Sha({ repo, value, full = false }: { repo: string; value: string; full?: boolean }) {
   if (!value) return <code>—</code>;
   return (
-    <code className="sha" title={value}>
-      {value.slice(0, 10)}
-    </code>
+    <Link to={href.commit(repo, value)}>
+      <code className="sha" title={value}>
+        {full ? value : value.slice(0, 10)}
+      </code>
+    </Link>
   );
 }
 

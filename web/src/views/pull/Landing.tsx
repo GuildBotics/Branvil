@@ -92,7 +92,7 @@ export function MergeCard({ pull, repo }: { pull: PullRequest; repo: Repository 
           <Text fw={700}>{t("merge.title")}</Text>
         </Group>
         <Text size="xs" c="dimmed">
-          {t("merge.expected")} <Sha value={pull.head_sha} /> / <Sha value={pull.base_sha} />
+          {t("merge.expected")} <Sha repo={pull.repository} value={pull.head_sha} /> / <Sha repo={pull.repository} value={pull.base_sha} />
         </Text>
         {merge.isError && <Refusal>{refusalOf(t, merge.error, "merge.notMergeable")}</Refusal>}
         {merge.isSuccess && <Notice>{t("merge.done")}</Notice>}

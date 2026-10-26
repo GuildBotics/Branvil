@@ -98,10 +98,10 @@ export function ChecksCard({ repo, number, requiredChecks, onOpen }: { repo: str
   );
 }
 
-/** The checks of a commit; a row opens its drawer. `linked` links the commit's page. */
-export function CommitChecksCard({ repo, sha, title, linked, embedded, onOpen }: { repo: string; sha: string; title: string; linked?: boolean; embedded?: boolean; onOpen: (check: Check) => void }) {
+/** The checks of a commit; a row opens its drawer. */
+export function CommitChecksCard({ repo, sha, title, embedded, onOpen }: { repo: string; sha: string; title: string; embedded?: boolean; onOpen: (check: Check) => void }) {
   const checks = useCommitChecks(repo, sha);
-  return <CheckList repo={repo} title={title} query={checks} sha={checks.data?.sha} linked={linked} embedded={embedded} onOpen={onOpen} />;
+  return <CheckList repo={repo} title={title} query={checks} sha={checks.data?.sha} embedded={embedded} onOpen={onOpen} />;
 }
 
 function CheckList({
@@ -109,7 +109,6 @@ function CheckList({
   title,
   query,
   sha,
-  linked,
   embedded,
   requiredChecks = [],
   onOpen,
@@ -119,7 +118,6 @@ function CheckList({
   title: string;
   query: UseQueryResult<CheckSet>;
   sha: string | undefined;
-  linked?: boolean;
   embedded?: boolean;
   requiredChecks?: string[];
   onOpen: (check: Check) => void;
@@ -135,13 +133,7 @@ function CheckList({
         {sha !== undefined && (
           <Text size="xs" c="dimmed" ml="auto">
             {t("pull.checksOn")}{" "}
-            {linked && sha ? (
-              <Link to={href.commit(repo, sha)}>
-                <Sha value={sha} />
-              </Link>
-            ) : (
-              <Sha value={sha} />
-            )}
+            <Sha repo={repo} value={sha} />
           </Text>
         )}
       </Group>
@@ -212,8 +204,8 @@ function CheckRow({ check, repo, required, onOpen }: { check: Check; repo: strin
       {check.reused_from && (
         <Text size="xs" ml={24} mb={4}>
           <Link to={href.job(repo, check.reused_from.attempt_id)}>
-            {t("ci.reused")} · <Sha value={check.reused_from.sha} />
-          </Link>
+            {t("ci.reused")}
+          </Link>{" "}· <Sha repo={repo} value={check.reused_from.sha} />
         </Text>
       )}
       {check.cache_refresh && (
@@ -291,9 +283,7 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
       <dl>
         <dt>{t("ci.commit")}</dt>
         <dd>
-          <Link to={href.commit(repo, j.sha)}>
-            <Sha value={j.sha} />
-          </Link>
+          <Sha repo={repo} value={j.sha} />
         </dd>
         <dt>{t("ci.started")}</dt>
         <dd>{j.started_at ? <Time value={j.started_at} /> : "—"}</dd>
@@ -306,8 +296,8 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
             <dt>{t("ci.reused")}</dt>
             <dd>
               <Link to={href.job(repo, j.reused_from.attempt_id)}>
-                {j.reused_from.attempt_id} · <Sha value={j.reused_from.sha} />
-              </Link>
+                {j.reused_from.attempt_id}
+              </Link>{" "}· <Sha repo={repo} value={j.reused_from.sha} />
             </dd>
           </>
         )}

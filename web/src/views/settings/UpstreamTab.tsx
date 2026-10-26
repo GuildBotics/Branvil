@@ -75,7 +75,7 @@ export function UpstreamTab({ repo }: { repo: Repository }) {
               <StateBadge tone={upstreamTone(repo)}>
                 {up.following.stopped ? t("upstream.stopped") : up.following.error ? t("upstream.failing") : t("upstream.following", { branch: repo.default_branch })}
               </StateBadge>
-              {up.following.tip && <Sha value={up.following.tip} />}
+              {up.following.tip && <Sha repo={repo.path} value={up.following.tip} />}
               <Text span size="xs" c="dimmed">
                 {t("upstream.checked")} {up.following.checked_at ? <Time value={up.following.checked_at} /> : "—"}
               </Text>

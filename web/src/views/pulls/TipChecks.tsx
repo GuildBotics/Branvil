@@ -32,7 +32,7 @@ function RepositoryTipChecks({ repo }: { repo: string }) {
   if (!tip.data) return <Loading />;
   return (
     <>
-      <CommitChecksCard repo={repo} sha={tip.data.sha} title={t("repo.tipChecks", { branch })} linked embedded onOpen={(c) => setCheck(drawerTarget(c))} />
+      <CommitChecksCard repo={repo} sha={tip.data.sha} title={t("repo.tipChecks", { branch })} embedded onOpen={(c) => setCheck(drawerTarget(c))} />
       <CheckDrawer repo={repo} check={check} onClose={() => setCheck(null)} />
     </>
   );
@@ -87,7 +87,7 @@ function WorkspaceTipChecks({ workspace, paths }: { workspace: string; paths: st
                       <StateBadge tone={TONE[row.status]}>{label(row.status)}</StateBadge>
                     </Group>
                   </Link>
-                  {row.sha && <Link to={href.commit(row.path, row.sha)}><Sha value={row.sha} /></Link>}
+                  {row.sha && <Sha repo={row.path} value={row.sha} />}
                 </Group>
                 {row.error && <ErrorMessage error={row.error} />}
               </Box>

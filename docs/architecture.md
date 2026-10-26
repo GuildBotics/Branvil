@@ -582,6 +582,9 @@ it), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
 settings (the shown workspace with its repositories, and Branvil's members, CI,
 and notifications).
+Displayed commit IDs link to that repository's permanent commit page, including
+review revisions, check results and reused checks, merge heads and bases, and
+upstream tips. Reused checks keep a separate link to their source job.
 The pull request list shows the server's review states with the same avatars
 and badges as its detail page, and default-branch CI below the rows in the
 same card. For a selected repository, its tip's jobs are shown directly and open the

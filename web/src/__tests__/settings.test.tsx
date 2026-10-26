@@ -426,6 +426,7 @@ describe("settings", () => {
     expect(fake.calls("PUT", "/api/v1/repos/acme/demo/upstream")[1]?.body).toEqual({ provider: "github", repository: "octo/demo" });
     expect(await screen.findByRole("link", { name: "GitHub octo/demo" })).toHaveAttribute("href", "https://github.com/octo/demo");
     expect(screen.getByText("main follows")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "a".repeat(10) })).toHaveAttribute("href", `/acme/demo/-/commits/${following.upstream.following.tip}`);
     await user.click(screen.getByRole("tab", { name: "Basics" }));
     expect(screen.getByRole("textbox", { name: "Default branch" })).toHaveAttribute("readonly");
     await user.click(screen.getByRole("tab", { name: "Upstream" }));

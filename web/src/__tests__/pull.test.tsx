@@ -260,8 +260,8 @@ describe("pull request review", () => {
     // The changed files open in a drawer from the facts line; one file opens at once.
     await user.click(await screen.findByRole("button", { name: /^1 file\(s\)/ }));
     const files = await screen.findByRole("dialog", { name: /Changed files/ });
-    expect(within(files).getByTitle(HEAD)).toBeInTheDocument();
-    expect(within(files).getByTitle(BASE)).toBeInTheDocument();
+    expect(within(files).getByRole("link", { name: HEAD.slice(0, 10) })).toHaveAttribute("href", `/acme/demo/-/commits/${HEAD}`);
+    expect(within(files).getByRole("link", { name: BASE.slice(0, 10) })).toHaveAttribute("href", `/acme/demo/-/commits/${BASE}`);
     expect(await within(files).findByText("+more")).toBeInTheDocument();
     await user.click(within(files).getByRole("button", { name: "Close" }));
 
@@ -331,7 +331,7 @@ describe("pull request review", () => {
     expect(await within(files).findByText("+more")).toBeInTheDocument();
   });
 
-  it("sends the displayed head with a review and handles head_moved by reloading", async () => {
+  it.each(["en", "ja"] as const)("sends the displayed head with a review and handles head_moved by reloading (%s)", async (language) => {
     const fake = fakeApi(
       pullRoutes({
         [`GET ${P}`]: [json(200, pull()), json(200, pull({ head_sha: NEW_HEAD }))],
@@ -339,12 +339,15 @@ describe("pull request review", () => {
       }),
     );
     const user = userEvent.setup();
-    renderApp("/acme/demo/-/pulls/3");
+    renderApp("/acme/demo/-/pulls/3", language);
     await screen.findByRole("heading", { name: /Fix login/ });
 
-    await user.click(screen.getByRole("button", { name: "Approve" }));
+    await user.click(screen.getByRole("button", { name: dictionaries[language]["verdict.approve"] }));
 
-    expect(await screen.findByText(/The head moved after you loaded aaaaaaaaaa/)).toBeInTheDocument();
+    const message = dictionaries[language]["pull.headMoved"].replace("{sha}", HEAD.slice(0, 10));
+    const refusal = await screen.findByRole("alert");
+    expect(refusal).toHaveTextContent(message);
+    expect(within(refusal).getByRole("link", { name: HEAD.slice(0, 10) })).toHaveAttribute("href", `/acme/demo/-/commits/${HEAD}`);
     const review = fake.calls("POST", `${P}/reviews`)[0];
     expect(review?.body).toEqual({ verdict: "approve", body: "", commit: HEAD });
     expect(review?.headers["X-Branvil-CSRF"]).toBe("csrf-123");
