@@ -161,7 +161,7 @@ describe("ticket view", () => {
     renderApp("/acme/demo/-/tickets/1");
     const ack = await screen.findByRole("button", { name: "Ack (2)" });
     const agree = screen.getByRole("button", { name: "Agree (1)" });
-    expect(ack).toHaveTextContent("👀 2");
+    expect(ack).toHaveTextContent("✅ 2");
     expect(ack).toHaveAttribute("aria-pressed", "false");
     expect(agree).toHaveAttribute("aria-pressed", "true");
     await user.hover(ack);
@@ -181,7 +181,7 @@ describe("ticket view", () => {
     await user.click(screen.getByRole("button", { name: "Add a reaction" }));
     const items = await screen.findAllByRole("menuitem");
     expect(items.map((i) => [i.getAttribute("aria-label"), i.textContent])).toEqual([
-      ["Ack", "👀"],
+      ["Ack", "✅"],
       ["Agree", "👍"],
       ["Celebrate", "🎉"],
       ["Support", "❤️"],

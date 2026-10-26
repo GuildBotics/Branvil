@@ -115,8 +115,8 @@ export function MemberAvatar({ name, kind, size = 22 }: { name: string; kind?: M
   );
 }
 
-/** Each reaction's emoji: the ones GitHub shows for them, where pull requests are published. */
-const REACTION_EMOJI: Record<Reaction, string> = { ack: "👀", agree: "👍", celebrate: "🎉", support: "❤️" };
+/** Each reaction's display emoji; acknowledgement is distinct from agreement. */
+const REACTION_EMOJI: Record<Reaction, string> = { ack: "✅", agree: "👍", celebrate: "🎉", support: "❤️" };
 
 /** Gives (`on`) or takes back the signed-in member's reaction. */
 export type OnReact = (reaction: Reaction, on: boolean) => void;
