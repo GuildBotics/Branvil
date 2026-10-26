@@ -779,6 +779,11 @@ async fn pull_files(State(app): State<Shared>, c: Caller, P((repo, n)): RepoNum,
     Ok(ok(pulls::files(&app, &c, &repo, number(&n)?, page).await?))
 }
 
+async fn pull_commits(State(app): State<Shared>, c: Caller, P((repo, n)): RepoNum, q: Q) -> R {
+    let page = q.page(&app, &c, &format!("commits\n{}\n{n}", util::fold(&repo)))?;
+    Ok(ok(pulls::commits(&app, &c, &repo, number(&n)?, page).await?))
+}
+
 async fn pull_checks(State(app): State<Shared>, c: Caller, P((repo, n)): RepoNum) -> R {
     Ok(ok(pulls::checks(&app, &c, &repo, number(&n)?).await?))
 }
@@ -1265,6 +1270,7 @@ pub fn router(app: Shared) -> Router {
             put(reviewer_put).delete(reviewer_delete),
         )
         .route("/repos/{repo}/pulls/{number}/files", get(pull_files))
+        .route("/repos/{repo}/pulls/{number}/commits", get(pull_commits))
         .route("/repos/{repo}/pulls/{number}/checks", get(pull_checks))
         .route("/repos/{repo}/pulls/{number}/merge", post(pull_merge))
         .route("/repos/{repo}/pulls/{number}/close", post(pull_close))

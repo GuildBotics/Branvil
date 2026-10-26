@@ -18,7 +18,7 @@ export const keys = {
   commit: (repo: string, sha: string) => ["repo", repo, "commit", sha] as const,
   commitChecks: (repo: string, sha: string) => ["repo", repo, "commit", sha, "checks"] as const,
   pull: (repo: string, number: number) => ["repo", repo, "pull", number] as const,
-  pullPart: (repo: string, number: number, part: "activity" | "threads" | "files" | "checks" | "publish") =>
+  pullPart: (repo: string, number: number, part: "activity" | "threads" | "commits" | "files" | "checks" | "publish") =>
     ["repo", repo, "pull", number, part] as const,
   job: (repo: string, id: string) => ["repo", repo, "job", id] as const,
   jobLog: (repo: string, id: string, tail: number) => ["repo", repo, "job", id, "log", tail] as const,

@@ -22,6 +22,7 @@ import type {
   Member,
   MemberKind,
   Page,
+  PullCommit,
   PullRequest,
   PublishPreview,
   PullSummary,
@@ -187,6 +188,7 @@ export const pulls = {
   ) => request<PullRequest>("PATCH", pullPath(repo, number), { body }),
   activity: (repo: string, number: number) => get<Activity>(`${pullPath(repo, number)}/activity`),
   threads: (repo: string, number: number) => getAll<Thread>(`${pullPath(repo, number)}/threads`),
+  commits: (repo: string, number: number) => getAll<PullCommit>(`${pullPath(repo, number)}/commits`),
   files: (repo: string, number: number) =>
     getAll<FileChange>(`${pullPath(repo, number)}/files`, {}, { maxItems: MAX_FILES }),
   checks: (repo: string, number: number) => get<Checks>(`${pullPath(repo, number)}/checks`),

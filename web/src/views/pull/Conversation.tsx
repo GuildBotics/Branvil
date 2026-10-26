@@ -1,21 +1,45 @@
-// A pull request's conversation: comments, reviews, and line threads in one
-// frame, in the order they were posted, with one box for a comment or a verdict.
+// A pull request's conversation: comments, reviews, line threads, and commits
+// in one frame, in the order they were posted (a commit when it was committed),
+// with one box for a comment or a verdict and one line for a commit.
 
 import { Anchor, Badge, Button, Card, Group, Text } from "@mantine/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, MessageSquare } from "lucide-react";
+import { ChevronRight, GitCommitHorizontal, MessageSquare } from "lucide-react";
 import { useState } from "react";
 import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
-import type { Activity, MemberKind, PullRequest, Reaction, Review, Thread, Verdict } from "../../api/types";
-import { CommentView, ComposeForm, ErrorMessage, Loading, Notice, PostHead, Reactions, Refusal, Sha, StateBadge, type OnReact } from "../../components/common";
+import type { Activity, MemberKind, PullCommit, PullRequest, Reaction, Review, Thread, Verdict } from "../../api/types";
+import { CommentView, ComposeForm, ErrorMessage, Loading, Notice, PostHead, Reactions, Refusal, Sha, StateBadge, Time, type OnReact } from "../../components/common";
 import { Markdown } from "../../components/Markdown";
 import { useT } from "../../i18n";
 import { keys } from "../../query/keys";
 import { useFragmentTarget } from "../../router/Router";
 import { href } from "../../router/routes";
 
-type Entry = { at: string; comment: Activity["comments"][number] } | { at: string; review: Review } | { at: string; thread: Thread };
+type Entry =
+  | { at: string; comment: Activity["comments"][number] }
+  | { at: string; review: Review }
+  | { at: string; thread: Thread }
+  | { at: string; commit: PullCommit };
+
+function CommitLine({ repo, commit }: { repo: string; commit: PullCommit }) {
+  const t = useT();
+  return (
+    <div className="timeline-commit">
+      <GitCommitHorizontal size={16} color="var(--mantine-color-dimmed)" />
+      <Text span size="xs" c="dimmed">
+        {t("commit.by", { author: commit.author })}
+      </Text>
+      <Text span size="sm" lineClamp={1} style={{ flex: 1, minWidth: 0 }}>
+        {commit.subject}
+      </Text>
+      <Sha repo={repo} value={commit.sha} />
+      <Text span size="xs" c="dimmed">
+        <Time value={commit.committed_at} />
+      </Text>
+    </div>
+  );
+}
 
 function ReviewView({ repo, number, review, headSha, kind, onReact }: { repo: string; number: number; review: Review; headSha: string; kind?: MemberKind; onReact: OnReact }) {
   const t = useT();
@@ -127,6 +151,8 @@ export function Conversation({
   activityError,
   threads,
   threadsError,
+  commits,
+  commitsError,
   kindOf,
   onOpenFile,
 }: {
@@ -135,6 +161,8 @@ export function Conversation({
   activityError: unknown;
   threads: Thread[] | undefined;
   threadsError: unknown;
+  commits: PullCommit[] | undefined;
+  commitsError: unknown;
   kindOf: (name: string) => MemberKind | undefined;
   onOpenFile: (path: string) => void;
 }) {
@@ -163,15 +191,16 @@ export function Conversation({
   });
 
   // A link target scrolls into view once, when it mounts, so the timeline
-  // appears only when both of its sources have answered: nothing is inserted
+  // appears only when all of its sources have answered: nothing is inserted
   // above the target afterwards. A thread takes its place in the timeline
   // when its first comment was posted.
-  const settled = Boolean((activity || activityError) && (threads || threadsError));
+  const settled = Boolean((activity || activityError) && (threads || threadsError) && (commits || commitsError));
   const entries: Entry[] = settled
     ? [
         ...(activity?.comments ?? []).map((c) => ({ at: c.created_at, comment: c })),
         ...(activity?.reviews ?? []).map((r) => ({ at: r.submitted_at, review: r })),
         ...(threads ?? []).map((th) => ({ at: th.comments[0]?.created_at ?? "", thread: th })),
+        ...(commits ?? []).map((c) => ({ at: c.committed_at, commit: c })),
       ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
     : [];
   const open = pull.state === "open";
@@ -182,12 +211,15 @@ export function Conversation({
       <div className="timeline">
         {Boolean(activityError) && <ErrorMessage error={activityError} />}
         {Boolean(threadsError) && <ErrorMessage error={threadsError} />}
+        {Boolean(commitsError) && <ErrorMessage error={commitsError} />}
         {!settled && <Loading />}
         {entries.map((e) =>
           "comment" in e ? (
             <CommentView key={e.comment.id} comment={e.comment} url={`${href.pull(repo, number)}#${encodeURIComponent(e.comment.id)}`} kind={kindOf(e.comment.author)} onReact={(reaction, on) => react.mutate({ id: e.comment.id, reaction, on })} />
           ) : "review" in e ? (
             <ReviewView repo={repo} number={number} key={e.review.id} review={e.review} headSha={pull.head_sha} kind={kindOf(e.review.author)} onReact={(reaction, on) => react.mutate({ id: e.review.id, reaction, on })} />
+          ) : "commit" in e ? (
+            <CommitLine key={e.commit.sha} repo={repo} commit={e.commit} />
           ) : (
             <ThreadView key={e.thread.id} repo={repo} number={number} thread={e.thread} kindOf={kindOf} onOpenFile={onOpenFile} />
           ),

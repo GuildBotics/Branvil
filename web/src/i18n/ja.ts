@@ -448,6 +448,7 @@ export const ja: Record<MessageKey, string> = {
   "pull.repoPulls": "このリポジトリの PR",
   "pull.composeReview": "コメントまたはレビューを書く（Markdown）",
   "review.by": "{author} のレビュー",
+  "commit.by": "{author} がコミット",
   "thread.openFile": "変更ファイルで開く",
   "ci.open": "チェック {name} を開く",
   "ci.required": "必須",

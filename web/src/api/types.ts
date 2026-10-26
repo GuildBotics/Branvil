@@ -99,6 +99,14 @@ export interface Commit {
   parents: string[];
 }
 
+/** A commit of a pull request (`base..head`); `committed_at` is UTC like the service's own times. */
+export interface PullCommit {
+  sha: string;
+  author: string;
+  committed_at: string;
+  subject: string;
+}
+
 export const LANES = ["new", "ready", "in_progress", "done"] as const;
 export type Lane = (typeof LANES)[number];
 
