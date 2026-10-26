@@ -1494,9 +1494,6 @@ pre {
   .landing-stop { flex: none; text-align: left; padding: 0 0 24px 56px; min-height: 64px; }
   .landing-stop::before, .landing-stop:first-child::before, .landing-stop:last-child::before { top: 0; bottom: 0; left: 20px; right: auto; width: 2px; height: auto; }
   .landing-stop:last-child::before { bottom: auto; height: 20px; }
-  .landing-stop > .landing-square, .landing-stop > .landing-place, .landing-stop > .landing-pr > .landing-dot { position: absolute; left: -56px; top: 0; }
-  .landing-stop > .landing-square, .landing-stop > .landing-place { left: 0; max-width: 48px; }
-  .landing-stop > .landing-pr { position: relative; }
   .landing-marker { min-height: 40px; }
   .landing-marker-pr { margin-top: 0; }
   .landing-marker > .landing-square, .landing-marker > .landing-place, .landing-marker-pr > .landing-pr > .landing-dot, .landing-marker > .landing-pr > .landing-dot { position: absolute; left: -56px; top: 0; }

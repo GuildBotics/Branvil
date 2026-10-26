@@ -1,4 +1,5 @@
 import { Anchor, Group, Stack, Text } from "@mantine/core";
+import { GitBranch } from "lucide-react";
 import type { Landing, LandingFirst, PullRequest, Repository } from "../../api/types";
 import { ErrorMessage, Loading, Sha, StateBadge, type Tone } from "../../components/common";
 import { useT, type MessageKey } from "../../i18n";
@@ -108,7 +109,10 @@ export function QueueLine({ repo, entries, repository, highlight }: { repo: stri
         {leaderAt("transit")}
       </div>
       {host && <div className="landing-stop" data-stage="host">{marker("host", <span className="landing-place" aria-hidden="true">☁</span>)}<Text size="sm" fw={600}>{host}</Text>{leaderAt("host")}</div>}
-      <div className="landing-stop" data-stage="base"><span className="landing-place">{leader.base}</span></div>
+      <div className="landing-stop" data-stage="base">
+        <div className="landing-marker"><span className="landing-square" aria-hidden="true"><GitBranch size={16} /></span></div>
+        <Text size="sm" fw={600}>{leader.base}</Text>
+      </div>
     </div>
   );
 }
