@@ -338,6 +338,31 @@ describe("ticket view", () => {
     expect(fake.calls("PATCH", TICKET).map((c) => c.body)).toEqual([{ add_labels: ["docs"] }, { remove_labels: ["bug"] }]);
   });
 
+  it.each(["en", "ja"] as const)("turns interactive on and off by patching it alone (%s)", async (language) => {
+    let interactive = false;
+    const shown = () => card("1", "new", { interactive });
+    const fake = fakeApi(
+      ticketRoutes({
+        [`GET ${TICKET}`]: () => json(200, shown()),
+        [`PATCH ${TICKET}`]: (req) => {
+          interactive = (req.body as { interactive: boolean }).interactive;
+          return json(200, { ticket: shown(), state_changed: false });
+        },
+      }),
+    );
+    const words = dictionaries[language];
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/tickets/1", language);
+    const toggle = await screen.findByRole("switch", { name: new RegExp(`^${words["ticket.interactive"]}`) });
+    expect(screen.getByText(words["ticket.interactiveHelp"])).toBeInTheDocument();
+    expect(toggle).not.toBeChecked();
+    await user.click(toggle);
+    await waitFor(() => expect(toggle).toBeChecked());
+    await user.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(fake.calls("PATCH", TICKET).map((c) => c.body)).toEqual([{ interactive: true }, { interactive: false }]);
+  });
+
   it("names the upstream issue a ticket stands for", async () => {
     const issue = "https://github.com/octo/demo/issues/7";
     const fake = fakeApi(

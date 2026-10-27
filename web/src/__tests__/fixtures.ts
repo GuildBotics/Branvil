@@ -14,6 +14,7 @@ export function card(key: string, lane: Card["lane"], extra: Partial<Card> = {})
     author: "aiko",
     assignee: null,
     labels: [],
+    interactive: false,
     upstream_issue: null,
     lane,
     rank: "0|a",

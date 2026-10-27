@@ -396,6 +396,7 @@ every ticket is on it, in a lane.
   "author": "aiko",
   "assignee": {"name": "aiko", "assigned_at": "2026-10-14T10:00:00.000Z"},
   "labels": ["bug"],
+  "interactive": false,
   "upstream_issue": "https://github.com/acme/demo/issues/12",
   "lane": "ready",
   "rank": "0|hzzzzz",
@@ -418,6 +419,10 @@ ticket is in: `new`, `ready`, `in_progress`, or `done` (every ticket is a card
 of that board), and `rank` orders it within the lane. `upstream_issue` is the issue the
 ticket stands for on its repository's upstream host, or `null`; publishing a
 pull request that links the ticket writes a line about it there.
+`interactive` says that a person works on the ticket interactively, with an
+agent at hand; it is `false` for a new ticket and changes only by `PATCH`.
+Branvil keeps and shows it and acts on it nowhere; a client that works on
+tickets by itself may leave such tickets to the person.
 
 `mentions` lists existing Branvil member names mentioned in the body, without
 duplicates, in occurrence order and with their stored spelling. Matching is
@@ -456,7 +461,7 @@ workspace.
   (`state` defaults to `open`; `assignee=me` is the requesting member).
 - `GET /api/v1/repos/{repo}/tickets/{number}` → ticket.
 - `PATCH /api/v1/repos/{repo}/tickets/{number}` — every field optional:
-  `{"title", "body", "add_labels": [], "remove_labels": [], "state", "state_reason", "upstream_issue", "parent", "add_blocked_by": [], "remove_blocked_by": [], "revision"}`.
+  `{"title", "body", "add_labels": [], "remove_labels": [], "interactive", "state", "state_reason", "upstream_issue", "parent", "add_blocked_by": [], "remove_blocked_by": [], "revision"}`.
   `parent` is the URL of a ticket of the same workspace, or `null` for none;
   `add_blocked_by` / `remove_blocked_by` are such URLs, changed against the
   stored set as labels are. A child names its parent and a blocked ticket its

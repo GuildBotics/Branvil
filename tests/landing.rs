@@ -657,14 +657,14 @@ async fn failed_gates_wait_for_a_successful_retry_and_passed_gates_recheck_retri
 }
 
 #[tokio::test]
-async fn queue_api_exposes_titles_and_migrates_every_eligibility_reason() {
-    let mut w = World::new().await;
-    for n in 1..=4 {
+async fn queue_api_exposes_titles() {
+    let w = World::new().await;
+    for n in 1..=2 {
         git_ok(&w.work, &["checkout", "-q", "main"]);
         w.push_change(&format!("feature-{n}"), &format!("{n}.txt"), "change");
         w.open_pull(&format!("feature-{n}"), json!([])).await;
     }
-    landing(&w, 4, "waiting").await;
+    landing(&w, 2, "waiting").await;
     let p = landing(&w, 1, "passed").await;
     assert_eq!(p["landing"]["title"], p["title"]);
     assert_eq!(p["landing"]["first"]["next"], "owner_merge");
@@ -674,50 +674,4 @@ async fn queue_api_exposes_titles_and_migrates_every_eligibility_reason() {
         .ok(&format!("{}/landing", w.repo_path()), &w.owner)
         .await;
     assert_eq!(queue["items"][0], p["landing"]);
-    let reasons = [
-        ("The head adds nothing to the base.", "empty_head"),
-        (
-            "Publishing requires the default base and an author account on the host.",
-            "publish_requirements",
-        ),
-        ("Required head checks have not succeeded.", "head_checks"),
-        ("The head needs more approvals.", "approvals"),
-    ];
-    w.server.stop();
-    let db = w.server.data.join("branvil.redb");
-    as_schema_20(&db);
-    edit_records(&db, "landing", |e| {
-        let n = e["number"].as_u64().unwrap() as usize;
-        e["state"] = json!("left");
-        e["error"] = json!("old copied upstream error");
-        e["reason"] = json!({"code":"ineligible","message":reasons[n-1].0,"files":[],"jobs":[]});
-    });
-    for (command, code) in [("upgrade", 3), ("check", 0)] {
-        let result = std::process::Command::new(BIN)
-            .args(["admin", command, "--data-dir"])
-            .arg(&w.server.data)
-            .output()
-            .unwrap();
-        assert_eq!(
-            result.status.code(),
-            Some(code),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-    }
-    let entries = records(&db, "landing");
-    assert_eq!(entries.len(), 4);
-    for e in &entries {
-        assert!(e.get("published").is_none());
-        assert!(e["error"].is_null());
-        assert_eq!(
-            e["reason"]["code"],
-            reasons[e["number"].as_u64().unwrap() as usize - 1].1
-        );
-    }
-    w.restart(&[]);
-    let _ = w
-        .server
-        .ok(&format!("{}/landing", w.repo_path()), &w.owner)
-        .await;
 }

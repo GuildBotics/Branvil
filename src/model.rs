@@ -211,6 +211,9 @@ pub struct Ticket {
     pub author: String,
     pub assignee: Option<Assignee>,
     pub labels: Vec<String>,
+    /// Whether a person works on the ticket interactively, with an agent at
+    /// hand: set by whoever edits the ticket, and only kept and shown here.
+    pub interactive: bool,
     /// The issue it stands for on its repository's upstream host.
     pub upstream_issue: Option<String>,
     /// The lane and rank on the workspace's board: every ticket is a card of

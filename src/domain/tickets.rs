@@ -33,6 +33,8 @@ pub struct TicketView {
     pub author: String,
     pub assignee: Option<Assignee>,
     pub labels: Vec<String>,
+    /// Whether a person works on the ticket interactively.
+    pub interactive: bool,
     /// The issue it stands for on its repository's upstream host.
     pub upstream_issue: Option<String>,
     pub lane: String,
@@ -222,6 +224,7 @@ pub fn ticket_view(r: &impl Rd, base_url: &str, repo: &Repo, t: &Ticket) -> AppR
         author: t.author.clone(),
         assignee: t.assignee.clone(),
         labels: t.labels.clone(),
+        interactive: t.interactive,
         upstream_issue: t.upstream_issue.clone(),
         lane: t.lane.clone(),
         rank: t.rank.clone(),
@@ -369,6 +372,7 @@ pub async fn create_ticket(
                 author,
                 assignee: None,
                 labels,
+                interactive: false,
                 upstream_issue,
                 rank: rank_in(
                     w,
@@ -517,6 +521,7 @@ pub struct TicketPatch {
     pub add_labels: Vec<String>,
     #[serde(default)]
     pub remove_labels: Vec<String>,
+    pub interactive: Option<bool>,
     pub state: Option<String>,
     #[serde(default, deserialize_with = "domain::double_option")]
     pub state_reason: Option<Option<String>>,
@@ -613,6 +618,9 @@ pub async fn update_ticket(
             if let Some(body) = patch.body {
                 t.mentions = model::mentions(w, &body)?;
                 t.body = body;
+            }
+            if let Some(interactive) = patch.interactive {
+                t.interactive = interactive;
             }
             if let Some(issue) = upstream_issue {
                 t.upstream_issue = issue;
@@ -1662,6 +1670,7 @@ mod tests {
             author: "a".into(),
             assignee: None,
             labels: Vec::new(),
+            interactive: false,
             upstream_issue: None,
             lane: "new".into(),
             rank: rank::between(None, None),
