@@ -210,6 +210,7 @@ export const ja: Record<MessageKey, string> = {
   "landing.check.missing": "未実行",
   "landing.closePull": "PRを閉じてください。",
   "landing.waitRejoin": "新しい head のチェックと承認がそろったら並び直します",
+  "landing.headChanged": "head が変わりました。チェックと承認がそろうと列に並びます",
   "landing.reason.merged": "baseにマージされました。",
   "landing.reason.closed": "PRは閉じられています。",
   "landing.reason.draft": "PRは下書きです。",

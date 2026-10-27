@@ -208,6 +208,7 @@ export const en = {
   "landing.check.missing": "Not run",
   "landing.closePull": "Close the pull request.",
   "landing.waitRejoin": "Rejoins once the new head checks and approvals are ready.",
+  "landing.headChanged": "The head has changed. This pull request joins the queue once its checks and approvals are ready.",
   "landing.reason.merged": "Merged into the base.",
   "landing.reason.closed": "The pull request is closed.",
   "landing.reason.draft": "The pull request is a draft.",

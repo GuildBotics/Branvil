@@ -505,6 +505,31 @@ async fn conflicts_leave_a_check_and_a_branvil_comment_without_rejoining_until_t
     tokio::time::sleep(Duration::from_millis(100)).await;
     let still = landing(&w, 2, "left").await;
     assert_eq!(still["landing"]["queued_at"], p["landing"]["queued_at"]);
+    // Keep the changed head outside the queue until it is reviewed. The
+    // departed conflict belongs only to the original head.
+    let repo = w.server.ok(&w.repo_path(), &w.owner).await;
+    let (st, result) = w
+        .server
+        .patch(
+            &w.repo_path(),
+            &w.owner,
+            json!({"revision":repo["revision"], "required_approvals":1}),
+        )
+        .await;
+    assert_eq!(st, 200, "{result}");
+    let new_head = w.push_change("feature", "extra.txt", "next head\n");
+    let checks = w
+        .server
+        .ok(&format!("{}/pulls/2/checks", w.repo_path()), &w.owner)
+        .await;
+    assert_eq!(checks["head_sha"], new_head);
+    assert!(
+        checks["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["name"] != "gate")
+    );
     let (st, rejected) = w
         .server
         .post(
