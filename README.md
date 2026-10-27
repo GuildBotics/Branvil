@@ -164,7 +164,8 @@ assigning another agent replaces the assignee instead of adding a second one.
 The Interactive switch on a ticket's page marks it as worked on by the owner
 with an agent at hand, and the board badges its card. GuildBotics' provider
 then never takes up the ticket, nor the agent's own pull requests that link
-it; reviewing those pull requests goes on as usual.
+it; reviewing those pull requests goes on as usual. The descendants of an
+interactive ticket are interactive too, whatever their own switches say.
 
 ## Git
 

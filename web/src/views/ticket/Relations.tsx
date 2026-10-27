@@ -116,7 +116,7 @@ export function Relations({ ticket }: { ticket: Ticket }) {
 }
 
 /** How a related ticket is named next to `ticket`: `#12` in the same repository. */
-const labelOf = (r: TicketRef, ticket: Ticket) => (r.repository === ticket.repository ? `#${r.key}` : `${r.repository}#${r.key}`);
+export const labelOf = (r: TicketRef, ticket: Ticket) => (r.repository === ticket.repository ? `#${r.key}` : `${r.repository}#${r.key}`);
 
 /** One relation's tickets, each with its state and a button that takes it off, and a form that adds one. */
 function RelationList({

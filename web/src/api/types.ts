@@ -161,6 +161,8 @@ export interface Ticket {
   labels: string[];
   /** A person works on it interactively: members leave it to them. */
   interactive: boolean;
+  /** The nearest ancestor whose own `interactive` is on: it makes this one interactive too. */
+  interactive_ancestor: TicketRef | null;
   /** The issue it stands for on its repository's upstream host. */
   upstream_issue: string | null;
   /** The lane on its workspace's board (every ticket is on it). */

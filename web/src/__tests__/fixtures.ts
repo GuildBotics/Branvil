@@ -15,6 +15,7 @@ export function card(key: string, lane: Card["lane"], extra: Partial<Card> = {})
     assignee: null,
     labels: [],
     interactive: false,
+    interactive_ancestor: null,
     upstream_issue: null,
     lane,
     rank: "0|a",

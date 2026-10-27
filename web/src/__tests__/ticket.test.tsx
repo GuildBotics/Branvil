@@ -363,6 +363,21 @@ describe("ticket view", () => {
     expect(fake.calls("PATCH", TICKET).map((c) => c.body)).toEqual([{ interactive: true }, { interactive: false }]);
   });
 
+  it.each(["en", "ja"] as const)("shows interactive as inherited from an ancestor, naming it, and does not let it be turned off (%s)", async (language) => {
+    const ancestor = { ...card("9", "new", { title: "The epic" }), state: "open" as const, state_reason: null };
+    fakeApi(ticketRoutes({ [`GET ${TICKET}`]: json(200, card("1", "new", { interactive_ancestor: ancestor })) }));
+    const words = dictionaries[language];
+    renderApp("/acme/demo/-/tickets/1", language);
+    const toggle = await screen.findByRole("switch", { name: new RegExp(`^${words["ticket.interactive"]}`) });
+    expect(toggle).toBeChecked();
+    expect(toggle).toBeDisabled();
+    expect(screen.queryByText(words["ticket.interactiveHelp"])).not.toBeInTheDocument();
+    const link = screen.getByRole("link", { name: "#9 The epic" });
+    expect(link).toHaveAttribute("href", "/acme/demo/-/tickets/9");
+    const [before, after] = words["ticket.interactiveInherited"].split("{ticket}");
+    expect(link.parentElement).toHaveTextContent(`${before}#9 The epic${after}`);
+  });
+
   it("names the upstream issue a ticket stands for", async () => {
     const issue = "https://github.com/octo/demo/issues/7";
     const fake = fakeApi(

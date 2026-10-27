@@ -1384,3 +1384,108 @@ async fn a_ticket_is_interactive_only_while_a_member_says_so() {
     let (st, _) = s.patch(&one, &w.ken, json!({"interactive": "yes"})).await;
     assert_eq!(st, 400);
 }
+
+/// The key of the interactive ancestor of ticket `t` (`null` for none), as
+/// its read and its card show it.
+async fn interactive_ancestor_as_read(w: &World, t: &Value) -> Vec<Value> {
+    let s = &w.server;
+    let cards = s
+        .ok(&format!("/workspaces/{WS}/board/cards"), &w.aiko)
+        .await;
+    let card = cards["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["key"] == t["key"])
+        .unwrap()
+        .clone();
+    [s.ok(&path_of(t), &w.aiko).await, card]
+        .iter()
+        .map(|v| v["interactive_ancestor"]["key"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_ticket_is_a_part_of_the_interactive_work_of_its_nearest_interactive_ancestor() {
+    let w = World::new().await;
+    let s = &w.server;
+    let top = w.ticket("Top").await;
+    let middle = w.ticket("Middle").await;
+    let bottom = w.ticket("Bottom").await;
+    for (child, parent) in [(&middle, &top), (&bottom, &middle)] {
+        let (st, v) = s
+            .patch(&path_of(child), &w.aiko, json!({"parent": parent["url"]}))
+            .await;
+        assert_eq!(st, 200, "{v}");
+    }
+    let ken = &w.ken;
+    let set = |t: &Value, on: bool| {
+        let path = path_of(t);
+        async move {
+            let (st, v) = s.patch(&path, ken, json!({"interactive": on})).await;
+            assert_eq!(st, 200, "{v}");
+        }
+    };
+    assert_eq!(
+        interactive_ancestor_as_read(&w, &bottom).await,
+        [Value::Null, Value::Null]
+    );
+    set(&top, true).await;
+    assert_eq!(interactive_ancestor_as_read(&w, &middle).await, ["1", "1"]);
+    assert_eq!(interactive_ancestor_as_read(&w, &bottom).await, ["1", "1"]);
+    // The nearest one is named; the ticket's own switch stays its own.
+    set(&middle, true).await;
+    assert_eq!(interactive_ancestor_as_read(&w, &bottom).await, ["2", "2"]);
+    assert_eq!(s.ok(&path_of(&bottom), &w.aiko).await["interactive"], false);
+    assert_eq!(
+        interactive_ancestor_as_read(&w, &top).await,
+        [Value::Null, Value::Null]
+    );
+    set(&middle, false).await;
+    assert_eq!(interactive_ancestor_as_read(&w, &bottom).await, ["1", "1"]);
+    // Leaving the tree leaves its interactive work.
+    s.patch(&path_of(&middle), &w.aiko, json!({"parent": null}))
+        .await;
+    assert_eq!(
+        interactive_ancestor_as_read(&w, &bottom).await,
+        [Value::Null, Value::Null]
+    );
+}
+
+#[tokio::test]
+async fn a_change_of_a_ticket_reaches_the_views_of_all_its_descendants() {
+    let w = World::new().await;
+    let s = &w.server;
+    let top = w.ticket("Top").await;
+    let middle = w.ticket("Middle").await;
+    let bottom = w.ticket("Bottom").await;
+    for (child, parent) in [(&middle, &top), (&bottom, &middle)] {
+        let (st, v) = s
+            .patch(&path_of(child), &w.aiko, json!({"parent": parent["url"]}))
+            .await;
+        assert_eq!(st, 200, "{v}");
+    }
+    let mut events = s
+        .http
+        .get(format!("{}/api/v1/events", s.url))
+        .bearer_auth(&w.aiko)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), 200);
+    s.patch(&path_of(&top), &w.ken, json!({"interactive": true}))
+        .await;
+    let bottom_changed = format!(r#"data: {{"kind":"ticket","path":"{REPO}","id":"3"}}"#);
+    let mut seen = String::new();
+    let found = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Ok(Some(chunk)) = events.chunk().await {
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+            if seen.contains(&bottom_changed) {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(found, Ok(true), "{seen}");
+}

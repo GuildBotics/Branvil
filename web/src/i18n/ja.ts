@@ -80,6 +80,7 @@ export const ja: Record<MessageKey, string> = {
   "ticket.labels": "ラベル",
   "ticket.interactive": "対話で進める",
   "ticket.interactiveHelp": "ON の間はメンバーが自動で着手・返答しません。",
+  "ticket.interactiveInherited": "{ticket} で対話中のため、このチケットもメンバーは自動で着手・返答しません。",
   "ticket.noLabelsDefined": "リポジトリにラベルの定義がありません。",
   "ticket.assignee": "担当者",
   "ticket.upstreamIssue": "{host} の Issue",

@@ -361,6 +361,18 @@ describe("kanban board", () => {
     expect(within(two).queryByText("Interactive")).not.toBeInTheDocument();
   });
 
+  it("marks a card interactive through an ancestor", async () => {
+    const ancestor = { ...card("1", "ready", { interactive: true }), state: "open" as const, state_reason: null };
+    fakeApi(
+      boardRoutes({
+        "GET /api/v1/workspaces/acme/board/cards": json(200, { items: [card("2", "ready", { interactive_ancestor: ancestor })], next_cursor: null }),
+      }),
+    );
+    renderApp("/acme");
+    const two = await screen.findByRole("article", { name: "acme/demo#2 Title of 2" });
+    expect(within(two).getByText("Interactive")).toBeInTheDocument();
+  });
+
   it("refetches the board after a concurrent change (409)", async () => {
     const fake = fakeApi(boardRoutes({ "PUT /api/v1/repos/acme/web/tickets/2/board": apiError(409, "conflict", "Changed.") }));
     const user = userEvent.setup();

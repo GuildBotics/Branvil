@@ -78,6 +78,7 @@ export const en = {
   "ticket.labels": "Labels",
   "ticket.interactive": "Interactive",
   "ticket.interactiveHelp": "While on, members do not start or reply to this ticket automatically.",
+  "ticket.interactiveInherited": "{ticket} is interactive, so members do not start or reply to this ticket automatically either.",
   "ticket.noLabelsDefined": "The repository defines no labels.",
   "ticket.assignee": "Assignee",
   "ticket.upstreamIssue": "{host} issue",
