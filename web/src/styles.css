@@ -477,6 +477,12 @@ a:hover {
   background: var(--color-info-text);
 }
 
+/* An attached screenshot shrinks to the column instead of widening the page. */
+.markdown img {
+  height: auto;
+  max-width: 100%;
+}
+
 /* The table scrolls inside its own box so a wide grid does not widen the page.
    display:block is what lets overflow apply to a table. */
 .markdown table {

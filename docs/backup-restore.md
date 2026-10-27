@@ -24,7 +24,8 @@ branvil-2026-10-14/          (0700)
 ├── branvil.redb             the database as of one read transaction
 ├── branvil.toml             the configuration file
 ├── repos/<repo id>.bundle   `git bundle --all` of each repository with refs
-└── ci/logs/, ci/artifacts/  CI logs and artifacts
+├── ci/logs/, ci/artifacts/  CI logs and artifacts
+└── attachments/             images attached to tickets
 ```
 
 `manifest.json` (abridged):
@@ -86,6 +87,12 @@ Queued automatic retries retain their retry number. Eligible protected required
 checks may queue another automatic retry after a second interruption, within
 the three-retry budget. Restore does not restart completed failures on its own.
 
+Tickets' attachments are copied the same way and are written before they are
+recorded too. A file deleted while the files are copied (by CI retention, or
+by the sweep that deletes an attachment no ticket refers to,
+`docs/storage-design.md`) is left out; the restored service's sweep removes a
+record whose file is gone, as nothing referred to it when it was deleted.
+
 ## Restore
 
 `branvil restore --from <backup> --data-dir <new dir>`:
@@ -99,7 +106,7 @@ the three-retry budget. Restore does not restart completed failures on its own.
 4. copies the database and the configuration, creates each repository as a
    managed bare repository and fetches its bundle (`+refs/*:refs/*`), and
    checks that the refs equal the manifest's;
-5. copies CI logs and artifacts;
+5. copies CI logs and artifacts, and tickets' attachments;
 6. upgrades the database when the backup has the previous schema version
    ("Upgrading"; it reads the restored repositories; the restored database is
    then marked, so it needs `branvil admin check` before it serves);

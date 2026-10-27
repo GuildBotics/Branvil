@@ -247,6 +247,7 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
     crate::ci::supervise::start(app.clone(), format!("http://{bound}"));
     crate::upstream::start(app.clone());
     crate::autoland::start(app.clone());
+    crate::domain::attachments::start(app.clone());
 
     let router = crate::http::router(app.clone());
     println!("branvil listening on http://{bound} (base URL {base_url})");

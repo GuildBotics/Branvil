@@ -175,9 +175,14 @@ pub async fn create(app: &App, to: &Path) -> AppResult<Manifest> {
     }
     drop(guards);
 
-    // CI logs and artifacts are written once and only referenced by the
-    // database, so copying them after the snapshot keeps every reference.
-    for dir in [app.layout.ci_logs(), app.layout.ci_artifacts()] {
+    // CI logs and artifacts and tickets' attachments are written once and
+    // only referenced by the database, so copying them after the snapshot
+    // keeps every reference.
+    for dir in [
+        app.layout.ci_logs(),
+        app.layout.ci_artifacts(),
+        app.layout.attachments(),
+    ] {
         let rel = dir
             .strip_prefix(&app.layout.root)
             .map_err(AppError::internal)?
@@ -263,6 +268,8 @@ async fn bundle(git: &Git, repo: &Repo, target: &Path) -> AppResult<RepoEntry> {
 }
 
 /// Copies regular files and directories; symlinks are not followed or copied.
+/// A file deleted meanwhile (by CI retention or the attachment sweep) or
+/// renamed (a temporary file just finished) is left out.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     if !from.exists() {
         return Ok(());
@@ -275,7 +282,12 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         if kind.is_dir() {
             copy_tree(&entry.path(), &dest)?;
         } else if kind.is_file() {
-            std::fs::copy(entry.path(), &dest)?;
+            match std::fs::copy(entry.path(), &dest) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                copied => {
+                    copied?;
+                }
+            }
         }
     }
     Ok(())
@@ -406,7 +418,11 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
     if from.join(CONFIG_FILE).exists() {
         std::fs::copy(from.join(CONFIG_FILE), layout.config_file())?;
     }
-    for dir in [layout.ci_logs(), layout.ci_artifacts()] {
+    for dir in [
+        layout.ci_logs(),
+        layout.ci_artifacts(),
+        layout.attachments(),
+    ] {
         let rel = dir.strip_prefix(&layout.root)?.to_path_buf();
         copy_tree(&from.join(&rel), &dir)?;
     }

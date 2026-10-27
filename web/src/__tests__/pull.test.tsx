@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Check, Checks } from "../api/types";
@@ -405,6 +405,16 @@ describe("pull request review", () => {
     const drawer = await screen.findByRole("dialog", { name: /test/ });
     expect(within(drawer).getByText(words["ci.duration"])).toBeInTheDocument();
     expect(within(drawer).getByText(took)).toBeInTheDocument();
+  });
+
+  it("attaches no images to a pull request's comments: only tickets keep them", async () => {
+    const fake = fakeApi(pullRoutes());
+    renderApp("/acme/demo/-/pulls/3");
+    const field = await screen.findByRole("textbox", { name: "Write a comment or a review (Markdown)" });
+    expect(screen.queryByRole("button", { name: "Attach images" })).not.toBeInTheDocument();
+    fireEvent.paste(field, { clipboardData: { files: [new File(["x"], "shot.png", { type: "image/png" })], types: ["Files"] } });
+    expect(field).toHaveValue("");
+    expect(fake.requests.filter((r) => r.method === "POST" && r.path.endsWith("/attachments"))).toEqual([]);
   });
 
   it("opens the changed files at a thread's file from the thread", async () => {

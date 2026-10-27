@@ -405,6 +405,44 @@ describe("kanban board", () => {
     expect(within(screen.getByRole("form", { name: "Add a ticket to Done" })).getByRole("combobox", { name: "Repository" })).toHaveValue("acme/web");
   });
 
+  it("attaches an image to a new ticket's body in the repository chosen in the modal, and creates it once stored", async () => {
+    let answer!: () => void;
+    const id = "atc_01JAAAAAAAAAAAAAAAAAAAAAAA";
+    const url = `/api/v1/repos/acme%2Fweb/attachments/${id}`;
+    const fake = fakeApi(
+      boardRoutes({
+        "POST /api/v1/repos/acme/web/attachments": () =>
+          new Promise((resolve) => {
+            answer = () => resolve(json(201, { id, name: "shot.png", media_type: "image/png", size: 1, url, created_at: "2026-10-14T10:00:00.000Z" }));
+          }),
+        "POST /api/v1/repos/acme/web/tickets": json(201, card("9", "new", { repository: "acme/web" })),
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp("/acme");
+    await screen.findByText("Title of 1");
+    await user.click(screen.getByRole("button", { name: "Add a ticket to New" }));
+    await user.type(screen.getByRole("textbox", { name: "Title" }), "Broken button");
+    await user.click(screen.getByRole("button", { name: "Add a body and labels…" }));
+    const dialog = await screen.findByRole("dialog", { name: "New ticket (New)" });
+    await choose(user, "Repository", "acme/web", dialog);
+    const body = within(dialog).getByRole("textbox", { name: "Description" });
+    await user.type(body, "See:");
+    fireEvent.drop(body, { dataTransfer: { files: [new File(["x"], "shot.png", { type: "image/png" })], types: ["Files"] } });
+    expect(within(dialog).getByRole("button", { name: "Create ticket" })).toBeDisabled();
+    // The image is the chosen repository's: the choice stays while it uploads and once it is in the body.
+    const repository = within(dialog).getByRole("combobox", { name: "Repository" });
+    expect(repository).toBeDisabled();
+    await waitFor(() => expect(answer).toBeTypeOf("function"));
+    await act(async () => answer());
+    expect(body).toHaveValue(`See:![shot.png](${url})`);
+    expect(repository).toBeDisabled();
+    expect(within(dialog).getByText("Fixed once an image is attached")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
+    await waitFor(() => expect(fake.calls("POST", "/api/v1/repos/acme/web/tickets")).toHaveLength(1));
+    expect(fake.calls("POST", "/api/v1/repos/acme/web/tickets")[0]?.body).toMatchObject({ title: "Broken button", body: `See:![shot.png](${url})` });
+  });
+
   it("adds a ticket with its body and labels from the lane's modal", async () => {
     const fake = fakeApi(
       boardRoutes({

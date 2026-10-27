@@ -8,6 +8,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import * as api from "../../api/endpoints";
 import { ticketRef, type Lane, type Repository, type Ticket } from "../../api/types";
 import { ErrorMessage, Notice } from "../../components/common";
+import { hasAttachment, MarkdownField } from "../../components/MarkdownField";
 import { useT } from "../../i18n";
 import { useRepos } from "../../query/hooks";
 import { keys } from "../../query/keys";
@@ -39,7 +40,7 @@ function useCreate(workspace: string, onCreated: (t: Ticket) => void) {
 }
 
 /** Chooses among the workspace's repositories; shown only when there is more than one. */
-function RepoChoice({ repos, value, onChange, size }: { repos: Repository[]; value: string; onChange: (r: string) => void; size?: "xs" }) {
+function RepoChoice({ repos, value, onChange, size, fixed }: { repos: Repository[]; value: string; onChange: (r: string) => void; size?: "xs"; fixed?: string }) {
   const t = useT();
   if (repos.length < 2) return null;
   return (
@@ -51,6 +52,8 @@ function RepoChoice({ repos, value, onChange, size }: { repos: Repository[]; val
       value={value}
       onChange={(v) => v && onChange(v)}
       allowDeselect={false}
+      disabled={fixed !== undefined}
+      description={fixed}
     />
   );
 }
@@ -176,6 +179,7 @@ export function NewTicketModal({
   const t = useT();
   const [lane, setLane] = useState<Lane | null>(null);
   const [draft, setDraft] = useState<Omit<Draft, "repo"> | null>(null);
+  const [uploading, setUploading] = useState(false);
   const current = draft ?? { title: start?.title ?? "", body: "", labels: [] };
   const chosenLane = lane ?? start?.lane ?? lanes[0] ?? "new";
   const repository = repos.find((r) => r.path === repo);
@@ -208,7 +212,8 @@ export function NewTicketModal({
         <Stack gap="md">
           {note && <Text size="sm">{note}</Text>}
           <Group grow align="flex-start">
-            {repos.length > 1 && <RepoChoice repos={repos} value={repo} onChange={(r) => {
+            {/* An attached image belongs to the repository it was uploaded to. */}
+            {repos.length > 1 && <RepoChoice repos={repos} value={repo} fixed={uploading || hasAttachment(current.body) ? t("attach.repoFixed") : undefined} onChange={(r) => {
               onRepo(r);
               setDraft({ ...current, labels: [] });
             }} />}
@@ -221,7 +226,7 @@ export function NewTicketModal({
             />
           </Group>
           <TextInput label={t("ticket.title")} value={current.title} onChange={(e) => setDraft({ ...current, title: e.currentTarget.value })} required data-autofocus />
-          <Textarea label={t("ticket.body")} value={current.body} onChange={(e) => setDraft({ ...current, body: e.currentTarget.value })} rows={6} />
+          <MarkdownField label={t("ticket.body")} value={current.body} onChange={(body) => setDraft({ ...current, body })} rows={6} attachTo={repo} onUploading={setUploading} />
           {repository && repository.labels.length > 0 && (
             <Stack gap={6}>
               <Text size="sm" fw={500}>
@@ -243,7 +248,7 @@ export function NewTicketModal({
             <Button variant="default" onClick={close}>
               {t("common.cancel")}
             </Button>
-            <Button type="submit" disabled={create.isPending || !current.title.trim() || !repo}>
+            <Button type="submit" disabled={create.isPending || uploading || !current.title.trim() || !repo}>
               {t("board.create")}
             </Button>
           </Group>

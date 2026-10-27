@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::App;
 use crate::auth::{self, Caller};
-use crate::domain::{Page, PageReq, member_by_name};
+use crate::domain::{Page, PageReq, image_type, member_by_name};
 use crate::error::{AppError, AppResult};
 use crate::model::{Account, Member, MemberKind, Session, Token};
 use crate::store::{self, Key, Rd, Wtx};
@@ -43,22 +43,6 @@ pub fn member_view(m: &Member) -> MemberView {
 
 /// The largest picture a member may have.
 pub const MAX_AVATAR_BYTES: usize = 4 << 20;
-
-/// The media type of a picture, read from its first bytes: PNG, JPEG, GIF,
-/// or WebP (no SVG, which can carry script).
-fn image_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
 
 /// Sets (`Some`) or removes a member's picture, by the owner or the member
 /// itself. The same picture again changes nothing.

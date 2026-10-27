@@ -49,7 +49,7 @@ export function TicketComment({ repo, ticketKey, comment, kind, onReact }: {
       </Group>
     )}>
       {editing ? (
-        <BodyEditor value={comment.body} label={t("comment.body")} required pending={change.isPending}
+        <BodyEditor value={comment.body} label={t("comment.body")} required pending={change.isPending} attachTo={repo}
           onCancel={() => { setEditing(false); change.reset(); }} onSave={(body) => change.mutate(body)} />
       ) : <Markdown repo={repo} source={comment.body} />}
       {change.isError && <ErrorMessage error={change.error} />}

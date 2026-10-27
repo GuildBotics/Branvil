@@ -1,10 +1,11 @@
 // Text edited where it is shown: a page title (click it) and a body (the
 // pencil in its header strip).
 
-import { ActionIcon, Button, Group, Stack, Textarea, TextInput, Title } from "@mantine/core";
+import { ActionIcon, Button, Group, Stack, TextInput, Title } from "@mantine/core";
 import { Pencil } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useT } from "../i18n";
+import { MarkdownField } from "./MarkdownField";
 
 /** A page title that turns into a field when clicked; `onSave` resolves when saved. */
 export function EditableTitle({
@@ -82,7 +83,7 @@ export function EditPencil({ label, onClick }: { label: string; onClick: () => v
   );
 }
 
-/** A body's Markdown field with Cancel and Save. */
+/** A body's Markdown field with Cancel and Save; `attachTo` (a repository) lets it attach images. */
 export function BodyEditor({
   value,
   onSave,
@@ -90,6 +91,7 @@ export function BodyEditor({
   pending,
   label,
   required = false,
+  attachTo,
 }: {
   value: string;
   onSave: (body: string) => void;
@@ -97,23 +99,35 @@ export function BodyEditor({
   pending: boolean;
   label?: string;
   required?: boolean;
+  attachTo?: string;
 }) {
   const t = useT();
   const [body, setBody] = useState(value);
+  const [uploading, setUploading] = useState(false);
+  const blocked = pending || uploading || (required && !body.trim());
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (!pending && (!required || body.trim())) onSave(body);
+        if (!blocked) onSave(body);
       }}
     >
       <Stack gap="xs">
-        <Textarea aria-label={label ?? t("ticket.body")} value={body} onChange={(e) => setBody(e.currentTarget.value)} rows={8} required={required} autoFocus />
+        <MarkdownField
+          aria-label={label ?? t("ticket.body")}
+          value={body}
+          onChange={setBody}
+          rows={8}
+          required={required}
+          autoFocus
+          attachTo={attachTo}
+          onUploading={setUploading}
+        />
         <Group justify="flex-end" gap="xs">
           <Button variant="default" onClick={onCancel} disabled={pending}>
             {t("common.cancel")}
           </Button>
-          <Button type="submit" disabled={pending || (required && !body.trim())}>
+          <Button type="submit" disabled={blocked}>
             {t("common.save")}
           </Button>
         </Group>

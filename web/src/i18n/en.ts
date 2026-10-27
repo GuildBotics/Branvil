@@ -119,6 +119,13 @@ export const en = {
   "comment.body": "Comment body",
   "comment.confirmDelete": "Delete this comment? This cannot be undone.",
 
+  "attach.choose": "Attach images",
+  "attach.placeholder": "Uploading {name}…",
+  "attach.uploading": "Uploading images…",
+  "attach.invalid": "Only PNG, JPEG, GIF, and WebP images can be attached.",
+  "attach.tooLarge": "Images larger than 10 MiB cannot be attached.",
+  "attach.repoFixed": "Fixed once an image is attached",
+
   "reaction.group": "Reactions",
   "reaction.add": "Add a reaction",
   "reaction.ack": "Ack",

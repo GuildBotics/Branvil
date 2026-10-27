@@ -23,7 +23,7 @@ pub type Tbl = TableDefinition<'static, &'static [u8], &'static [u8]>;
 /// The schema version this build reads and writes. A database of any other
 /// version is refused instead of being misread; one of the previous version
 /// is upgraded by `upgrade` (`branvil admin upgrade`, `branvil restore`).
-pub const SCHEMA_VERSION: u64 = 23;
+pub const SCHEMA_VERSION: u64 = 24;
 
 pub const META: Tbl = TableDefinition::new("meta");
 pub const COUNTERS: Tbl = TableDefinition::new("counters");
@@ -35,6 +35,7 @@ pub const REPOS: Tbl = TableDefinition::new("repos");
 pub const WORKSPACES: Tbl = TableDefinition::new("workspaces");
 pub const TICKETS: Tbl = TableDefinition::new("tickets");
 pub const COMMENTS: Tbl = TableDefinition::new("comments");
+pub const ATTACHMENTS: Tbl = TableDefinition::new("attachments");
 pub const LANDING: Tbl = TableDefinition::new("landing");
 pub const PULLS: Tbl = TableDefinition::new("pulls");
 pub const REVIEWS: Tbl = TableDefinition::new("reviews");
@@ -56,6 +57,9 @@ pub const IX_CLOSED_TICKETS: Tbl = TableDefinition::new("ix_closed_tickets");
 /// (to repository, to number, `parent` | `blocked_by`, from repository, from
 /// number): the tickets that name a ticket as their parent or blocker.
 pub const IX_TICKET_REFS: Tbl = TableDefinition::new("ix_ticket_refs");
+/// (repository id, attachment id, ticket number, source): the ticket bodies
+/// (source 0) and ticket comments (their seq) that refer to an attachment.
+pub const IX_ATTACHMENT_REFS: Tbl = TableDefinition::new("ix_attachment_refs");
 pub const IX_ENTRIES: Tbl = TableDefinition::new("ix_entries");
 pub const IX_OPEN_PULLS: Tbl = TableDefinition::new("ix_open_pulls");
 pub const IX_INVOLVED: Tbl = TableDefinition::new("ix_involved");
@@ -82,6 +86,7 @@ pub const PRIMARY_TABLES: &[Tbl] = &[
     WORKSPACES,
     TICKETS,
     COMMENTS,
+    ATTACHMENTS,
     PULLS,
     LANDING,
     REVIEWS,
@@ -102,6 +107,7 @@ pub const INDEX_TABLES: &[Tbl] = &[
     IX_TICKET_MENTIONS,
     IX_CLOSED_TICKETS,
     IX_TICKET_REFS,
+    IX_ATTACHMENT_REFS,
     IX_ENTRIES,
     IX_OPEN_PULLS,
     IX_INVOLVED,

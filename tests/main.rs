@@ -5,6 +5,7 @@
 
 mod common;
 
+mod attachments;
 mod autoland;
 mod backup;
 mod ci;

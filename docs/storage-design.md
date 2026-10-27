@@ -51,7 +51,7 @@ closure returns `Ok` and aborts otherwise.
 
 ## Schema version
 
-`meta["schema_version"]` is written on creation (currently `20`). The current
+`meta["schema_version"]` is written on creation (currently `24`). The current
 format includes persistent landing queues, each merged pull request's original
 reviewed head distinct from its merge commit, and per-gate notification and
 publication-resume state. CI runs hold their commit's pipeline and tree;
@@ -61,6 +61,9 @@ successful webhook delivery time.
 Tickets and conversation comments store their resolved `mentions` lists.
 The 19 → 20 upgrade resolves existing bodies against the stored members,
 writes those lists, and rebuilds the derived indexes in the upgrade transaction.
+Images attached to tickets are recorded in `attachments`; the 23 → 24
+upgrade indexes the attachment ids the kept ticket bodies and comments refer
+to (`ix_attachment_refs`).
 
 A database of any other version is refused at open. The previous version is
 upgraded by `branvil admin upgrade` or `branvil restore` (`src/upgrade.rs`, the
@@ -84,6 +87,7 @@ check did not change stored records or raise the version.
 | `repos` | `(repo id)` | path, workspace id, default branch, protected branches, required checks, required approvals, `auto_land`, `ci_network`, labels, upstream (provider, repository), revision | repo API | everything under a repository |
 | `tickets` | `(repo id, n)` | ticket incl. its workspace id, its one assignee with `assigned_at` (or none), labels, whether it is interactive, upstream issue (or none), lane/rank on the workspace's board, its parent (or none) and the tickets it is blocked by, as (repo id, n), state, revision | ticket API, merge | `read(tickets)`, candidates |
 | `comments` | `("ticket", repo id, n, seq)` / `("pull", repo id, n, seq)` | comment with its reactions | comment and reaction API, landing gate failures | comments, cards, activity |
+| `attachments` | `(repo id, attachment id)` | an image of the repository's tickets: name, media type read from its bytes, size, uploader, time (the bytes are a file) | upload API, the attachment sweep | delivery, a ticket's attachments, the sweep |
 | `pulls` | `(repo id, n)` | pull request record (links, reviewers, reviewed_by, draft, state, original merged head and base, merge commit, and once published: the host's pull request, what was last sent to it, the host's checks of the pushed head, whether Branvil published it) | PR API, merge, publish, the upstream poller, push recording (`updated_at`) | PR reads, patrol, the upstream poller |
 | `landing` | `(repo id, n)` | base branch, admission time/order, state/time, gate SHA and its base/head inputs, departure reason with jobs/files, notification intent/time, stopped-publication resume intent | landing reconciliation, merge, owner resume/publish, webhook acknowledgment | queue and PR views, gate checks, merge/publish preconditions, CI gate ownership, webhook |
 | `reviews` | `(repo id, n, seq)` | review with reactions | review API | reviews, activity |
@@ -129,6 +133,7 @@ Every index entry of a record comes from one function in `src/model.rs`
 | `ix_ticket_labels` | `(repo id, label, n)` | `?label=` lists; consistency check for concurrent label changes |
 | `ix_ticket_mentions` | `(fold(member), repo id, n, source)`; source `0` for the ticket body, comment sequence otherwise | workspace `tickets?mentions=me`; each source derives its own entries in `model.rs`, so editing or deleting one never removes another source's mention |
 | `ix_ticket_refs` | `(repo id, n, "parent"|"blocked_by", repo id, n)`: the ticket named, then the one naming it | a ticket's `children` and `blocks`; the open-children check of a completion; the "wait on each other" check of a new relation |
+| `ix_attachment_refs` | `(repo id, attachment id, n, source)`; source `0` for the ticket body, comment sequence otherwise | the attachment sweep keeps an attachment that has one; like mentions, each source derives its own entries from the attachment ids in its text (`model::attachment_ids`) |
 | `ix_closed_tickets` | `(workspace id, closed_at, repo id, n)` | `closed_since` for tickets |
 | `ix_entries` | `(entry id)` → `{kind, owner, record key}` | reactions, replies: an id is used only with its owning item (`owner` must match) |
 | `ix_open_pulls` | `(repo id, head, base)` → number | unique open (head, base) on create and reopen; `open_pull_requests`; pushes → PR activity; the owner's `GET /pulls?involves=me` |
@@ -186,8 +191,15 @@ over the collection, the caller, and every query condition, keyed by
 
 - Git objects live only in Git. Repositories are never deleted by the API
   (there is no delete endpoint yet).
-- The data directory (0700), `ci/logs`, `ci/artifacts`, and `secrets/` (0700;
-  `cursor.key` 0600) are created at start.
+- The data directory (0700), `ci/logs`, `ci/artifacts`, `attachments`, and
+  `secrets/` (0700; `cursor.key` 0600) are created at start.
+- Tickets' attachments: `attachments/<attachment id>` (written to a temporary
+  name, synced, renamed, and only then recorded in `attachments`). At start and every
+  hour the sweep deletes, each in a transaction that checks
+  `ix_attachment_refs`, the attachments no ticket body or ticket comment has
+  referred to for 24 hours after their upload, and the records whose file is
+  gone; then the files that have had no record for 24 hours (a crash between
+  writing and recording, a backup taken between a deletion's two steps).
 - CI: `ci/logs/<attempt id>.log` (appended while the job runs, at most
   `ci.log_max_mib`) and `ci/artifacts/<attempt id>/<name>.zip` (written to a
   temporary name, synced, renamed, and only then recorded in `ci_attempts`).
