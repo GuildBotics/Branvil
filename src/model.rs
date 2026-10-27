@@ -274,6 +274,30 @@ pub struct Comment {
     pub reactions: Vec<Reaction>,
 }
 
+/// An image attached to a repository's tickets. Its bytes are the file
+/// `<data>/attachments/<id>`; ticket bodies and comments refer to it by its
+/// id (`IX_ATTACHMENT_REFS`).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Attachment {
+    pub id: String,
+    /// The id of the repository it belongs to.
+    pub repo: String,
+    pub name: String,
+    /// Read from its bytes when it was uploaded.
+    pub media_type: String,
+    pub size: u64,
+    pub author: String,
+    pub created_at: String,
+}
+
+impl Attachment {
+    /// Its key, and the prefix of the `IX_ATTACHMENT_REFS` entries of the
+    /// tickets that refer to it.
+    pub fn key(repo: &str, id: &str) -> Vec<u8> {
+        Key::new().s(repo).s(id).bytes()
+    }
+}
+
 /// What a comment belongs to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -588,6 +612,7 @@ pub fn ticket_index(t: &Ticket) -> Vec<IxEntry> {
         Ticket::card_key(&t.workspace, &t.lane, &t.rank, &t.repo, t.number),
     )];
     out.extend(mention_index(&t.mentions, &t.repo, t.number, 0));
+    out.extend(attachment_index(&t.body, &t.repo, t.number, 0));
     for label in &t.labels {
         out.push(IxEntry::mark(
             store::IX_TICKET_LABELS,
@@ -690,6 +715,41 @@ pub fn comment_index(c: &Comment, key: &[u8]) -> Vec<IxEntry> {
             parts[2].u(),
             c.seq,
         ));
+        out.extend(attachment_index(&c.body, parts[1].s(), parts[2].u(), c.seq));
+    }
+    out
+}
+
+/// Like mentions, references belong to each source: deleting a comment
+/// removes only its own.
+fn attachment_index(text: &str, repo: &str, number: u64, source: u64) -> Vec<IxEntry> {
+    attachment_ids(text)
+        .iter()
+        .map(|id| {
+            let mut key = Attachment::key(repo, id);
+            key.extend(Key::new().u(number).u(source).bytes());
+            IxEntry::mark(store::IX_ATTACHMENT_REFS, key)
+        })
+        .collect()
+}
+
+/// The attachment ids (`atc_` and a ULID) in `text`, once each, in
+/// occurrence order: whatever URL spelling carries them (a same-origin path,
+/// an absolute URL), and also inside code.
+pub fn attachment_ids(text: &str) -> Vec<String> {
+    const PREFIX: &str = "atc_";
+    let bytes = text.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    for (at, _) in text.match_indices(PREFIX) {
+        let end = at + PREFIX.len() + 26;
+        let alnum = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric());
+        if (at > 0 && alnum(at - 1)) || !(at + PREFIX.len()..end).all(alnum) || alnum(end) {
+            continue;
+        }
+        let id = &text[at..end];
+        if !out.iter().any(|x| x == id) {
+            out.push(id.to_string());
+        }
     }
     out
 }

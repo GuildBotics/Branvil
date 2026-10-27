@@ -4,6 +4,7 @@ import { enc, get, getAll, newIdempotencyKey, request } from "./client";
 import type {
   AccountCredential,
   Activity,
+  Attachment,
   Branch,
   Card,
   Checks,
@@ -158,6 +159,9 @@ export const tickets = {
       body: { target_id: targetId, reaction },
     }),
   pulls: (repo: string, key: string) => getAll<PullSummary>(`${ticketPath(repo, key)}/pulls`),
+  /** Uploads an image for a ticket's body or comments to show by its `url`. */
+  attach: (repo: string, image: Blob, name: string) =>
+    request<Attachment>("POST", `/repos/${enc(repo)}/attachments`, { body: image, query: { name } }),
   assign: (repo: string, key: string, name: string) =>
     request<Ticket>("PUT", `${ticketPath(repo, key)}/assignee`, { body: { name } }),
   unassign: (repo: string, key: string) => request<Ticket>("DELETE", `${ticketPath(repo, key)}/assignee`),

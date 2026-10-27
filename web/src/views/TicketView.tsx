@@ -108,6 +108,7 @@ export function TicketView({ repo, ticketKey, drawer }: { repo: string; ticketKe
               <BodyEditor
                 value={tk.body}
                 pending={update.isPending}
+                attachTo={repo}
                 onCancel={() => setEditingBody(false)}
                 onSave={(body) => void save({ body }).then(() => setEditingBody(false), () => undefined)}
               />
@@ -138,6 +139,7 @@ export function TicketView({ repo, ticketKey, drawer }: { repo: string; ticketKe
                 pending={addComment.isPending}
                 error={addComment.error}
                 onSubmit={(body) => addComment.mutateAsync(body)}
+                attachTo={repo}
               />
             </div>
           </Card>

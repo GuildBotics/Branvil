@@ -159,6 +159,9 @@ pub async fn create(app: &App, to: &Path) -> AppResult<Manifest> {
     std::fs::create_dir_all(target.join("repos")).map_err(AppError::internal)?;
     restrict(&target, true).map_err(AppError::internal)?;
 
+    // No deletion from the database copy until the files are copied. Taken
+    // first, so that a running deletion does not keep the repositories locked.
+    let deletions = app.file_deletions.write().await;
     // Quiesce ref changes.
     let (repos, guards) = app.quiesce().await?;
     let tables = app.store.export_to(&target.join(DB_FILE)).await?;
@@ -175,15 +178,22 @@ pub async fn create(app: &App, to: &Path) -> AppResult<Manifest> {
     }
     drop(guards);
 
-    // CI logs and artifacts are written once and only referenced by the
-    // database, so copying them after the snapshot keeps every reference.
-    for dir in [app.layout.ci_logs(), app.layout.ci_artifacts()] {
+    // CI logs and artifacts and tickets' attachments are written before they
+    // are recorded, and retention and the attachment sweep delete them only
+    // while `deletions` is not held, so copying them after the snapshot
+    // keeps every reference.
+    for dir in [
+        app.layout.ci_logs(),
+        app.layout.ci_artifacts(),
+        app.layout.attachments(),
+    ] {
         let rel = dir
             .strip_prefix(&app.layout.root)
             .map_err(AppError::internal)?
             .to_path_buf();
         copy_tree(&dir, &target.join(&rel)).map_err(AppError::internal)?;
     }
+    drop(deletions);
     if app.layout.config_file().exists() {
         std::fs::copy(app.layout.config_file(), target.join(CONFIG_FILE))
             .map_err(AppError::internal)?;
@@ -263,6 +273,8 @@ async fn bundle(git: &Git, repo: &Repo, target: &Path) -> AppResult<RepoEntry> {
 }
 
 /// Copies regular files and directories; symlinks are not followed or copied.
+/// A file renamed or removed meanwhile (an upload finishing or failing) is
+/// left out.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     if !from.exists() {
         return Ok(());
@@ -275,7 +287,12 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         if kind.is_dir() {
             copy_tree(&entry.path(), &dest)?;
         } else if kind.is_file() {
-            std::fs::copy(entry.path(), &dest)?;
+            match std::fs::copy(entry.path(), &dest) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                copied => {
+                    copied?;
+                }
+            }
         }
     }
     Ok(())
@@ -406,7 +423,11 @@ pub async fn restore(from: &Path, data_dir: &Path) -> anyhow::Result<u8> {
     if from.join(CONFIG_FILE).exists() {
         std::fs::copy(from.join(CONFIG_FILE), layout.config_file())?;
     }
-    for dir in [layout.ci_logs(), layout.ci_artifacts()] {
+    for dir in [
+        layout.ci_logs(),
+        layout.ci_artifacts(),
+        layout.attachments(),
+    ] {
         let rel = dir.strip_prefix(&layout.root)?.to_path_buf();
         copy_tree(&from.join(&rel), &dir)?;
     }
@@ -508,6 +529,147 @@ fn check(layout: &Layout, manifest: &Manifest) -> anyhow::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ci::queue;
+    use crate::config::Config;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+    fn app(data: &Path) -> crate::app::Shared {
+        let config = Config::load(None, Some(data), None, None).unwrap();
+        config.layout().create().unwrap();
+        let store = Store::open(&config.layout().db(), 1 << 20, 1).unwrap();
+        App::new(
+            config,
+            "http://127.0.0.1:7878".into(),
+            store,
+            vec![],
+            "http://127.0.0.1:7878".into(),
+        )
+    }
+
+    /// The files of an attachment no ticket refers to and of a CI attempt,
+    /// both past their time.
+    fn expired_files(app: &App) -> Vec<PathBuf> {
+        let old = "2026-01-01T00:00:00.000Z";
+        let attachment = crate::model::Attachment {
+            id: "atc_01JABCDEFGHJKMNPQRSTVWXYZ0".into(),
+            repo: "repo_1".into(),
+            name: "x.png".into(),
+            media_type: "image/png".into(),
+            size: 1,
+            author: "member1".into(),
+            created_at: old.into(),
+        };
+        let attempt = app
+            .store
+            .write_sync(|w| {
+                w.put(
+                    store::ATTACHMENTS,
+                    &crate::model::Attachment::key(&attachment.repo, &attachment.id),
+                    &attachment,
+                )?;
+                let job = crate::ci::pipeline::JobDef {
+                    paths: Vec::new(),
+                    name: "test".into(),
+                    image: "alpine".into(),
+                    commands: vec!["true".into()],
+                    timeout_secs: None,
+                    artifacts: vec![],
+                    cache: None,
+                };
+                let registration = queue::Registration {
+                    selection: None,
+                    repo: "repo_1".into(),
+                    repo_path: "acme/demo".into(),
+                    sha: "a".repeat(40),
+                    tree: None,
+                    branch: "main".into(),
+                    protected: true,
+                    pipeline: queue::PipelineState::Jobs { jobs: vec![job] },
+                    network: false,
+                };
+                queue::register(w, registration, 10, old)?;
+                let c = queue::claim(w, "runner1", 60, old)?.unwrap();
+                queue::finish(
+                    w,
+                    &c.attempt.id,
+                    &c.lease,
+                    "success",
+                    None,
+                    queue::ResultInfo::default(),
+                    10,
+                    old,
+                )?;
+                Ok(c.attempt.id)
+            })
+            .unwrap();
+        let files = vec![
+            app.layout.attachments().join(&attachment.id),
+            app.ci.log_path(&attempt),
+        ];
+        for file in &files {
+            std::fs::write(file, "x").unwrap();
+        }
+        files
+    }
+
+    #[tokio::test]
+    async fn every_deletion_of_referenced_files_is_left_to_its_next_pass_during_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let files = expired_files(&app);
+        let backup = app.file_deletions.write().await;
+        assert_eq!(crate::domain::attachments::sweep(&app).await.unwrap(), 0);
+        assert_eq!(crate::ci::files::apply_retention(&app).await.unwrap(), 0);
+        for file in &files {
+            assert!(
+                file.exists(),
+                "{} was deleted during a backup",
+                file.display()
+            );
+        }
+        drop(backup);
+        assert_eq!(crate::domain::attachments::sweep(&app).await.unwrap(), 1);
+        assert_eq!(crate::ci::files::apply_retention(&app).await.unwrap(), 1);
+        for file in &files {
+            assert!(!file.exists(), "{} was kept", file.display());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_backup_lets_no_deletion_run_from_its_database_copy_until_its_files_are_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        // Enough CI logs, copied before the attachments, that the copy takes
+        // a while.
+        for i in 0..2000 {
+            std::fs::write(app.layout.ci_logs().join(format!("{i}.log")), "x").unwrap();
+        }
+        std::fs::write(app.layout.attachments().join("atc_last"), "x").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let target = out.path().join("backup");
+        let done = Arc::new(AtomicBool::new(false));
+        // A deletion would start whenever it gets the lock.
+        let deletion = {
+            let (app, target, done) = (app.clone(), target.clone(), done.clone());
+            tokio::spawn(async move {
+                while !done.load(SeqCst) {
+                    let held = app.file_deletions.read().await;
+                    if target.join(DB_FILE).exists() {
+                        assert!(
+                            target.join("attachments/atc_last").exists(),
+                            "a deletion could run after the database copy but before the file copy"
+                        );
+                    }
+                    drop(held);
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        create(&app, &target).await.unwrap();
+        done.store(true, SeqCst);
+        deletion.await.unwrap();
+    }
 
     #[test]
     fn manifest_paths_stay_inside_the_backup() {

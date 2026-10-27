@@ -121,6 +121,13 @@ export const ja: Record<MessageKey, string> = {
   "comment.body": "コメント本文",
   "comment.confirmDelete": "このコメントを削除しますか？ 元に戻すことはできません。",
 
+  "attach.choose": "画像を添付",
+  "attach.placeholder": "{name} をアップロード中…",
+  "attach.uploading": "画像をアップロード中…",
+  "attach.invalid": "PNG・JPEG・GIF・WebP の画像だけを添付できます。",
+  "attach.tooLarge": "10 MiB までの画像を添付できます。",
+  "attach.repoFixed": "画像の添付後は変更できません",
+
   "reaction.group": "リアクション",
   "reaction.add": "リアクションを付ける",
   "reaction.ack": "確認",

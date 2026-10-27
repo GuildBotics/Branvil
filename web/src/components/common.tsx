@@ -1,7 +1,7 @@
 // Small shared presentational components, built from Mantine as GuildBotics
 // Desktop's are.
 
-import { ActionIcon, Alert, Avatar, Badge, Button, Card, CopyButton as MantineCopy, Group, Menu, Text, Textarea, Tooltip } from "@mantine/core";
+import { ActionIcon, Alert, Avatar, Badge, Button, Card, CopyButton as MantineCopy, Group, Menu, Text, Tooltip } from "@mantine/core";
 import { Anvil, Check, Copy, SmilePlus } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { isApiError } from "../api/client";
@@ -11,6 +11,7 @@ import { useMemberAvatar, useSession } from "../query/hooks";
 import { Link, useFragmentTarget } from "../router/Router";
 import { href } from "../router/routes";
 import { Markdown } from "./Markdown";
+import { MarkdownField } from "./MarkdownField";
 
 /** What a secret field shows while one is saved (the secret itself is never shown), as in GuildBotics Desktop. */
 export const MASKED_SECRET = "••••••••••••";
@@ -252,7 +253,8 @@ export function CommentView({
 /**
  * A Markdown textarea and its buttons; it clears itself when a submit
  * succeeds. `actions` are other buttons (resolve a thread) placed before the
- * submit, `trailing` ones (a review's verdicts) after it.
+ * submit, `trailing` ones (a review's verdicts) after it. `attachTo` (a
+ * repository) lets it attach images.
  */
 export function ComposeForm({
   label,
@@ -264,6 +266,7 @@ export function ComposeForm({
   actions,
   trailing,
   submitVariant = "filled",
+  attachTo,
 }: {
   label: string;
   submitLabel: string;
@@ -274,19 +277,21 @@ export function ComposeForm({
   actions?: (body: string, clear: () => void) => ReactNode;
   trailing?: (body: string, clear: () => void) => ReactNode;
   submitVariant?: "filled" | "default";
+  attachTo?: string;
 }) {
   const [body, setBody] = useState("");
+  const [uploading, setUploading] = useState(false);
   const clear = () => setBody("");
   return (
     <form
       className="compose"
       onSubmit={(e) => {
         e.preventDefault();
-        if (!body.trim()) return;
+        if (!body.trim() || uploading) return;
         void onSubmit(body).then(clear, () => undefined);
       }}
     >
-      <Textarea aria-label={label} placeholder={label} value={body} onChange={(e) => setBody(e.currentTarget.value)} rows={3} />
+      <MarkdownField aria-label={label} placeholder={label} value={body} onChange={setBody} rows={3} attachTo={attachTo} onUploading={setUploading} />
       {error ? <ErrorMessage error={error} /> : null}
       <Group justify="flex-end" gap="xs" mt="xs">
         {hint && (
@@ -295,7 +300,7 @@ export function ComposeForm({
           </Text>
         )}
         {actions?.(body, clear)}
-        <Button type="submit" variant={submitVariant} disabled={pending || !body.trim()}>
+        <Button type="submit" variant={submitVariant} disabled={pending || uploading || !body.trim()}>
           {submitLabel}
         </Button>
         {trailing?.(body, clear)}

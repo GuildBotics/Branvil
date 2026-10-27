@@ -616,22 +616,18 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Recreates the immediately preceding schema in a stopped database.
-pub fn as_schema_22(db: &Path) {
-    edit_records(db, "ci_runs", |record| {
-        record.as_object_mut().unwrap().remove("selection");
-        if let Some(jobs) = record["pipeline"]["jobs"].as_array_mut() {
-            for job in jobs {
-                job.as_object_mut().unwrap().remove("paths");
-            }
-        }
-    });
-    edit_records(db, "ci_attempts", |record| {
-        record.as_object_mut().unwrap().remove("path_skip");
-        record["job"].as_object_mut().unwrap().remove("paths");
-    });
+pub fn as_schema_23(db: &Path) {
+    let database = redb::Database::open(db).unwrap();
+    let txn = database.begin_write().unwrap();
+    for table in ["attachments", "ix_attachment_refs"] {
+        let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
+        txn.delete_table(def).unwrap();
+    }
+    txn.commit().unwrap();
+    drop(database);
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(22);
+            *v = json!(23);
         }
     });
 }

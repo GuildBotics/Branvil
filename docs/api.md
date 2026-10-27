@@ -30,14 +30,15 @@ an endpoint, this file changes in the same commit.
   holds a credential or a code ignore it (token issuance, entry links,
   sessions, and the local-app endpoints under `/apps/`), and the read-only
   Markdown resolver, so the service never
-  keeps one. A repeated key from the same
+  keeps one; an attachment's upload, whose body is an image, ignores it too.
+  A repeated key from the same
   member with the same body returns the first response; with another body it is
   `409 idempotency_conflict` (the body is compared together with the request
   path). Requests with the same key from the same member run one after
   another (the second gets the first's response); other keys are not held
   up. Keys are kept for 24 hours.
 - Status codes: a create answers `201` (members, tokens, entry links,
-  local-app authorizations and tokens, workspaces, repositories, tickets, comments, reviews, inline comments, replies;
+  local-app authorizations and tokens, workspaces, repositories, tickets, attachments, comments, reviews, inline comments, replies;
   pull requests as described there); reactions answer `200`; a
   `DELETE` that leaves nothing to show (token) answers `204`; every other
   success is `200`.
@@ -159,7 +160,7 @@ repository, and upstream events, including changes in another repository.
 | 409 | `no_account` | The member whose account the upstream host needs has none there, or its credential is not on this machine ("Upstream"). |
 | 409 | `upstream_refused` | The upstream host refused what Branvil sent or asked for (the message says why). |
 | 409 | `idempotency_conflict` | See conventions. |
-| 413 | `too_large` | Body, log, or artifact above its limit. |
+| 413 | `too_large` | Body, log, artifact, or image above its limit. |
 | 421 | `misdirected` | Wrong `Host`. |
 | 500 | `internal` | An unexpected failure; the detail is in the service log only. |
 | 422 | `unsupported` | The operation is not offered (for example, a merge into a ticket of another service). |
@@ -563,6 +564,46 @@ comment edits. These fields describe conversation comments, not inline threads.
   `reaction` is `ack`, `agree`, `celebrate`, or `support` → `{"id","reaction"}`.
   The target must be a comment of this ticket. `DELETE` with the same body
   takes the caller's own reaction back → `204` (also when there was none).
+
+### Attachments (images of tickets)
+
+An image belongs to a repository, not to one ticket, so it can be uploaded
+before the ticket it goes in exists. A ticket's body or a ticket comment
+refers to it by writing its `url`: `![screen.png](/api/v1/repos/acme%2Fdemo/attachments/atc_01JA...)`.
+
+```json
+{"id": "atc_01JA...", "name": "screen.png", "media_type": "image/png", "size": 48213,
+ "url": "/api/v1/repos/acme%2Fdemo/attachments/atc_01JA...",
+ "created_at": "..."}
+```
+
+`url` is a same-origin path (the GUI shows it as an `<img>` with its session);
+a client with a token gets it under the base URL.
+
+- `POST /api/v1/repos/{repo}/attachments?name={name}` with the image as the
+  body → `201` attachment. It must be a PNG, JPEG, GIF, or WebP image, read
+  from its bytes, not from `Content-Type` (SVG is refused: `400 invalid`), of
+  at most 10 MiB (`413 too_large`). `name` is at most 255 bytes without
+  control characters (`400 invalid`); without one it is `image`. An
+  `Idempotency-Key` is ignored: an upload repeated leaves an attachment no
+  ticket refers to.
+- `GET /api/v1/repos/{repo}/attachments/{id}` → the image with its media type
+  as read at the upload. It may be cached for good: an attachment never
+  changes. An id of another repository is `404 not_found`.
+- `GET /api/v1/repos/{repo}/tickets/{number}/attachments` → items of the
+  attachment shape plus `"referenced_by": ["body", "cmt_01JA..."]`: the
+  attachments of the repository that the ticket's body and comments refer
+  to, in the order of their first reference, each with where it is referred
+  to (`body`, or a comment's id), in that order. A reference is the
+  attachment's id anywhere in the text (inside code too); an id of no
+  attachment of the repository is not listed.
+
+Any member who sees the repository uploads and reads its attachments; a runner
+gets `403 forbidden`. An attachment that no ticket body or ticket comment
+refers to is deleted once 24 hours have passed since its upload (checked at
+start and every hour): one referred to stays while a reference does, and its
+last reference going makes it one no ticket refers to. Pull request bodies
+and comments do not keep an attachment.
 
 ### The board of a workspace
 

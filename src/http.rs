@@ -20,7 +20,7 @@ use serde_json::json;
 
 use crate::app::Shared;
 use crate::auth::{self, Caller};
-use crate::domain::{self, PageReq, apps, members, pulls, repos, tickets};
+use crate::domain::{self, PageReq, apps, attachments, members, pulls, repos, tickets};
 use crate::error::{AppError, AppResult};
 use crate::model::IdempotencyRecord;
 use crate::store::{self, Key, Rd};
@@ -414,6 +414,58 @@ async fn tickets_list(State(app): State<Shared>, c: Caller, P(repo): P<String>, 
     };
     Ok(ok(
         tickets::list_tickets(&app, &c, &repo, query, page).await?
+    ))
+}
+
+async fn attachments_create(
+    State(app): State<Shared>,
+    c: Caller,
+    P(repo): P<String>,
+    q: Q,
+    body: Body,
+) -> R {
+    // One byte over the limit is enough for the domain to refuse it.
+    let image = axum::body::to_bytes(body, attachments::MAX_BYTES + 1)
+        .await
+        .map_err(|_| AppError::too_large("The image is too large."))?;
+    Ok(created(
+        attachments::upload(&app, &c, &repo, q.get("name"), image.to_vec()).await?,
+    ))
+}
+
+async fn attachment_get(
+    State(app): State<Shared>,
+    c: Caller,
+    P((repo, id)): P<(String, String)>,
+) -> R {
+    let (kind, bytes) = attachments::get(&app, &c, &repo, &id).await?;
+    // An attachment never changes, so it never needs asking again.
+    Ok((
+        [
+            (header::CONTENT_TYPE, kind),
+            (
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable".to_string(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+async fn ticket_attachments(
+    State(app): State<Shared>,
+    c: Caller,
+    P((repo, key)): P<(String, String)>,
+    q: Q,
+) -> R {
+    let page = q.page(
+        &app,
+        &c,
+        &format!("ticket-attachments\n{}\n{key}", util::fold(&repo)),
+    )?;
+    Ok(ok(
+        attachments::of_ticket(&app, &c, &repo, &key, page).await?
     ))
 }
 
@@ -1079,7 +1131,9 @@ fn split_host_port(value: &str, default_port: &str) -> (String, String) {
 async fn idempotency(State(app): State<Shared>, req: Request, next: Next) -> Response {
     // Session, entry-link, token, and local-app responses are never
     // replayed: they hold a credential or a code, which would otherwise be
-    // kept in the database for 24 hours. (Paths here are relative to
+    // kept in the database for 24 hours. An attachment's upload is not either:
+    // its body is larger than a JSON body may be, and a repeated upload only
+    // leaves an attachment no ticket refers to. (Paths here are relative to
     // `/api/v1`.)
     let path = req.uri().path();
     if req.method() != Method::POST
@@ -1087,6 +1141,7 @@ async fn idempotency(State(app): State<Shared>, req: Request, next: Next) -> Res
         || path.starts_with("/apps/")
         || path.ends_with("/tokens")
         || path.ends_with("/markdown")
+        || path.ends_with("/attachments")
     {
         return next.run(req).await;
     }
@@ -1301,7 +1356,13 @@ pub fn router(app: Shared) -> Router {
             "/repos/{repo}/tickets/{number}",
             get(ticket_get).patch(ticket_patch),
         )
+        .route("/repos/{repo}/attachments", post(attachments_create))
+        .route("/repos/{repo}/attachments/{id}", get(attachment_get))
         .route("/repos/{repo}/tickets/{number}/pulls", get(ticket_pulls))
+        .route(
+            "/repos/{repo}/tickets/{number}/attachments",
+            get(ticket_attachments),
+        )
         .route(
             "/repos/{repo}/tickets/{number}/comments",
             get(ticket_comments).post(ticket_comment),

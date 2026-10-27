@@ -27,7 +27,7 @@ branvil runner ── runner API (HTTP) ─ ci ─ redb queue · ci/ files      
 | `upgrade.rs` | what the upgrade from the previous schema version changes in the records (replaced at each version) |
 | `model.rs` | stored records and the one function per record that derives its index entries; consistency check and rebuild |
 | `auth.rs` | tokens (`bvt_<id>_<secret>`, SHA-256 stored, constant-time compare), the owner's token file (`secrets/owner.token`, replaced at start when missing or invalid), sessions with CSRF secret, the checks of what a member's kind may do |
-| `domain/` | the operations: `members` (also entry links and sessions), `repos` (workspaces and their repositories), `tickets` (a repository's tickets, comments, the workspace's board and its cards), `pulls` (PRs, reviews, threads, diffs, checks, merge) |
+| `domain/` | the operations: `members` (also entry links and sessions), `repos` (workspaces and their repositories), `tickets` (a repository's tickets, comments, the workspace's board and its cards), `attachments` (images of a repository's tickets, files in `<data>/attachments/`, and the hourly deletion of those no ticket refers to), `pulls` (PRs, reviews, threads, diffs, checks, merge) |
 | `git.rs` | Git commands with a sanitized environment (no `GIT_*` of the service, no system/global config), time/output/concurrency limits |
 | `smart_http.rs` | `git http-backend` as CGI with Basic auth and streaming bodies |
 | `hooks.rs` | Branvil-owned hook scripts and the `branvil hook` entry point they exec |
@@ -537,8 +537,8 @@ repository lock (in id order), copies the database as of one read transaction
 (`Store::export_to`), and writes a `git bundle --all` of each repository with
 its own Git runner (Smart HTTP children may hold the shared Git permits while
 their post-receive waits for those locks). Then it releases the locks and
-copies CI logs and artifacts and the configuration, and writes a manifest with
-checksums. `branvil restore` is offline. See `docs/backup-restore.md`.
+copies CI logs and artifacts, tickets' attachments, and the configuration, and
+writes a manifest with checksums. `branvil restore` is offline. See `docs/backup-restore.md`.
 
 ## Events
 
@@ -634,6 +634,13 @@ it), a pull request (body, conversation,
 checks, merge or publish; files and a check's job and log in drawers), and
 settings (the shown workspace with its repositories, and Branvil's members, CI,
 and notifications).
+On the ticket surfaces (the new-ticket modal, the body editor, and the comment
+compose and edit forms), an image is pasted, dropped on the field, or chosen
+with "Attach images"; it is uploaded (`POST /repos/{repo}/attachments`) and
+written at the cursor as `![name](url)`, with a placeholder while it uploads.
+Save, Comment, and Create wait for it, and a refused image (not PNG, JPEG, GIF,
+or WebP, or over 10 MiB) is explained under the field. Pull request bodies and
+comments attach none: only tickets keep an attachment.
 Displayed commit IDs link to that repository's permanent commit page, including
 review revisions, check results and reused checks, merge heads and bases, and
 upstream tips. Reused checks keep a separate link to their source job.

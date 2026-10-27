@@ -174,6 +174,10 @@ impl Layout {
     pub fn ci_artifacts(&self) -> PathBuf {
         self.root.join("ci").join("artifacts")
     }
+    /// The bytes of tickets' attachments, one file per attachment id.
+    pub fn attachments(&self) -> PathBuf {
+        self.root.join("attachments")
+    }
     pub fn secrets(&self) -> PathBuf {
         self.root.join("secrets")
     }
@@ -213,6 +217,7 @@ impl Layout {
             self.git_config().parent().unwrap().to_path_buf(),
             self.ci_logs(),
             self.ci_artifacts(),
+            self.attachments(),
             self.secrets(),
         ] {
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;

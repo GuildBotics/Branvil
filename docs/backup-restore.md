@@ -24,7 +24,8 @@ branvil-2026-10-14/          (0700)
 ├── branvil.redb             the database as of one read transaction
 ├── branvil.toml             the configuration file
 ├── repos/<repo id>.bundle   `git bundle --all` of each repository with refs
-└── ci/logs/, ci/artifacts/  CI logs and artifacts
+├── ci/logs/, ci/artifacts/  CI logs and artifacts
+└── attachments/             images attached to tickets
 ```
 
 `manifest.json` (abridged):
@@ -77,7 +78,10 @@ the bundle has them.
 CI logs and artifacts are copied after the locks are released and after the
 database copy. A file the copied database refers to is therefore in the backup
 as long as CI writes a file before it records it, which it does (an artifact
-is written, synced, renamed, and only then recorded; a log is a file only); a
+is written, synced, renamed, and only then recorded; a log is a file only), and
+nothing deletes it in between: from the database copy until the files are
+copied, CI retention and the attachment sweep leave their deletions to their
+next pass (`App::file_deletions`). A
 file written later is an orphan the restored service removes at start. A log
 copied while a job runs may hold a few more lines than the database snapshot
 knows of. An attempt that was in progress at backup time is interrupted by
@@ -85,6 +89,11 @@ the restored service when its lease runs out (`docs/ci.md`).
 Queued automatic retries retain their retry number. Eligible protected required
 checks may queue another automatic retry after a second interruption, within
 the three-retry budget. Restore does not restart completed failures on its own.
+
+Tickets' attachments are copied the same way and are written before they are
+recorded too, so every image the copied tickets and comments refer to is in
+the backup, even if a later edit removed the last reference and the sweep
+(`docs/storage-design.md`) then deleted it.
 
 ## Restore
 
@@ -99,7 +108,7 @@ the three-retry budget. Restore does not restart completed failures on its own.
 4. copies the database and the configuration, creates each repository as a
    managed bare repository and fetches its bundle (`+refs/*:refs/*`), and
    checks that the refs equal the manifest's;
-5. copies CI logs and artifacts;
+5. copies CI logs and artifacts, and tickets' attachments;
 6. upgrades the database when the backup has the previous schema version
    ("Upgrading"; it reads the restored repositories; the restored database is
    then marked, so it needs `branvil admin check` before it serves);

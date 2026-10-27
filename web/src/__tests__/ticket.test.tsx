@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { dictionaries } from "../i18n";
@@ -479,5 +479,132 @@ describe("naming a related ticket", () => {
     for (const text of ["", "#0", "#012", "acme/demo#", "https://github.com/acme/demo/issues/3", `${base}/acme/demo/-/pulls/3`, "acme demo#3"]) {
       expect(ticketNamed(text, ticket), text).toBeNull();
     }
+  });
+});
+
+describe("attaching images", () => {
+  const ATTACH = "/api/v1/repos/acme/demo/attachments";
+  const image = (name: string, type = "image/png") => new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], name, { type });
+  const url = (name: string) => `/api/v1/repos/acme%2Fdemo/attachments/atc_${encodeURIComponent(name)}`;
+  /** The stored attachment of the file the request names. */
+  const stored = (req: { search: string }) => {
+    const name = new URLSearchParams(req.search).get("name") ?? "";
+    return json(201, { id: `atc_${name}`, name, media_type: "image/png", size: 4, url: url(name), created_at: at });
+  };
+
+  it("puts a pasted, a dropped, and a chosen image where the cursor is, and comments only once each is stored", async () => {
+    let answer!: (value: ReturnType<typeof json>) => void;
+    const fake = fakeApi(ticketRoutes({
+      [`GET ${TICKET}`]: json(200, card("1", "new")),
+      [`POST ${ATTACH}`]: [(req) => new Promise((resolve) => { answer = () => resolve(stored(req)); }), stored],
+      [`POST ${TICKET}/comments`]: json(201, { id: "cmt_1", author: "owner", body: "", meta: null, created_at: at, url: "", reactions: [] }),
+    }));
+    const user = userEvent.setup();
+    const { container } = renderApp("/acme/demo/-/tickets/1");
+    const field = (await screen.findByRole("textbox", { name: "New comment" })) as HTMLTextAreaElement;
+    await user.type(field, "Look: X done");
+
+    // A pasted image replaces the selection; a placeholder holds its place while it uploads.
+    field.setSelectionRange(6, 7);
+    const shot = image("shot.png");
+    fireEvent.paste(field, { clipboardData: { files: [shot], types: ["Files"] } });
+    expect(field.value).toMatch(/^Look: !\[Uploading shot\.png…\]\(#upload-\d+\) done$/);
+    expect(field.selectionStart).toBe(field.value.length - " done".length);
+    expect(screen.getByRole("status")).toHaveTextContent("Uploading images…");
+    expect(screen.getByRole("button", { name: "Comment" })).toBeDisabled();
+    // Typing goes on meanwhile.
+    await user.type(field, "!");
+    await waitFor(() => expect(answer).toBeTypeOf("function"));
+    await act(async () => answer(json(201, {})));
+    expect(field).toHaveValue(`Look: ![shot.png](${url("shot.png")}) done!`);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    const sent = fake.calls("POST", ATTACH)[0];
+    expect(sent?.body).toBe(shot);
+    expect(sent?.search).toBe("?name=shot.png");
+    expect(sent?.headers["Content-Type"]).toBe("image/png");
+    expect(sent?.headers["Idempotency-Key"]).toBeUndefined();
+
+    // Dropped images go in at the cursor in their order, one per line.
+    field.setSelectionRange(0, 0);
+    fireEvent.drop(field, { dataTransfer: { files: [image("a.png"), image("b.png")], types: ["Files"] } });
+    await waitFor(() => expect(field).toHaveValue(`![a.png](${url("a.png")})\n![b.png](${url("b.png")})Look: ![shot.png](${url("shot.png")}) done!`));
+
+    // So does a chosen one.
+    const end = field.value.length - " done!".length;
+    field.setSelectionRange(end, end);
+    await user.upload(container.querySelector("input[type=file]") as HTMLInputElement, image("c.png"));
+    await waitFor(() => expect(field.value.endsWith(`)![c.png](${url("c.png")}) done!`)).toBe(true));
+    expect(container.querySelector("input[type=file]")).toHaveAttribute("accept", "image/png,image/jpeg,image/gif,image/webp");
+
+    const posted = field.value;
+    await user.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() => expect(fake.calls("POST", `${TICKET}/comments`)).toHaveLength(1));
+    expect(fake.calls("POST", `${TICKET}/comments`)[0]?.body).toEqual({ body: posted });
+  });
+
+  it("keeps the cursor where it is when uploads before it finish together, and drops a failed one's line", async () => {
+    const answers: (() => void)[] = [];
+    const held = (req: { search: string }) => new Promise<ReturnType<typeof stored>>((resolve) => answers.push(() => resolve(stored(req))));
+    fakeApi(ticketRoutes({
+      [`GET ${TICKET}`]: json(200, card("1", "new")),
+      [`POST ${ATTACH}`]: [held, held, apiError(400, "invalid", "Not an image."), stored],
+    }));
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/tickets/1");
+    const field = (await screen.findByRole("textbox", { name: "New comment" })) as HTMLTextAreaElement;
+    await user.type(field, "Text");
+    field.setSelectionRange(0, 0);
+    fireEvent.drop(field, { dataTransfer: { files: [image("a.png"), image("b.png")], types: ["Files"] } });
+    field.setSelectionRange(field.value.length, field.value.length);
+    await waitFor(() => expect(answers).toHaveLength(2));
+    await act(async () => answers.forEach((answer) => answer()));
+    expect(field).toHaveValue(`![a.png](${url("a.png")})\n![b.png](${url("b.png")})Text`);
+    expect(field.selectionStart).toBe(field.value.length);
+
+    const before = field.value;
+    field.setSelectionRange(0, 0);
+    fireEvent.drop(field, { dataTransfer: { files: [image("x.svg", "image/svg+xml"), image("c.png")], types: ["Files"] } });
+    await waitFor(() => expect(field).toHaveValue(`![c.png](${url("c.png")})${before}`));
+  });
+
+  it.each(["en", "ja"] as const)("says why an image was not attached and leaves the text as it was (%s)", async (language) => {
+    const words = dictionaries[language];
+    const comment = { id: "cmt_1", author: "owner", body: "Before", meta: null, created_at: at, url: "", reactions: [] };
+    const fake = fakeApi(ticketRoutes({
+      [`GET ${TICKET}`]: json(200, card("1", "new")),
+      [`GET ${TICKET}/comments`]: json(200, { items: [comment], next_cursor: null }),
+      [`POST ${ATTACH}`]: [apiError(400, "invalid", "Not an image."), apiError(413, "too_large", "Too large."), apiError(500, "internal", "Disk full.")],
+    }));
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/tickets/1", language);
+    await user.click(await screen.findByRole("button", { name: words["comment.edit"] }));
+    const field = screen.getByRole("textbox", { name: words["comment.body"] }) as HTMLTextAreaElement;
+    for (const said of [words["attach.invalid"], words["attach.tooLarge"], "Disk full."]) {
+      fireEvent.paste(field, { clipboardData: { files: [image("x.svg", "image/svg+xml")], types: ["Files"] } });
+      expect(await screen.findByRole("alert")).toHaveTextContent(said);
+      expect(field).toHaveValue("Before");
+    }
+    // A paste with text is text, even with a picture of it.
+    fireEvent.paste(field, { clipboardData: { files: [image("cells.png")], types: ["text/plain", "Files"] } });
+    expect(fake.calls("POST", ATTACH)).toHaveLength(3);
+  });
+
+  it("writes a file name that would break the Markdown as harmless alt text, and saves the body once stored", async () => {
+    const fake = fakeApi(ticketRoutes({
+      [`GET ${TICKET}`]: json(200, card("1", "new", { body: "Body", revision: 2 })),
+      [`POST ${ATTACH}`]: stored,
+      [`PATCH ${TICKET}`]: json(200, { ticket: card("1", "new"), state_changed: false }),
+    }));
+    const user = userEvent.setup();
+    renderApp("/acme/demo/-/tickets/1");
+    await user.click(await screen.findByRole("button", { name: "Edit the body" }));
+    const field = screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement;
+    field.setSelectionRange(4, 4);
+    const name = "a]b[c\\d\ne.png";
+    fireEvent.drop(field, { dataTransfer: { files: [image(name)], types: ["Files"] } });
+    await waitFor(() => expect(field).toHaveValue(`Body![a b c d e.png](${url(name)})`));
+    expect(fake.calls("POST", ATTACH)[0]?.search).toBe(`?${new URLSearchParams({ name })}`);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fake.calls("PATCH", TICKET)[0]?.body).toEqual({ body: `Body![a b c d e.png](${url(name)})`, revision: 2 }));
   });
 });

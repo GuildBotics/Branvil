@@ -128,6 +128,16 @@ export interface Comment {
   url: string;
 }
 
+/** An image attached to a repository's tickets; `url` is the same-origin path a ticket's Markdown shows it by. */
+export interface Attachment {
+  id: string;
+  name: string;
+  media_type: string;
+  size: number;
+  url: string;
+  created_at: string;
+}
+
 export interface ThreadComment extends Comment {
   reply_to_id?: string | null;
 }
