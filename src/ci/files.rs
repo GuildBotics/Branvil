@@ -206,6 +206,10 @@ pub async fn apply_retention(app: &App) -> AppResult<usize> {
             return Ok(done);
         }
         for a in batch {
+            // During a backup it leaves the rest to the next pass.
+            let Ok(_deletions) = app.file_deletions.try_read() else {
+                return Ok(done);
+            };
             let _ = std::fs::remove_file(app.ci.log_path(&a.id));
             let _ = std::fs::remove_dir_all(app.ci.artifact_dir(&a.id));
             let id = a.id.clone();

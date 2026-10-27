@@ -43,6 +43,12 @@ pub struct App {
     /// Held (read) by every operation `finish` runs; `close` takes it for
     /// good, and none starts once it waits for it.
     operations: Arc<tokio::sync::RwLock<()>>,
+    /// Held (read) by whatever deletes files the database refers to (the
+    /// attachment sweep, CI retention) from its decision until the files are
+    /// gone, and left to its next pass while a backup holds it (write) from
+    /// its database copy until it has copied the files, so the backup has
+    /// every file its copy refers to.
+    pub file_deletions: tokio::sync::RwLock<()>,
     /// This app, for the tasks `finish` spawns.
     me: Weak<App>,
     /// Requests that carry the same `Idempotency-Key` of the same member run
@@ -158,6 +164,7 @@ impl App {
             hook_url,
             repo_locks: Mutex::new(HashMap::new()),
             operations: Arc::default(),
+            file_deletions: Default::default(),
             me: me.clone(),
             idempotency: KeyedLocks::default(),
             token_touched: Mutex::new(HashMap::new()),

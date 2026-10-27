@@ -199,6 +199,10 @@ pub async fn of_ticket(
 /// the records whose file is gone, and the files that have had no record for
 /// as long. Returns how many it deleted.
 pub async fn sweep(app: &App) -> AppResult<usize> {
+    // During a backup it leaves them to the next sweep.
+    let Ok(_deletions) = app.file_deletions.try_read() else {
+        return Ok(0);
+    };
     let cutoff = util::format_time(chrono::Utc::now() - chrono::Duration::seconds(GRACE_SECS));
     let all: Vec<Attachment> = app
         .store

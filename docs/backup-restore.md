@@ -78,7 +78,10 @@ the bundle has them.
 CI logs and artifacts are copied after the locks are released and after the
 database copy. A file the copied database refers to is therefore in the backup
 as long as CI writes a file before it records it, which it does (an artifact
-is written, synced, renamed, and only then recorded; a log is a file only); a
+is written, synced, renamed, and only then recorded; a log is a file only), and
+nothing deletes it in between: from the database copy until the files are
+copied, CI retention and the attachment sweep leave their deletions to their
+next pass (`App::file_deletions`). A
 file written later is an orphan the restored service removes at start. A log
 copied while a job runs may hold a few more lines than the database snapshot
 knows of. An attempt that was in progress at backup time is interrupted by
@@ -88,10 +91,9 @@ checks may queue another automatic retry after a second interruption, within
 the three-retry budget. Restore does not restart completed failures on its own.
 
 Tickets' attachments are copied the same way and are written before they are
-recorded too. A file deleted while the files are copied (by CI retention, or
-by the sweep that deletes an attachment no ticket refers to,
-`docs/storage-design.md`) is left out; the restored service's sweep removes a
-record whose file is gone, as nothing referred to it when it was deleted.
+recorded too, so every image the copied tickets and comments refer to is in
+the backup, even if a later edit removed the last reference and the sweep
+(`docs/storage-design.md`) then deleted it.
 
 ## Restore
 

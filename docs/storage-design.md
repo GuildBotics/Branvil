@@ -199,7 +199,7 @@ over the collection, the caller, and every query condition, keyed by
   `ix_attachment_refs`, the attachments no ticket body or ticket comment has
   referred to for 24 hours after their upload, and the records whose file is
   gone; then the files that have had no record for 24 hours (a crash between
-  writing and recording, a backup taken between a deletion's two steps).
+  writing and recording, an upload after a backup's database copy).
 - CI: `ci/logs/<attempt id>.log` (appended while the job runs, at most
   `ci.log_max_mib`) and `ci/artifacts/<attempt id>/<name>.zip` (written to a
   temporary name, synced, renamed, and only then recorded in `ci_attempts`).
@@ -208,6 +208,9 @@ over the collection, the caller, and every query condition, keyed by
   conclusion stay). At start, files that belong to no attempt (a crash between
   writing and recording, a restored backup taken mid-job) are deleted. Run and
   attempt records are kept; they are small (one per commit and job try).
+- The attachment sweep and CI retention delete files only while no backup is
+  between its database copy and its copy of the files; meanwhile they leave
+  them to their next pass (`App::file_deletions`, `docs/backup-restore.md`).
 - Sessions expire (`limits.session_hours`, default 720) and are pruned at
   the next entry-code exchange; idempotency keys after 24 hours; finished journal entries are deleted
   when they complete.
