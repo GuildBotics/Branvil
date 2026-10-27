@@ -1,7 +1,7 @@
 import { ActionIcon, Badge, Menu, Text, Tooltip, useMenuContext } from "@mantine/core";
 import { useClipboard } from "@mantine/hooks";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, Check, Copy, Ellipsis, GitPullRequest } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Copy, Ellipsis, GitPullRequest, Trash2 } from "lucide-react";
 import { memo, useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
@@ -9,7 +9,8 @@ import { ticketRef, type Card, type Lane, type PullSummary } from "../../api/typ
 import { ErrorMessage, MemberAvatar, StateBadge, type Tone } from "../../components/common";
 import { CheckSlot, PeopleItems, type Person } from "../../components/PeoplePicker";
 import { type Translate, useT } from "../../i18n";
-import { useChecks } from "../../query/hooks";
+import { useChecks, useSession } from "../../query/hooks";
+import { applyChange } from "../../query/events";
 import { ServiceLink } from "../../router/Router";
 import { routeOfUrl } from "../../router/routes";
 import { relationRefusal } from "../ticket/Relations";
@@ -144,6 +145,33 @@ export function CopyUrlItem({ url }: { url: string }) {
     <Menu.Item closeMenuOnClick={false} leftSection={clipboard.copied ? <Check size={14} /> : <Copy size={14} />} onClick={() => clipboard.copy(url)}>
       {clipboard.copied ? t("common.copied") : t("board.copyUrl")}
     </Menu.Item>
+  );
+}
+
+/** Last action of either card menu. Keep a refusal visible until it is closed. */
+export function DeleteCardItem({ card }: { card: Card }) {
+  const t = useT();
+  const client = useQueryClient();
+  const owner = useSession().data?.me.kind === "owner";
+  const remove = useMutation({
+    mutationFn: () => api.tickets.delete(card.repository, card.key),
+    onSuccess: () => {
+      applyChange({ kind: "ticket", path: card.repository, id: card.key }, client);
+      applyChange({ kind: "board", path: card.repository.split("/")[0] ?? "" }, client);
+    },
+  });
+  if (!owner) return null;
+  const refusal = (["delete_has_children", "delete_blocks_tickets", "delete_linked_pull", "delete_upstream_issue"] as const).find((code) => isApiError(remove.error, code));
+  return (
+    <>
+      <Menu.Divider />
+      <Menu.Item color="red" leftSection={<Trash2 size={14} />} closeMenuOnClick={false} disabled={remove.isPending} onClick={() => {
+        if (window.confirm(t("ticket.confirmDelete", { key: ticketRef(card) }))) remove.mutate();
+      }}>
+        {t("ticket.delete")}
+      </Menu.Item>
+      {remove.isError && <Menu.Label><ErrorMessage error={refusal ? new Error(t(`ticket.${refusal}`)) : remove.error} /></Menu.Label>}
+    </>
   );
 }
 
@@ -314,6 +342,7 @@ function CardMenu({
         </Menu.Item>
         <Menu.Divider />
         <CopyUrlItem url={card.url} />
+        <DeleteCardItem card={card} />
       </LazyMenu>
     </div>
   );

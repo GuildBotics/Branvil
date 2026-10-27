@@ -219,7 +219,7 @@ describe("kanban board", () => {
 
     await user.click(screen.getByRole("button", { name: "Actions of acme/demo#1" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual(["New", "Ready", "In progress", "Done", "Up", "Down", "Copy URL"]);
+    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual(["New", "Ready", "In progress", "Done", "Up", "Down", "Copy URL", "Delete"]);
 
     await user.click(within(menu).getByRole("menuitem", { name: "Copy URL" }));
     expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}/acme/demo/-/tickets/1`);

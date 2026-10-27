@@ -159,6 +159,7 @@ describe("relations", () => {
       "Add child ticket",
       "Add next ticket",
       "Copy URL",
+      "Delete",
     ]);
     await user.click(within(menu).getByRole("menuitem", { name: "Copy URL" }));
     expect(await navigator.clipboard.readText()).toBe(url("4"));

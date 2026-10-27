@@ -171,6 +171,7 @@ over the collection, the caller, and every query condition, keyed by
 | --- | --- |
 | create ticket | repository re-read, label check, number allocation, insert, card placement, indexes |
 | update ticket | conditional revision check, label add/remove against the stored set, state change, indexes (concurrent label changes are serialized by redb's single writer, so none is lost) |
+| delete ticket (owner only) | read ticket, refuse any incoming parent/blocker relation or PR link or upstream issue, then remove the ticket and all its comments with their derived indexes in the same transaction; keep the `ticket:<repo>` counter so numbers are never reused |
 | create PR | open (head, base) lookup, link validation, number allocation, insert, indexes (concurrent creates make one PR) |
 | review / inline comment | insert + PR activity + involvement; the head was read from Git just before, and the write is linearized at that read |
 | reaction | read-modify-write of the target entry, after checking the entry belongs to the item |
@@ -194,8 +195,11 @@ over the collection, the caller, and every query condition, keyed by
 - The data directory (0700), `ci/logs`, `ci/artifacts`, `attachments`, and
   `secrets/` (0700; `cursor.key` 0600) are created at start.
 - Tickets' attachments: `attachments/<attachment id>` (written to a temporary
-  name, synced, renamed, and only then recorded in `attachments`). At start and every
-  hour the sweep deletes, each in a transaction that checks
+  name, synced, renamed, and only then recorded in `attachments`). Deleting a
+  ticket removes its body/comment attachment references with the other indexes;
+  it does not delete shared repository attachments. Unreferenced images follow
+  the same sweep as after editing a body or deleting a comment.
+  At start and every hour the sweep deletes, each in a transaction that checks
   `ix_attachment_refs`, the attachments no ticket body or ticket comment has
   referred to for 24 hours after their upload, and the records whose file is
   gone; then the files that have had no record for 24 hours (a crash between

@@ -512,6 +512,75 @@ pub async fn get_ticket(
         .await
 }
 
+/// Deletes only an unreferenced ticket. Checking references and removing all
+/// source records and their indexes share the single writer transaction.
+pub async fn delete_ticket(
+    app: &App,
+    caller: &Caller,
+    repo_path: &str,
+    key: &str,
+) -> AppResult<()> {
+    caller.require_owner()?;
+    let repo = repos::visible(app, caller, repo_path).await?;
+    let key = key.to_string();
+    let base_url = app.base_url.clone();
+    let view = app
+        .store
+        .write(move |w| {
+            let t = ticket_by_key(w, &repo, &key)?;
+            let id = id_of(&t);
+            let pull_prefix = Key::new().s(&t.repo).u(t.number).bytes();
+            for (present, code, reason) in [
+                (
+                    !referrers(w, &id, "parent")?.is_empty(),
+                    "delete_has_children",
+                    "it has child tickets",
+                ),
+                (
+                    !referrers(w, &id, "blocked_by")?.is_empty(),
+                    "delete_blocks_tickets",
+                    "other tickets are blocked by it",
+                ),
+                (
+                    !w.prefix_keys(store::IX_TICKET_PULLS, &pull_prefix)?
+                        .is_empty(),
+                    "delete_linked_pull",
+                    "it is linked to a pull request",
+                ),
+                (
+                    t.upstream_issue.is_some(),
+                    "delete_upstream_issue",
+                    "it is linked to an upstream issue",
+                ),
+            ] {
+                if present {
+                    return Err(AppError::new(
+                        StatusCode::CONFLICT,
+                        code,
+                        format!("Ticket {key} cannot be deleted because {reason}."),
+                    ));
+                }
+            }
+            // Capture related tickets for event invalidation before deleting.
+            let view = ticket_view(w, &base_url, &repo, &t)?;
+            let target = ticket_target(&t);
+            for c in comments_of(w, &target)? {
+                let key = target.comment_key(c.seq);
+                w.del(store::COMMENTS, &key)?;
+                model::reindex(w, model::comment_index(&c, &key), Vec::new())?;
+            }
+            w.del(store::TICKETS, &Ticket::key(&t.repo, t.number))?;
+            model::reindex(w, model::ticket_index(&t), Vec::new())?;
+            // Keep the repository's ticket counter: numbers are never reused.
+            Ok(view)
+        })
+        .await?;
+    publish_tickets(app, [&view]);
+    app.events
+        .publish("board", workspace_of(&view.repository), "");
+    Ok(())
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TicketPatch {

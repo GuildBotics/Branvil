@@ -145,6 +145,7 @@ export const tickets = {
   create: (repo: string, body: { title: string; body: string; labels: string[]; lane?: Lane }) =>
     create<Ticket>(`/repos/${enc(repo)}/tickets`, body),
   get: (repo: string, key: string) => get<Ticket>(ticketPath(repo, key)),
+  delete: (repo: string, key: string) => request<void>("DELETE", ticketPath(repo, key)),
   update: (repo: string, key: string, body: TicketPatch) =>
     request<{ ticket: Ticket; state_changed: boolean }>("PATCH", ticketPath(repo, key), { body }),
   comments: (repo: string, key: string) => getAll<Comment>(`${ticketPath(repo, key)}/comments`),
