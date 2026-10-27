@@ -33,6 +33,29 @@ pub fn prose(markdown: &str) -> Vec<Range<usize>> {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        // Inline HTML belongs to one Markdown block. An unclosed tag (even
+        // Vec<String>) must not suppress references in later blocks. Use
+        // every block boundary, including tight-list items and table cells;
+        // inline formatting, links, and line breaks keep their HTML scope.
+        let boundary = match &event {
+            Event::Start(tag) => Some(tag.to_end()),
+            Event::End(tag) => Some(*tag),
+            _ => None,
+        };
+        if matches!(&event, Event::Rule)
+            || boundary.is_some_and(|tag| {
+                !matches!(
+                    tag,
+                    TagEnd::Emphasis
+                        | TagEnd::Strong
+                        | TagEnd::Strikethrough
+                        | TagEnd::Link
+                        | TagEnd::Image
+                )
+            })
+        {
+            html.clear();
+        }
         match event {
             Event::Start(
                 Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. } | Tag::HtmlBlock,

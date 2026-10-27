@@ -393,9 +393,11 @@ they are composed for the host:
 - The Markdown is parsed (pulldown-cmark, with tables, strikethrough and task
   lists); only prose is rewritten: code spans, code blocks, links, images,
   and HTML (including text between inline tags) are left alone. Escaped
-  sigils stay literal. The GUI's resolver uses the same `references.rs`
-  parser and `domain::markdown::resolve` target lookup: there is no browser
-  reference parser. It inserts links to existing items with kind and current
+  sigils stay literal. Inline HTML scope ends at each Markdown block
+  boundary, including tight-list items and table cells; an unclosed tag
+  cannot suppress references in later blocks. The GUI's resolver uses the
+  same `references.rs` parser and `domain::markdown::resolve` target lookup:
+  there is no browser reference parser. It inserts links to existing items with kind and current
   state, which the GUI renders through marked and DOMPurify before showing
   the reference icons. `tests/fixtures/markdown-references.json` fixes the
   same examples for Rust parsing, the API resolver, and GUI rendering.

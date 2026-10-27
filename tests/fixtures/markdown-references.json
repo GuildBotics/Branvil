@@ -303,6 +303,227 @@
           "target": 6
         }
       ]
+    },
+    {
+      "name": "unclosed generic tag ends with paragraph",
+      "source": "Use Vec<String> here. Fixes #2.\n\nSee !1 and #1.\n",
+      "markdown": "Use Vec<String> here. Fixes #2.\n\nSee <a href=\"http://127.0.0.1:7878/acme/demo/-/pulls/1\" data-branvil-kind=\"pull\" data-branvil-state=\"open\" title=\"PR one\">!1</a> and <a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/1\" data-branvil-kind=\"ticket\" data-branvil-state=\"open\" title=\"Ticket &lt;one&gt; &quot; &amp; &#124; [one]&#10;line\">#1</a>.\n",
+      "found": [
+        "!1",
+        "#1"
+      ],
+      "links": [
+        {
+          "label": "!1",
+          "target": 2
+        },
+        {
+          "label": "#1",
+          "target": 0
+        }
+      ]
+    },
+    {
+      "name": "unclosed tag before standalone paragraph and tight list",
+      "source": "a <span>x\n\n#2\n\n- !1\n",
+      "markdown": "a <span>x\n\n<a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/2\" data-branvil-kind=\"ticket\" data-branvil-state=\"closed\" title=\"Closed ticket\">#2</a>\n\n- <a href=\"http://127.0.0.1:7878/acme/demo/-/pulls/1\" data-branvil-kind=\"pull\" data-branvil-state=\"open\" title=\"PR one\">!1</a>\n",
+      "found": [
+        "#2",
+        "!1"
+      ],
+      "links": [
+        {
+          "label": "#2",
+          "target": 1
+        },
+        {
+          "label": "!1",
+          "target": 2
+        }
+      ]
+    },
+    {
+      "name": "tight list sibling boundaries",
+      "source": "- Vec<String> #2\n- #1\n- !1\n",
+      "markdown": "- Vec<String> #2\n- <a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/1\" data-branvil-kind=\"ticket\" data-branvil-state=\"open\" title=\"Ticket &lt;one&gt; &quot; &amp; &#124; [one]&#10;line\">#1</a>\n- <a href=\"http://127.0.0.1:7878/acme/demo/-/pulls/1\" data-branvil-kind=\"pull\" data-branvil-state=\"open\" title=\"PR one\">!1</a>\n",
+      "found": [
+        "#1",
+        "!1"
+      ],
+      "links": [
+        {
+          "label": "#1",
+          "target": 0
+        },
+        {
+          "label": "!1",
+          "target": 2
+        }
+      ]
+    },
+    {
+      "name": "nested list boundary",
+      "source": "- parent <span>x\n  - child #1\n- sibling !1\n",
+      "markdown": "- parent <span>x\n  - child <a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/1\" data-branvil-kind=\"ticket\" data-branvil-state=\"open\" title=\"Ticket &lt;one&gt; &quot; &amp; &#124; [one]&#10;line\">#1</a>\n- sibling <a href=\"http://127.0.0.1:7878/acme/demo/-/pulls/1\" data-branvil-kind=\"pull\" data-branvil-state=\"open\" title=\"PR one\">!1</a>\n",
+      "found": [
+        "#1",
+        "!1"
+      ],
+      "links": [
+        {
+          "label": "#1",
+          "target": 0
+        },
+        {
+          "label": "!1",
+          "target": 2
+        }
+      ]
+    },
+    {
+      "name": "heading boundary",
+      "source": "# Vec<String> #2\n\nSee #1.\n",
+      "markdown": "# Vec<String> #2\n\nSee <a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/1\" data-branvil-kind=\"ticket\" data-branvil-state=\"open\" title=\"Ticket &lt;one&gt; &quot; &amp; &#124; [one]&#10;line\">#1</a>.\n",
+      "found": [
+        "#1"
+      ],
+      "links": [
+        {
+          "label": "#1",
+          "target": 0
+        }
+      ]
+    },
+    {
+      "name": "paragraph to heading boundary",
+      "source": "Vec<String> #2\n\n# Heading !1\n",
+      "markdown": "Vec<String> #2\n\n# Heading <a href=\"http://127.0.0.1:7878/acme/demo/-/pulls/1\" data-branvil-kind=\"pull\" data-branvil-state=\"open\" title=\"PR one\">!1</a>\n",
+      "found": [
+        "!1"
+      ],
+      "links": [
+        {
+          "label": "!1",
+          "target": 2
+        }
+      ]
+    },
+    {
+      "name": "quote boundary",
+      "source": "> Vec<String> #2\n\nOutside #1.\n",
+      "markdown": "> Vec<String> #2\n\nOutside <a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/1\" data-branvil-kind=\"ticket\" data-branvil-state=\"open\" title=\"Ticket &lt;one&gt; &quot; &amp; &#124; [one]&#10;line\">#1</a>.\n",
+      "found": [
+        "#1"
+      ],
+      "links": [
+        {
+          "label": "#1",
+          "target": 0
+        }
+      ]
+    },
+    {
+      "name": "table cells and rows",
+      "source": "| Vec<String> | #1 |\n| --- | --- |\n| #2 | !1 |\n",
+      "markdown": "| Vec<String> | <a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/1\" data-branvil-kind=\"ticket\" data-branvil-state=\"open\" title=\"Ticket &lt;one&gt; &quot; &amp; &#124; [one]&#10;line\">#1</a> |\n| --- | --- |\n| <a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/2\" data-branvil-kind=\"ticket\" data-branvil-state=\"closed\" title=\"Closed ticket\">#2</a> | <a href=\"http://127.0.0.1:7878/acme/demo/-/pulls/1\" data-branvil-kind=\"pull\" data-branvil-state=\"open\" title=\"PR one\">!1</a> |\n",
+      "found": [
+        "#1",
+        "#2",
+        "!1"
+      ],
+      "links": [
+        {
+          "label": "#1",
+          "target": 0
+        },
+        {
+          "label": "#2",
+          "target": 1
+        },
+        {
+          "label": "!1",
+          "target": 2
+        }
+      ]
+    },
+    {
+      "name": "standalone closing tag HTML block",
+      "source": "x <span>\n\n</span>\n\n#1\n",
+      "markdown": "x <span>\n\n</span>\n\n<a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/1\" data-branvil-kind=\"ticket\" data-branvil-state=\"open\" title=\"Ticket &lt;one&gt; &quot; &amp; &#124; [one]&#10;line\">#1</a>\n",
+      "found": [
+        "#1"
+      ],
+      "links": [
+        {
+          "label": "#1",
+          "target": 0
+        }
+      ]
+    },
+    {
+      "name": "HTML block resets inline scope",
+      "source": "before <span>x\n\n<div>\n#1 !1\n</div>\n\n!1\n",
+      "markdown": "before <span>x\n\n<div>\n#1 !1\n</div>\n\n<a href=\"http://127.0.0.1:7878/acme/demo/-/pulls/1\" data-branvil-kind=\"pull\" data-branvil-state=\"open\" title=\"PR one\">!1</a>\n",
+      "found": [
+        "!1"
+      ],
+      "links": [
+        {
+          "label": "!1",
+          "target": 2
+        }
+      ]
+    },
+    {
+      "name": "code block resets inline scope",
+      "source": "Vec<String>\n\n~~~\n#1 !1\n~~~\n\n#1\n",
+      "markdown": "Vec<String>\n\n~~~\n#1 !1\n~~~\n\n<a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/1\" data-branvil-kind=\"ticket\" data-branvil-state=\"open\" title=\"Ticket &lt;one&gt; &quot; &amp; &#124; [one]&#10;line\">#1</a>\n",
+      "found": [
+        "#1"
+      ],
+      "links": [
+        {
+          "label": "#1",
+          "target": 0
+        }
+      ]
+    },
+    {
+      "name": "inline formatting and breaks keep HTML scope",
+      "source": "before <span>**#1** *!1* ~~#2~~ [#1](https://example.com) ![!1](https://example.com/x)\n#1</span> after #2\n",
+      "markdown": "before <span>**#1** *!1* ~~#2~~ [#1](https://example.com) ![!1](https://example.com/x)\n#1</span> after <a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/2\" data-branvil-kind=\"ticket\" data-branvil-state=\"closed\" title=\"Closed ticket\">#2</a>\n",
+      "found": [
+        "#2"
+      ],
+      "links": [
+        {
+          "label": "#2",
+          "target": 1
+        }
+      ]
+    },
+    {
+      "name": "unresolved URL after unclosed tag",
+      "source": "Vec<String>\n\nhttp://127.0.0.1:7878/acme/demo/-/tickets/999",
+      "markdown": "Vec<String>\n\n&#104;ttp://127.0.0.1:7878/acme/demo/-/tickets/999",
+      "found": [
+        "http://127.0.0.1:7878/acme/demo/-/tickets/999"
+      ],
+      "links": []
+    },
+    {
+      "name": "thematic break within tight item",
+      "source": "- before <span>x\n  ***\n  #1\n",
+      "markdown": "- before <span>x\n  ***\n  <a href=\"http://127.0.0.1:7878/acme/demo/-/tickets/1\" data-branvil-kind=\"ticket\" data-branvil-state=\"open\" title=\"Ticket &lt;one&gt; &quot; &amp; &#124; [one]&#10;line\">#1</a>\n",
+      "found": [
+        "#1"
+      ],
+      "links": [
+        {
+          "label": "#1",
+          "target": 0
+        }
+      ]
     }
   ]
 }

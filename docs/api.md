@@ -94,8 +94,11 @@ icons and accessible labels. This response is **not trusted HTML**.
 
 Code spans/blocks, links (including explicit autolinks), images, and HTML
 (inline contents included) are untouched. Escaped sigils and non-whole
-references are literal. Unknown numbers and foreign repositories stay text;
-the first character of an unresolved bare Branvil URL is an HTML entity to
+references are literal. An unclosed inline HTML tag excludes text only
+within its Markdown block, so later paragraphs, list items, headings,
+and table cells are independent.
+Unknown numbers and foreign repositories stay text; the first character
+of an unresolved bare Branvil URL is an HTML entity to
 prevent GFM from auto-linking it. The parser and lookup are shared with the
 upstream rewrite. The GUI refreshes displayed Markdown on ticket, pull,
 repository, and upstream events, including changes in another repository.
