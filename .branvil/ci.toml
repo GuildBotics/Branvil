@@ -18,15 +18,43 @@
 #
 # Fetching crates and npm packages needs the repository's network access
 # (`ci_network`).
+# PR heads select jobs by paths; default-branch and landing-gate runs execute
+# every job. A change to this pipeline also executes every job.
 
 [[jobs]]
 name = "fmt"
+paths = [
+  "src/**",
+  "tests/*.rs",
+  "tests/common/**",
+  "examples/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "build.rs",
+  "rust-toolchain*",
+  ".cargo/**",
+  "clippy.toml",
+  "rustfmt.toml",
+]
 image = "guildbotics/agent-environment:dev"
 commands = ["CARGO_HOME=/work/.ci/cargo-home cargo fmt --check"]
 timeout_secs = 300
 
 [[jobs]]
 name = "clippy"
+paths = [
+  "src/**",
+  "tests/*.rs",
+  "tests/common/**",
+  "examples/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "build.rs",
+  "rust-toolchain*",
+  ".cargo/**",
+  "clippy.toml",
+  "rustfmt.toml",
+]
 image = "guildbotics/agent-environment:dev"
 commands = [
   "find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +",
@@ -37,6 +65,19 @@ cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.loc
 
 [[jobs]]
 name = "test"
+paths = [
+  "src/**",
+  "tests/*.rs",
+  "tests/common/**",
+  "examples/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "build.rs",
+  "rust-toolchain*",
+  ".cargo/**",
+  "clippy.toml",
+  "rustfmt.toml",
+]
 image = "guildbotics/agent-environment:dev"
 commands = [
   "find . -path ./target -prune -o -path ./.ci -prune -o -exec touch -c {} +",
@@ -47,6 +88,7 @@ cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.loc
 
 [[jobs]]
 name = "web"
+paths = ["web/**"]
 image = "guildbotics/agent-environment:dev"
 commands = [
   "cd web && npm_config_cache=/work/.ci/npm npm ci",
@@ -60,6 +102,7 @@ artifacts = [{ name = "web-tests", paths = ["web/test-results/timing.json"] }]
 
 [[jobs]]
 name = "dev-script"
+paths = ["scripts/**", "tests/test_dev_script.py"]
 image = "guildbotics/agent-environment:dev"
 commands = ["python3 -m unittest discover -s tests -p test_dev_script.py -v"]
 timeout_secs = 1200
@@ -71,6 +114,21 @@ timeout_secs = 1200
 # Cargo, so CARGO_HOME points into the job for it too.
 [[jobs]]
 name = "branvil-integration"
+paths = [
+  "src/**",
+  "tests/*.rs",
+  "tests/common/**",
+  "examples/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "build.rs",
+  "rust-toolchain*",
+  ".cargo/**",
+  "clippy.toml",
+  "rustfmt.toml",
+  "integration/**",
+  "scripts/guildbotics-smoke.sh",
+]
 image = "guildbotics/agent-environment:dev"
 commands = ['''
 set -eu
