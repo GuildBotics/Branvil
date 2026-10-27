@@ -112,7 +112,7 @@ export function TicketView({ repo, ticketKey, drawer }: { repo: string; ticketKe
                 onSave={(body) => void save({ body }).then(() => setEditingBody(false), () => undefined)}
               />
             ) : tk.body.trim() ? (
-              <Markdown source={tk.body} />
+              <Markdown repo={repo} source={tk.body} />
             ) : (
               <Text size="sm" c="dimmed">
                 {t("common.notProvided")}

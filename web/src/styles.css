@@ -110,6 +110,7 @@
 
 body {
   margin: 0;
+}
 
 /* Mantine sets the body's colors; the workspace area takes the base color. */
 
@@ -429,6 +430,51 @@ a:hover {
 
 .markdown a {
   color: var(--mantine-color-anchor);
+}
+
+/* The service supplies the kind and state; SVG masks are GUI-owned icons. */
+.markdown a[data-branvil-kind] {
+  font-weight: 500;
+}
+
+.markdown a[data-branvil-kind]::before {
+  content: "";
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.25em;
+  vertical-align: -0.12em;
+  background: var(--color-success-text);
+  mask: var(--reference-icon) center / contain no-repeat;
+}
+
+.markdown a[data-branvil-kind="ticket"] {
+  --reference-icon: url("./assets/references/ticket-open.svg");
+}
+
+.markdown a[data-branvil-kind="ticket"][data-branvil-state="closed"] {
+  --reference-icon: url("./assets/references/ticket-closed.svg");
+}
+
+.markdown a[data-branvil-kind="pull"] {
+  --reference-icon: url("./assets/references/pull-open.svg");
+}
+
+.markdown a[data-branvil-kind="pull"][data-branvil-state="closed"] {
+  --reference-icon: url("./assets/references/pull-closed.svg");
+}
+
+.markdown a[data-branvil-kind="pull"][data-branvil-state="merged"] {
+  --reference-icon: url("./assets/references/pull-merged.svg");
+}
+
+.markdown a[data-branvil-state="closed"]::before {
+  background: var(--color-danger-text);
+}
+
+.markdown a[data-branvil-kind="ticket"][data-branvil-state="closed"]::before,
+.markdown a[data-branvil-state="merged"]::before {
+  background: var(--color-info-text);
 }
 
 /* The table scrolls inside its own box so a wide grid does not widen the page.

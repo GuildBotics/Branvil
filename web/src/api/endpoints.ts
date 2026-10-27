@@ -43,6 +43,10 @@ import type {
 const create = <T>(path: string, body: unknown) =>
   request<T>("POST", path, { body, idempotencyKey: newIdempotencyKey() });
 
+/** Read-only resolution; no idempotency record should cache target states. */
+export const markdown = (repo: string, source: string, signal?: AbortSignal) =>
+  request<{ markdown: string }>("POST", `/repos/${enc(repo)}/markdown`, { body: { source }, signal });
+
 // Session -------------------------------------------------------------------
 
 export const session = {

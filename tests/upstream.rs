@@ -1447,7 +1447,8 @@ async fn branvils_references_are_written_for_the_host_when_published() {
         "Fixes #1 and #2, after !1 (not !9), like acme/demo#1 and octo/other#5.\n\n\
          `#1` in code, [#2](https://example.test) as a link.\n\n\
          ```\n#1 in a block\n```\n\n\
-         See {base}/acme/demo/-/tickets/1, {base}/acme/demo/-/tickets/2 and {base}/acme/demo/-/pulls/1."
+         See {base}/acme/demo/-/tickets/1, {base}/acme/demo/-/tickets/2 and {base}/acme/demo/-/pulls/1.\n\n\
+         Use Vec<String> here.\n\nAfter #1 and !1."
     );
     w.push_change("second", "b.txt", "b\n");
     let (st, v) = s
@@ -1463,7 +1464,8 @@ async fn branvils_references_are_written_for_the_host_when_published() {
         "Fixes #7 and `acme/demo#2`, after #100 (not !9), like #7 and octo/other#5.\n\n\
          `#1` in code, [#2](https://example.test) as a link.\n\n\
          ```\n#1 in a block\n```\n\n\
-         See {issue}, `acme/demo#2` and {pr}.",
+         See {issue}, `acme/demo#2` and {pr}.\n\n\
+         Use Vec<String> here.\n\nAfter #7 and #100.",
         pr = "https://github.test/octo/demo/pull/100",
     );
     // The preview shows exactly that, and it is what GitHub gets.

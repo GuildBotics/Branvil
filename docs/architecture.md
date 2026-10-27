@@ -42,6 +42,7 @@ branvil runner ── runner API (HTTP) ─ ci ─ redb queue · ci/ files      
 | `tunnel.rs` | `branvil tunnel`: the system `ssh -N -L` forward to the Hub machine, restarted with backoff |
 | `events.rs` | bounded broadcast for SSE and the landing task |
 | `http.rs` | router, Host/Origin guard, security headers, idempotency middleware, extractors, SSE, GUI files |
+| `references.rs` | Markdown reference syntax and prose ranges, shared by display and upstream rewriting |
 | `rank.rs` | card ranks (fractional indexing) |
 
 ## Requests
@@ -389,11 +390,17 @@ its own URLs. On the host `#3` names something else (GitHub links `#3`,
 `owner/name#3`, `GH-3`, and URLs), so the title and body are rewritten when
 they are composed for the host:
 
-- The Markdown is parsed (pulldown-cmark); only prose is rewritten: text in
-  code spans, code blocks, links, and HTML blocks is left alone, as GitHub's
-  own pipeline does not make references in code or links either (its filters
-  skip text in `pre`, `code`, and `a`). Text between inline HTML tags is prose,
-  as it is on GitHub.
+- The Markdown is parsed (pulldown-cmark, with tables, strikethrough and task
+  lists); only prose is rewritten: code spans, code blocks, links, images,
+  and HTML (including text between inline tags) are left alone. Escaped
+  sigils stay literal. Inline HTML scope ends at each Markdown block
+  boundary, including tight-list items and table cells; an unclosed tag
+  cannot suppress references in later blocks. The GUI's resolver uses the
+  same `references.rs` parser and `domain::markdown::resolve` target lookup:
+  there is no browser reference parser. It inserts links to existing items with kind and current
+  state, which the GUI renders through marked and DOMPurify before showing
+  the reference icons. `tests/fixtures/markdown-references.json` fixes the
+  same examples for Rust parsing, the API resolver, and GUI rendering.
 - A ticket that names an issue there becomes the host's reference to that
   issue (`#7`, `owner/other#7`); a pull request published to that repository
   becomes its number there; a Branvil URL of either becomes the host's URL.

@@ -17,6 +17,7 @@ mod http;
 mod landing;
 mod model;
 mod rank;
+mod references;
 mod refs;
 mod runner;
 mod smart_http;

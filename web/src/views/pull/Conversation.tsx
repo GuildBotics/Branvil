@@ -56,7 +56,7 @@ function ReviewView({ repo, number, review, headSha, kind, onReact }: { repo: st
         </Text>
       </PostHead>
       <div className="post-body">
-        {review.body.trim() && <Markdown source={review.body} />}
+        {review.body.trim() && <Markdown repo={repo} source={review.body} />}
         <Reactions reactions={review.reactions ?? []} onReact={onReact} />
       </div>
     </article>
@@ -125,7 +125,7 @@ function ThreadView({
       {/* Keep replies mounted so a fragment can reveal a collapsed thread. */}
       <div className="thread-body">
         {thread.comments.map((c) => (
-          <CommentView key={c.id} comment={c} url={`${href.pull(repo, number)}#${encodeURIComponent(c.id)}`} kind={kindOf(c.author)} onReact={(reaction, on) => react.mutate({ id: c.id, reaction, on })} />
+          <CommentView repo={repo} key={c.id} comment={c} url={`${href.pull(repo, number)}#${encodeURIComponent(c.id)}`} kind={kindOf(c.author)} onReact={(reaction, on) => react.mutate({ id: c.id, reaction, on })} />
         ))}
         <ComposeForm
           label={t("thread.reply")}
@@ -215,7 +215,7 @@ export function Conversation({
         {!settled && <Loading />}
         {entries.map((e) =>
           "comment" in e ? (
-            <CommentView key={e.comment.id} comment={e.comment} url={`${href.pull(repo, number)}#${encodeURIComponent(e.comment.id)}`} kind={kindOf(e.comment.author)} onReact={(reaction, on) => react.mutate({ id: e.comment.id, reaction, on })} />
+            <CommentView repo={repo} key={e.comment.id} comment={e.comment} url={`${href.pull(repo, number)}#${encodeURIComponent(e.comment.id)}`} kind={kindOf(e.comment.author)} onReact={(reaction, on) => react.mutate({ id: e.comment.id, reaction, on })} />
           ) : "review" in e ? (
             <ReviewView repo={repo} number={number} key={e.review.id} review={e.review} headSha={pull.head_sha} kind={kindOf(e.review.author)} onReact={(reaction, on) => react.mutate({ id: e.review.id, reaction, on })} />
           ) : "commit" in e ? (

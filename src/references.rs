@@ -1,7 +1,5 @@
-//! Branvil's references in a pull request's Markdown and their rewriting for
-//! the upstream host (`docs/architecture.md`, "Branvil's references on the
-//! host"). Only prose is rewritten: code spans, code blocks, links, and HTML
-//! are left as written.
+//! Branvil's Markdown references, shared by the GUI and upstream publishing.
+//! Only prose is rewritten: code, links, images, and HTML are left as written.
 
 use std::ops::Range;
 
@@ -31,7 +29,33 @@ pub struct Reference {
 pub fn prose(markdown: &str) -> Vec<Range<usize>> {
     let mut out: Vec<Range<usize>> = Vec::new();
     let mut inside = 0usize;
-    for (event, range) in Parser::new_ext(markdown, Options::empty()).into_offset_iter() {
+    let mut html = Vec::new();
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        // Inline HTML belongs to one Markdown block. An unclosed tag (even
+        // Vec<String>) must not suppress references in later blocks. Use
+        // every block boundary, including tight-list items and table cells;
+        // inline formatting, links, and line breaks keep their HTML scope.
+        let boundary = match &event {
+            Event::Start(tag) => Some(tag.to_end()),
+            Event::End(tag) => Some(*tag),
+            _ => None,
+        };
+        if matches!(&event, Event::Rule)
+            || boundary.is_some_and(|tag| {
+                !matches!(
+                    tag,
+                    TagEnd::Emphasis
+                        | TagEnd::Strong
+                        | TagEnd::Strikethrough
+                        | TagEnd::Link
+                        | TagEnd::Image
+                )
+            })
+        {
+            html.clear();
+        }
         match event {
             Event::Start(
                 Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. } | Tag::HtmlBlock,
@@ -39,7 +63,8 @@ pub fn prose(markdown: &str) -> Vec<Range<usize>> {
             Event::End(TagEnd::CodeBlock | TagEnd::Link | TagEnd::Image | TagEnd::HtmlBlock) => {
                 inside = inside.saturating_sub(1)
             }
-            Event::Text(_) if inside == 0 => match out.last_mut() {
+            Event::InlineHtml(tag) if inside == 0 => html_tag(&tag, &mut html),
+            Event::Text(_) if inside == 0 && html.is_empty() => match out.last_mut() {
                 Some(last) if last.end == range.start => last.end = range.end,
                 _ => out.push(range),
             },
@@ -47,6 +72,49 @@ pub fn prose(markdown: &str) -> Vec<Range<usize>> {
         }
     }
     out
+}
+
+/// Inline HTML has no Start/End events. Keep its text out of prose too;
+/// void and self-closing tags must not hide the prose that follows them.
+fn html_tag(tag: &str, stack: &mut Vec<String>) {
+    let Some(tag) = tag.strip_prefix('<') else {
+        return;
+    };
+    let closing = tag.starts_with('/');
+    let tag = tag.strip_prefix('/').unwrap_or(tag);
+    let name: String = tag
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if name.is_empty() {
+        return;
+    }
+    let name = name.to_ascii_lowercase();
+    if closing {
+        if let Some(i) = stack.iter().rposition(|x| *x == name) {
+            stack.truncate(i);
+        }
+    } else if !tag.trim_end().ends_with("/>")
+        && !matches!(
+            name.as_str(),
+            "area"
+                | "base"
+                | "br"
+                | "col"
+                | "embed"
+                | "hr"
+                | "img"
+                | "input"
+                | "link"
+                | "meta"
+                | "param"
+                | "source"
+                | "track"
+                | "wbr"
+        )
+    {
+        stack.push(name);
+    }
 }
 
 fn name_char(c: u8) -> bool {
@@ -82,6 +150,14 @@ fn kind_of(c: u8) -> Option<Kind> {
 
 /// The reference starting at `i` and its end.
 fn reference_at(s: &[u8], i: usize, base_url: &str) -> Option<(Reference, usize)> {
+    if !name_char(s[i]) && kind_of(s[i]).is_none() {
+        return None;
+    }
+    // An escaped sigil deliberately stays literal. In particular, inserting
+    // an HTML link after its backslash would change how Markdown is parsed.
+    if s[..i].iter().rev().take_while(|c| **c == b'\\').count() % 2 == 1 {
+        return None;
+    }
     let starts_word = i == 0 || !(name_char(s[i - 1]) || s[i - 1] == b'/');
     if !starts_word {
         return None;
@@ -187,6 +263,21 @@ mod tests {
 
     const BASE: &str = "http://127.0.0.1:7878";
 
+    #[test]
+    fn shared_display_and_publishing_examples() {
+        let examples: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/markdown-references.json"))
+                .unwrap();
+        for case in examples["cases"].as_array().unwrap() {
+            assert_eq!(
+                serde_json::json!(names(case["source"].as_str().unwrap())),
+                case["found"],
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
     fn names(markdown: &str) -> Vec<String> {
         find(markdown, BASE)
             .into_iter()
@@ -196,15 +287,11 @@ mod tests {
 
     #[test]
     fn references_are_found_in_prose_only() {
-        // Inline HTML is no code or link: GitHub makes references in it too.
         let md = "Fixes #2 and acme/other#4, see !3.\n\n\
-                  `#5` stays, [#6](http://x) stays, <b>#7</b> counts.\n\n\
+                  `#5` stays, [#6](http://x) stays, <b>#7</b> stays.\n\n\
                   ```\n#8 in a block\n```\n\n    #9 indented\n\n\
                   - item #10\n> quoted #11\n\n# Heading #12\n";
-        assert_eq!(
-            names(md),
-            ["#2", "acme/other#4", "!3", "#7", "#10", "#11", "#12"]
-        );
+        assert_eq!(names(md), ["#2", "acme/other#4", "!3", "#10", "#11", "#12"]);
     }
 
     #[test]

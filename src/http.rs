@@ -337,6 +337,17 @@ async fn repo_get(State(app): State<Shared>, c: Caller, P(repo): P<String>) -> R
     Ok(ok(repos::get(&app, &c, &repo).await?))
 }
 
+async fn markdown_render(
+    State(app): State<Shared>,
+    c: Caller,
+    P(repo): P<String>,
+    J(input): J<domain::markdown::Input>,
+) -> R {
+    Ok(ok(
+        domain::markdown::render(&app, &c, &repo, input.source).await?
+    ))
+}
+
 async fn repo_patch(
     State(app): State<Shared>,
     c: Caller,
@@ -1075,6 +1086,7 @@ async fn idempotency(State(app): State<Shared>, req: Request, next: Next) -> Res
         || path.starts_with("/session")
         || path.starts_with("/apps/")
         || path.ends_with("/tokens")
+        || path.ends_with("/markdown")
     {
         return next.run(req).await;
     }
@@ -1230,6 +1242,7 @@ pub fn router(app: Shared) -> Router {
         .route("/workspaces/{workspace}/board/closed", get(board_closed))
         .route("/repos", get(repos_list).post(repos_create))
         .route("/repos/{repo}", get(repo_get).patch(repo_patch))
+        .route("/repos/{repo}/markdown", post(markdown_render))
         .route("/repos/{repo}/branches/{branch}", get(branch_get))
         .route("/repos/{repo}/compare", get(compare))
         .route("/repos/{repo}/commits/{sha}", get(commit_get))
