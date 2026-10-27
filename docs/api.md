@@ -842,6 +842,8 @@ first is `passed`.
 Gate failures and conflicts add a comment by the service author `branvil`,
 including the gate inputs and failed jobs with log links or conflicting files.
 Required checks appear as `gate/<job>`; a conflict is a failed `gate` check.
+These checks remain visible, including retries after departure, only while
+the entry's `head_sha` equals the head of the pull request's checks response.
 The entry retains its gate SHA, reason, and timestamps after departure so
 clients can inspect the attempt and the time spent waiting. Rejoining replaces
 that entry with a new admission and sequence.
@@ -944,6 +946,9 @@ exists, including a new gate for an already published head ("Webhook").
 - The current or last gate's checks are included as `gate/<job>`, with the same
   attempt IDs, timing, and job/log links as the gate commit's checks. A conflict
   has a `gate` check with `completed`/`failure` and the files in `details`.
+  These checks appear only when the landing entry's `head_sha` matches this
+  response's `head_sha`, whatever the entry's state. Retries remain visible
+  after departure while that head is current; changing head hides the old gate.
 - A published pull request whose head is the commit Branvil pushed also lists
   the upstream host's check runs of it, named `<provider>/<name>`
   (`github/test-windows`), with `attempt_id` `<provider>-<id>`, `details_url`

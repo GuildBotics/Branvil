@@ -190,6 +190,24 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
     const checks=await screen.findByRole("region",{name:words["landing.headChecks"]});
     expect(await within(checks).findByText(`test · ${words["landing.checking"]}`)).toBeInTheDocument();
   });
+  it.each(["conflict", "gate_failed", "gating", "passed"] as const)("hides an old %s gate after the head moves", async (state) => {
+    const l = landing({head_sha: BASE, gate: BASE, state: state === "conflict" || state === "gate_failed" ? "left" : state, reason: {code:state, message:"Old failure", jobs:["old-job"], files:["old-file.rs"]}});
+    fakeApi(routes(l, {[`GET ${P}/checks`]:json(200,{head_sha:BASE,checks:[{name:"gate/old-job",status:"completed",conclusion:"failure",attempt_id:"old-attempt"}]})}));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const gate = await screen.findByRole("region", {name:words["landing.gate"]});
+    expect(await within(gate).findByText(words["landing.headChanged"])).toBeInTheDocument();
+    expect(within(gate).queryByText(/old-job|old-file|Old failure/)).not.toBeInTheDocument();
+    expect(within(gate).queryByText(words["landing.retryGate"])).not.toBeInTheDocument();
+    expect(within(gate).queryByRole("link")).not.toBeInTheDocument();
+    expect(gate.querySelector(".landing-line")).not.toBeInTheDocument();
+  });
+  it.each([HEAD, BASE])("only shows gate job links from the PR head (%s)", async (checksHead) => {
+    fakeApi(routes(landing({state:"left",first:null,position:null,reason:{code:"gate_failed",message:"",jobs:["build"],files:[]}}), {[`GET ${P}/checks`]:json(200,{head_sha:checksHead,checks:[{name:"gate/build",status:"completed",conclusion:"failure",attempt_id:"gate-attempt"}]})}));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const gate = await screen.findByRole("region", {name:words["landing.gate"]});
+    expect(await within(gate).findByText(words["landing.retryGate"])).toBeInTheDocument();
+    await waitFor(() => expect(within(gate).queryByRole("link", {name:"gate/build"}) !== null).toBe(checksHead === HEAD));
+  });
 });
 
 for (const host of [false, true]) {

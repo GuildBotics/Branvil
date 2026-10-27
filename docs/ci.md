@@ -118,7 +118,12 @@ When head contains base, its existing run is the gate. Otherwise Branvil
 creates a commit with parents `[base, head]` and runs that commit's pipeline
 through `refs/branvil/gate/<number>`. A conflict becomes a failed `gate` check;
 CI jobs appear as `gate/<job>` on the pull request. Approvals still apply to
-the original head.
+the original head. Gate checks, including retries after leaving the queue,
+remain visible only while the entry's `head_sha` matches the pull request
+checks response's `head_sha`, regardless of the entry's state. Once the head
+changes, its old gate results no longer count as checks of the new head. The
+pull request's gate panel then waits for the new head's checks and approvals
+instead of showing old failures or asking to retry them.
 
 A local merge moves base to that exact gate commit, preserving its run. Jobs
 without a dependency cache keep their gate attempts; jobs with a cache get a
