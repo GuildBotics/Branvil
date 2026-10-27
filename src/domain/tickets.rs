@@ -35,6 +35,9 @@ pub struct TicketView {
     pub labels: Vec<String>,
     /// Whether a person works on the ticket interactively.
     pub interactive: bool,
+    /// The nearest ancestor a person works on interactively: the ticket is a
+    /// part of that work too.
+    pub interactive_ancestor: Option<TicketRef>,
     /// The issue it stands for on its repository's upstream host.
     pub upstream_issue: Option<String>,
     pub lane: String,
@@ -98,6 +101,31 @@ fn referrers(r: &impl Rd, id: &TicketId, kind: &str) -> AppResult<Vec<TicketId>>
             Ok((parts[3].s().to_string(), parts[4].u()))
         })
         .collect()
+}
+
+/// The tickets that are a part of `id`, at any depth.
+fn descendants(r: &impl Rd, id: &TicketId) -> AppResult<Vec<TicketId>> {
+    let mut found = Vec::new();
+    let mut next = vec![id.clone()];
+    while let Some(id) = next.pop() {
+        let children = referrers(r, &id, "parent")?;
+        next.extend(children.iter().cloned());
+        found.extend(children);
+    }
+    Ok(found)
+}
+
+/// The nearest of `t`'s ancestors a person works on interactively.
+fn interactive_ancestor(r: &impl Rd, t: &Ticket) -> AppResult<Option<TicketId>> {
+    let mut next = t.parent.clone();
+    while let Some(id) = next {
+        let ancestor = ticket_by_id(r, &id)?;
+        if ancestor.interactive {
+            return Ok(Some(id));
+        }
+        next = ancestor.parent;
+    }
+    Ok(None)
 }
 
 fn ticket_ref(r: &impl Rd, base_url: &str, id: &TicketId) -> AppResult<TicketRef> {
@@ -225,6 +253,9 @@ pub fn ticket_view(r: &impl Rd, base_url: &str, repo: &Repo, t: &Ticket) -> AppR
         assignee: t.assignee.clone(),
         labels: t.labels.clone(),
         interactive: t.interactive,
+        interactive_ancestor: interactive_ancestor(r, t)?
+            .map(|a| ticket_ref(r, base_url, &a))
+            .transpose()?,
         upstream_issue: t.upstream_issue.clone(),
         lane: t.lane.clone(),
         rank: t.rank.clone(),
@@ -665,7 +696,7 @@ pub async fn update_ticket(
     };
     let key = key.to_string();
     let base_url = app.base_url.clone();
-    let (result, before) = app
+    let (result, before, descendants) = app
         .store
         .write(move |w| {
             let repo = repo_by_id(w, &repo.id)?;
@@ -786,16 +817,33 @@ pub async fn update_ticket(
                     }
                 }
             }
+            // Its descendants show the interactive ancestor they inherit, by
+            // its title.
+            let descendants = if t.interactive != old.interactive
+                || t.parent != old.parent
+                || t.title != old.title
+            {
+                descendants(w, &id_of(&t))?
+                    .iter()
+                    .map(|d| ticket_ref(w, &base_url, d))
+                    .collect::<AppResult<_>>()?
+            } else {
+                Vec::new()
+            };
             Ok((
                 TicketUpdated {
                     ticket: ticket_view(w, &base_url, &repo, &t)?,
                     state_changed,
                 },
                 before,
+                descendants,
             ))
         })
         .await?;
     publish_tickets(app, [&before, &result.ticket]);
+    for d in &descendants {
+        app.events.publish("ticket", &d.repository, d.key.clone());
+    }
     Ok(result)
 }
 

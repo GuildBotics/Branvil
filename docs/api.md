@@ -428,6 +428,7 @@ every ticket is on it, in a lane.
   "assignee": {"name": "aiko", "assigned_at": "2026-10-14T10:00:00.000Z"},
   "labels": ["bug"],
   "interactive": false,
+  "interactive_ancestor": null,
   "upstream_issue": "https://github.com/acme/demo/issues/12",
   "lane": "ready",
   "rank": "0|hzzzzz",
@@ -454,6 +455,10 @@ pull request that links the ticket writes a line about it there.
 agent at hand; it is `false` for a new ticket and changes only by `PATCH`.
 Branvil keeps and shows it and acts on it nowhere; a client that works on
 tickets by itself may leave such tickets to the person.
+`interactive_ancestor` is the nearest ancestor (its parent, the parent's
+parent, …) whose `interactive` is `true`, in the shape of `parent`, or `null`: the
+ticket is a part of that interactive work too, whatever its own
+`interactive`.
 
 `mentions` lists existing Branvil member names mentioned in the body, without
 duplicates, in occurrence order and with their stored spelling. Matching is

@@ -234,7 +234,11 @@ export function CardView({
         {lane}
         {card.state === "closed" && <StateBadge>{t("ticket.closed")}</StateBadge>}
         {card.state === "open" && card.blocked_by.some((b) => b.state === "open") && <StateBadge tone="warning">{t("board.blocked")}</StateBadge>}
-        {card.interactive && <StateBadge tone="info">{t("board.interactive")}</StateBadge>}
+        {(card.interactive || card.interactive_ancestor) && (
+          <StateBadge tone="info">
+            {card.interactive_ancestor ? t("board.interactiveInherited", { ticket: ticketRef(card.interactive_ancestor) }) : t("board.interactive")}
+          </StateBadge>
+        )}
         {busy && (
           <Text span size="xs" c="dimmed">
             {t("board.moving")}

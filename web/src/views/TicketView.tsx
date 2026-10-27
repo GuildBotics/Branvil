@@ -4,7 +4,7 @@ import { ChevronDown, Pencil } from "lucide-react";
 import { useState } from "react";
 import { isApiError } from "../api/client";
 import * as api from "../api/endpoints";
-import { LANES, type Lane, type Reaction, type Ticket } from "../api/types";
+import { LANES, type Lane, type Reaction, type Ticket, type TicketRef } from "../api/types";
 import { ComposeForm, CopyButton, ErrorMessage, Loading, Post, PostHead, Refusal, StateBadge } from "../components/common";
 import { BodyEditor, EditableTitle, EditPencil } from "../components/Editable";
 import { Markdown } from "../components/Markdown";
@@ -14,8 +14,9 @@ import { useT } from "../i18n";
 import { useMemberKinds, useRepo, useTicket, useTicketComments, useTicketPulls, usePeople } from "../query/hooks";
 import { keys } from "../query/keys";
 import { ServiceLink } from "../router/Router";
-import { Relations, relationRefusal } from "./ticket/Relations";
+import { labelOf, Relations, relationRefusal } from "./ticket/Relations";
 import { TicketComment } from "./ticket/TicketComment";
+import { TicketLink } from "./ticket/TicketLink";
 
 /** A ticket: its page, or, in a `drawer` over a page, whose URL it does not take: then it offers its own to copy. */
 export function TicketView({ repo, ticketKey, drawer }: { repo: string; ticketKey: string; drawer?: boolean }) {
@@ -183,9 +184,9 @@ export function TicketView({ repo, ticketKey, drawer }: { repo: string; ticketKe
               </Stack>
               <Switch
                 label={t("ticket.interactive")}
-                description={t("ticket.interactiveHelp")}
-                checked={tk.interactive}
-                disabled={update.isPending}
+                description={tk.interactive_ancestor ? <InheritedInteractive ancestor={tk.interactive_ancestor} ticket={tk} /> : t("ticket.interactiveHelp")}
+                checked={tk.interactive || tk.interactive_ancestor !== null}
+                disabled={update.isPending || tk.interactive_ancestor !== null}
                 onChange={(e) => update.mutate({ interactive: e.currentTarget.checked })}
               />
               {repoQuery.data?.upstream && (
@@ -362,4 +363,19 @@ function UpstreamIssueField({
 function issueLabel(url: string): string {
   const m = /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/(\d+)/.exec(url);
   return m ? `${m[1]}#${m[2]}` : url;
+}
+
+/** Why a ticket is interactive through its `ancestor`: the message, naming the ancestor with a link to it. */
+function InheritedInteractive({ ancestor, ticket }: { ancestor: TicketRef; ticket: Ticket }) {
+  const t = useT();
+  const [before, after] = t("ticket.interactiveInherited").split("{ticket}");
+  return (
+    <>
+      {before}
+      <Anchor component={TicketLink} repo={ancestor.repository} ticketKey={ancestor.key} inherit>
+        {labelOf(ancestor, ticket)} {ancestor.title}
+      </Anchor>
+      {after}
+    </>
+  );
 }
