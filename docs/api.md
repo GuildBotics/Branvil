@@ -931,6 +931,14 @@ exists, including a new gate for an already published head ("Webhook").
 - `status` is `queued`, `in_progress`, or `completed`. `conclusion` (when
   completed) is `success`, `failure`, `cancelled`, `timed_out`, `skipped`, or
   `startup_failure` (no runner or no usable executor; the details say which).
+  A service path selection also produces completed `skipped` checks, with
+  `path_skip: {"paths":["src/**"],"bases":[{"pull":3,"base":"main","base_sha":"<full sha>","merge_base":"<full sha>"}]}`.
+  This field is omitted on other checks. Each base is the snapshot used to
+  decide that none of the job's paths changed. `details` and the attempt's
+  log explain the decision. Only these service skips satisfy required head
+  checks; a runner's `skipped` does not. Gates require `success` and run all
+  jobs, including jobs skipped on head. Service skips are neither reuse
+  sources nor duration estimates; retry queues an actual execution.
   A successful attempt belongs to that exact commit, but may reuse an actual
   successful execution of the same tree, job definition, network setting,
   and image digest (`docs/ci.md`, "Trust"). Such a check includes
@@ -971,7 +979,9 @@ is not the full sha of a commit of the repository.
 ### CI attempts
 
 - `GET /api/v1/repos/{repo}/jobs/{attempt_id}` →
-  `{"id","purpose","cache_refresh","url","repository","job","attempt","sha","image_digest","reused_from","status","conclusion","details","cancel_requested","created_at","started_at","finished_at","artifact_names","log_bytes"}`.
+  `{"id","purpose","cache_refresh","url","repository","job","attempt","sha","image_digest","reused_from","status","conclusion","path_skip","details","cancel_requested","created_at","started_at","finished_at","artifact_names","log_bytes"}`.
+  `path_skip` has the same shape as on checks and is `null` for an attempt
+  that was not skipped by the service's path selection.
   `image_digest` is the configuration digest (`sha256:…`) of the image the
   job ran on, as its runner reported it; `null` when the job did not get that
   far. `purpose` is `check` or `cache_refresh`. `cache_refresh` is the ID of
@@ -1024,7 +1034,7 @@ kind `runner` (created by `branvil runner register`); any other member gets
 - `POST /claim` `{"executor": "microsandbox", "executor_state": "ready"|"unavailable", "executor_detail"?: "..."}`
   → `204` (nothing queued, or the service is stopping: see "Stopping the
   service" in `docs/ci.md`) or
-  `{"attempt_id","purpose","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false,"queued_secs","reuse"}`.
+  `{"attempt_id","purpose","lease","expires_at","lease_secs","repo","sha","attempt","job":{"name","image","commands","paths","timeout_secs"|null,"artifacts":[{"name","paths"}],"cache":{"paths","key_files"}|null},"cache_scope":"protected"|"branch:<name>","network":false,"queued_secs","reuse"}`.
   `timeout_secs` is `null` when the pipeline gives none; the runner applies its
   own CPUs, memory, and time limit. `cache_scope` is `protected` for a run a
   protected branch asked for, the only runs that save the dependency cache

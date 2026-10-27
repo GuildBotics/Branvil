@@ -20,6 +20,7 @@ pub mod files;
 pub mod notify;
 pub mod pipeline;
 pub mod queue;
+mod selection;
 pub mod settings;
 pub mod supervise;
 
@@ -55,6 +56,8 @@ pub struct ReusedFrom {
 /// One check of a commit, in the shape of `docs/api.md` "Checks".
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
 pub struct Check {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_skip: Option<queue::PathSkip>,
     pub name: String,
     /// `queued`, `in_progress`, or `completed`.
     pub status: String,
@@ -96,6 +99,14 @@ impl Check {
 
     pub fn succeeded(&self) -> bool {
         self.status == "completed" && self.conclusion.as_deref() == Some("success")
+    }
+
+    /// Head admission accepts a service selection, while gates require success.
+    pub fn head_satisfied(&self) -> bool {
+        self.succeeded()
+            || (self.status == "completed"
+                && self.conclusion.as_deref() == Some("skipped")
+                && self.path_skip.is_some())
     }
 
     fn placeholder(name: &str, status: &str, conclusion: Option<&str>, details: String) -> Self {
@@ -189,6 +200,18 @@ impl Ci {
         &self.inner.settings
     }
 
+    pub async fn needs_gate_commit(&self, repo: &Repo, sha: &str) -> AppResult<bool> {
+        let (id, sha) = (repo.id.clone(), sha.to_string());
+        self.inner
+            .store
+            .read(move |r| {
+                Ok(queue::get_run(r, &id, &sha)?
+                    .and_then(|r| r.selection)
+                    .is_some_and(|s| !s.skipped_jobs.is_empty()))
+            })
+            .await
+    }
+
     /// The jobs of the pipeline on the tip of `repo`'s default branch (none
     /// without a valid one).
     pub async fn default_jobs(&self, repo: &Repo) -> Vec<pipeline::JobDef> {
@@ -229,6 +252,7 @@ impl Ci {
 
     fn check_of(&self, a: &Attempt, source: &Attempt) -> Check {
         Check {
+            path_skip: a.path_skip.clone(),
             name: a.job.name.clone(),
             status: a.status.clone(),
             conclusion: a.conclusion.clone(),
@@ -373,6 +397,12 @@ impl Ci {
         run: &queue::Run,
         latest: Vec<(Attempt, Attempt)>,
     ) -> AppResult<Checks> {
+        // A formerly skipped job now waiting for capacity is pending, not a
+        // satisfied check left over from the old base snapshot.
+        let latest: Vec<_> = latest
+            .into_iter()
+            .filter(|(a, _)| run.includes(a))
+            .collect();
         let mut checks = Vec::new();
         if let PipelineState::Invalid { message } = &run.pipeline {
             checks.push(Check::placeholder(
@@ -490,7 +520,17 @@ impl Ci {
                 return Ok(false);
             }
         }
+        let pipeline = self.read_pipeline(repo, sha).await?;
+        let selection = self
+            .select_jobs(
+                repo,
+                sha,
+                &pipeline,
+                gate.is_some() || repo.is_protected(branch),
+            )
+            .await?;
         let reg = Registration {
+            selection,
             repo: repo.id.clone(),
             repo_path: repo.path.clone(),
             sha: sha.to_string(),
@@ -507,15 +547,18 @@ impl Ci {
             ),
             branch: branch.to_string(),
             protected: gate.is_none() && repo.is_protected(branch),
-            pipeline: self.read_pipeline(repo, sha).await?,
+            pipeline,
             network: repo.ci_network,
         };
         let queue_max = self.inner.config.queue_max;
         let now = util::now();
-        self.inner
+        let changed = self
+            .inner
             .store
             .write(move |w| queue::register(w, reg, queue_max, &now))
-            .await
+            .await?;
+        self.write_skip_logs(repo, sha).await?;
+        Ok(changed)
     }
 
     /// Called once per batch of ref changes Branvil recorded (push, merge,
@@ -927,7 +970,7 @@ mod tests {
     use super::*;
     use crate::ci::pipeline::JobDef;
 
-    fn setup() -> (tempfile::TempDir, Ci, Repo) {
+    pub(super) fn setup() -> (tempfile::TempDir, Ci, Repo) {
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::new(dir.path());
         let store = Store::open(&dir.path().join("t.redb"), 1 << 20, 1).unwrap();
@@ -965,6 +1008,7 @@ mod tests {
 
     fn job(name: &str) -> JobDef {
         JobDef {
+            paths: Vec::new(),
             name: name.into(),
             image: "alpine".into(),
             commands: vec!["true".into()],
@@ -972,6 +1016,69 @@ mod tests {
             artifacts: vec![],
             cache: None,
         }
+    }
+
+    #[tokio::test]
+    async fn non_default_refs_without_open_pulls_do_not_register_even_when_protected() {
+        let (_d, ci, mut repo) = setup();
+        repo.protected_branches = vec!["release".into()];
+        for branch in ["release", "feature"] {
+            // Admission must reject the ref before trying to read its pipeline.
+            assert!(
+                !ci.consider(&repo, &format!("refs/heads/{branch}"), "missing")
+                    .await
+                    .unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reselected_skip_is_pending_while_waiting_and_never_a_protected_failure() {
+        let (_d, ci, mut repo) = setup();
+        repo.required_checks = vec!["test".into()];
+        let (id, path) = (repo.id.clone(), repo.path.clone());
+        let saved = repo.clone();
+        ci.inner
+            .store
+            .write(move |w| {
+                w.put(store::REPOS, &Repo::key(&saved.id), &saved)?;
+                let reg = |sha: &str, selection| Registration {
+                    repo: id.clone(),
+                    repo_path: path.clone(),
+                    sha: sha.into(),
+                    tree: None,
+                    branch: "feature".into(),
+                    protected: false,
+                    network: false,
+                    pipeline: PipelineState::Jobs {
+                        jobs: vec![job("test")],
+                    },
+                    selection,
+                };
+                let selection = queue::JobSelection {
+                    bases: vec![],
+                    skipped_jobs: vec!["test".into()],
+                };
+                queue::register(w, reg("head", Some(selection)), 1, "2026-10-27T00:00:00Z")?;
+                queue::register(w, reg("busy", None), 1, "2026-10-27T00:00:00Z")?;
+                let mut all = reg("head", None);
+                all.protected = true;
+                all.branch = "main".into();
+                queue::register(w, all, 1, "2026-10-27T00:00:01Z")?;
+                let run = queue::get_run(w, &id, "head")?.unwrap();
+                assert!(run.waiting);
+                assert!(
+                    !run.failure_pending,
+                    "the old skipped attempt is history, not a protected failure"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let report = ci.head_checks(&repo, "head").await.unwrap();
+        assert_eq!(report.checks[0].status, "queued");
+        assert!(report.checks[0].path_skip.is_none());
+        assert!(!report.checks[0].head_satisfied());
     }
 
     #[tokio::test]
@@ -991,6 +1098,7 @@ mod tests {
                     key_files: vec![],
                 });
                 let reg = |sha: &str| Registration {
+                    selection: None,
                     repo: id.clone(),
                     repo_path: path.clone(),
                     sha: sha.into(),
@@ -1436,6 +1544,7 @@ mod tests {
     async fn a_run_takes_its_commits_pipeline_and_counts_only_its_jobs() {
         let (_d, ci, repo) = setup();
         let reg = |jobs: Vec<JobDef>| Registration {
+            selection: None,
             repo: repo.id.clone(),
             repo_path: repo.path.clone(),
             sha: "s1".into(),
@@ -1494,6 +1603,7 @@ mod tests {
         let (_d, ci, repo) = setup();
         let now = util::now();
         let reg = |sha: &str, jobs: Vec<JobDef>| Registration {
+            selection: None,
             repo: repo.id.clone(),
             repo_path: repo.path.clone(),
             sha: sha.into(),
