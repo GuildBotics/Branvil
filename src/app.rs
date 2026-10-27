@@ -1,15 +1,18 @@
 //! The process-wide state shared by every request.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use crate::ci::Ci;
 use crate::config::{Config, Layout};
 use crate::domain::members::Codes;
+use crate::error::AppResult;
 use crate::events::Events;
 use crate::git::Git;
-use crate::store::Store;
+use crate::model::Repo;
+use crate::store::{self, Rd, Store};
 
 pub struct App {
     pub config: Config,
@@ -34,8 +37,14 @@ pub struct App {
     /// Loopback URL the hooks call back on (the bound address).
     pub hook_url: String,
     /// The one boundary per repository for ref changes Branvil makes and for
-    /// recording ref changes.
+    /// recording ref changes: `locked`, `lock_repo` inside an operation, and
+    /// `quiesce` for a backup take it.
     repo_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Held (read) by every operation `finish` runs; `close` takes it for
+    /// good, and none starts once it waits for it.
+    operations: Arc<tokio::sync::RwLock<()>>,
+    /// This app, for the tasks `finish` spawns.
+    me: Weak<App>,
     /// Requests that carry the same `Idempotency-Key` of the same member run
     /// one at a time; other keys do not wait for them.
     pub idempotency: KeyedLocks,
@@ -53,6 +62,11 @@ pub struct App {
 }
 
 pub type Shared = Arc<App>;
+
+tokio::task_local! {
+    /// Set inside the task of an operation (`App::finish`).
+    static IN_OPERATION: ();
+}
 
 /// One async lock per key. An entry lives only while someone holds or waits
 /// for its lock, so the map never grows past the requests in flight.
@@ -110,7 +124,7 @@ impl App {
         store: Store,
         cursor_key: Vec<u8>,
         hook_url: String,
-    ) -> Self {
+    ) -> Shared {
         let layout = config.layout();
         let git = Git::new(
             layout.clone(),
@@ -127,7 +141,7 @@ impl App {
             config.ci.clone(),
             config.file.clone(),
         );
-        Self {
+        Arc::new_cyclic(|me| Self {
             base_url,
             layout,
             store,
@@ -143,6 +157,8 @@ impl App {
             hook_secret: crate::util::random_secret::<32>(),
             hook_url,
             repo_locks: Mutex::new(HashMap::new()),
+            operations: Arc::default(),
+            me: me.clone(),
             idempotency: KeyedLocks::default(),
             token_touched: Mutex::new(HashMap::new()),
             entry_codes: Mutex::default(),
@@ -152,15 +168,117 @@ impl App {
                 .ok()
                 .filter(|v| !v.is_empty()),
             config,
-        }
+        })
     }
 
-    pub fn repo_lock(&self, repo_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    fn repo_lock(&self, repo_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.repo_locks.lock().unwrap();
         locks
             .entry(repo_id.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    /// Runs `op` under the repository's lock (`finish`). Waiting for the lock
+    /// stays cancellable: nothing has started then.
+    pub async fn locked<T, F>(
+        &self,
+        repo_id: &str,
+        op: impl FnOnce(Shared) -> F + Send + 'static,
+    ) -> T
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.run(Some(repo_id), op).await
+    }
+
+    /// Runs `op`, a write of several steps (Git, the database, the upstream
+    /// host), to its end in a task of its own: a caller that stops waiting (a
+    /// closed request, a task dropped by a stopping service) cannot leave it
+    /// halfway, nor kill its Git in the middle of a ref update (which leaves
+    /// lock files that refuse every later update of the ref). A stopping
+    /// service starts no new one and waits for the running ones (`close`).
+    /// `op` never calls `finish` or `locked` itself: once `close` waits, that
+    /// call would wait for ever (checked in debug builds).
+    pub async fn finish<T, F>(&self, op: impl FnOnce(Shared) -> F + Send + 'static) -> T
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.run(None, op).await
+    }
+
+    /// The repository's lock, for an operation (`finish`) that takes it only
+    /// around its own ref and record changes, never while it waits for the
+    /// upstream host.
+    pub async fn lock_repo(&self, repo_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        debug_assert!(
+            IN_OPERATION.try_with(|_| ()).is_ok(),
+            "a repository lock is taken only in an operation"
+        );
+        self.repo_lock(repo_id).lock_owned().await
+    }
+
+    /// Holds the repository's lock, as an operation in progress would.
+    #[cfg(test)]
+    pub async fn hold_lock(&self, repo_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.repo_lock(repo_id).lock_owned().await
+    }
+
+    async fn run<T, F>(
+        &self,
+        repo_id: Option<&str>,
+        op: impl FnOnce(Shared) -> F + Send + 'static,
+    ) -> T
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        debug_assert!(
+            IN_OPERATION.try_with(|_| ()).is_err(),
+            "an operation must not start another one"
+        );
+        let lock = match repo_id {
+            Some(id) => Some(self.repo_lock(id).lock_owned().await),
+            None => None,
+        };
+        // Never waited for while the lock is held: an operation waiting for
+        // its lock has not started, and `close` waits only for started ones.
+        let Ok(open) = self.operations.clone().try_read_owned() else {
+            drop(lock);
+            return std::future::pending().await;
+        };
+        let app = self.me.upgrade().expect("the app outlives its requests");
+        let run = IN_OPERATION.scope((), async move {
+            let _held = (open, lock);
+            op(app).await
+        });
+        match tokio::spawn(run).await {
+            Ok(value) => value,
+            Err(e) => std::panic::resume_unwind(e.into_panic()),
+        }
+    }
+
+    /// Holds every repository lock (`<create>` first, then the repositories by
+    /// id; every other holder takes one at a time) for a consistent copy of
+    /// the repositories and the database (a backup); returns the repositories
+    /// with their locks.
+    pub async fn quiesce(&self) -> AppResult<(Vec<Repo>, Vec<tokio::sync::OwnedMutexGuard<()>>)> {
+        let mut guards = vec![self.repo_lock("<create>").lock_owned().await];
+        let mut repos: Vec<Repo> = self.store.read(|r| r.prefix_all(store::REPOS, &[])).await?;
+        repos.sort_by(|a, b| a.id.cmp(&b.id));
+        for repo in &repos {
+            guards.push(self.repo_lock(&repo.id).lock_owned().await);
+        }
+        Ok((repos, guards))
+    }
+
+    /// Starts no operation (`finish`) from now on: later ones wait until the
+    /// process exits. Then waits until the running ones have ended.
+    pub async fn close(&self) {
+        // Never released: the service is about to exit.
+        std::mem::forget(self.operations.clone().write_owned().await);
     }
 
     /// Simulates a crash at a named point when `BRANVIL_FAILPOINT` names it.
@@ -186,6 +304,146 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use tokio::sync::oneshot;
+
+    fn app(dir: &std::path::Path) -> Shared {
+        let config = Config::load(None, Some(dir), None, None).unwrap();
+        config.layout().create().unwrap();
+        let store = Store::open(&config.layout().db(), 1 << 20, 1).unwrap();
+        App::new(
+            config,
+            "http://127.0.0.1:7878".into(),
+            store,
+            vec![],
+            "http://127.0.0.1:7878".into(),
+        )
+    }
+
+    /// An operation that waits for `release` once it has said it started,
+    /// then sets `done`.
+    fn held_op(
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+        done: Arc<AtomicBool>,
+    ) -> impl FnOnce(Shared) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+        move |_| {
+            Box::pin(async move {
+                let _ = started.send(());
+                let _ = release.await;
+                done.store(true, SeqCst);
+            })
+        }
+    }
+
+    const SOON: Duration = Duration::from_millis(50);
+
+    #[tokio::test]
+    async fn an_operation_runs_to_its_end_when_its_caller_stops_waiting() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(temp.path());
+        let (started, release, done) = (oneshot::channel(), oneshot::channel(), Arc::default());
+        let caller = app.locked("r", held_op(started.0, release.1, Arc::clone(&done)));
+        tokio::select! {
+            _ = caller => panic!("the operation ended before its release"),
+            _ = started.1 => {}
+        }
+        // Its caller is gone; it still holds the lock until it ends.
+        let next = app.locked("r", |_| async {});
+        tokio::pin!(next);
+        assert!(tokio::time::timeout(SOON, next.as_mut()).await.is_err());
+        let _ = release.0.send(());
+        tokio::time::timeout(Duration::from_secs(5), next)
+            .await
+            .expect("the lock is released when the operation ends");
+        assert!(done.load(SeqCst), "the operation ran to its end");
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_stops_waiting_for_the_lock_starts_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(temp.path());
+        let held = app.hold_lock("r").await;
+        let ran = Arc::new(AtomicBool::new(false));
+        let r = Arc::clone(&ran);
+        let waiting = app.locked("r", move |_| async move { r.store(true, SeqCst) });
+        assert!(tokio::time::timeout(SOON, waiting).await.is_err());
+        drop(held);
+        app.locked("r", |_| async {}).await;
+        assert!(!ran.load(SeqCst), "an operation never started does not run");
+    }
+
+    #[tokio::test]
+    async fn close_waits_for_the_running_operations_and_starts_no_new_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(temp.path());
+        let (started, release, done) = (oneshot::channel(), oneshot::channel(), Arc::default());
+        let a = app.clone();
+        let running = tokio::spawn(async move {
+            a.finish(held_op(started.0, release.1, Arc::clone(&done)))
+                .await;
+            done
+        });
+        started.1.await.unwrap();
+        let close = app.close();
+        tokio::pin!(close);
+        assert!(tokio::time::timeout(SOON, close.as_mut()).await.is_err());
+        let later = app.finish(|_| async {});
+        assert!(
+            tokio::time::timeout(SOON, later).await.is_err(),
+            "no operation starts once closing"
+        );
+        let _ = release.0.send(());
+        tokio::time::timeout(Duration::from_secs(5), close)
+            .await
+            .expect("close ends with the running operation");
+        assert!(running.await.unwrap().load(SeqCst));
+        let after = app.finish(|_| async {});
+        assert!(tokio::time::timeout(SOON, after).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn close_does_not_wait_for_an_operation_waiting_for_its_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(temp.path());
+        // A backup holds the lock (`quiesce`); an operation waits for it.
+        let held = app.hold_lock("r").await;
+        let ran = Arc::new(AtomicBool::new(false));
+        let (a, r) = (app.clone(), Arc::clone(&ran));
+        let waiting = tokio::spawn(async move {
+            a.locked("r", move |_| async move { r.store(true, SeqCst) })
+                .await
+        });
+        tokio::time::sleep(SOON).await;
+        tokio::time::timeout(Duration::from_secs(5), app.close())
+            .await
+            .expect("close waits only for started operations");
+        drop(held);
+        tokio::time::sleep(SOON).await;
+        assert!(
+            !waiting.is_finished() && !ran.load(SeqCst),
+            "it never starts"
+        );
+        waiting.abort();
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    #[should_panic(expected = "an operation must not start another one")]
+    async fn an_operation_inside_an_operation_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(temp.path());
+        app.finish(|app| async move { app.locked("r", |_| async {}).await })
+            .await;
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    #[should_panic(expected = "a repository lock is taken only in an operation")]
+    async fn a_repository_lock_outside_an_operation_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let _ = app(temp.path()).lock_repo("r").await;
+    }
 
     #[tokio::test]
     async fn keyed_locks_serialize_one_key_only_and_forget_idle_keys() {

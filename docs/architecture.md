@@ -59,8 +59,11 @@ or diffs, and then run one short write transaction.
 
 - Repositories are bare, at `<data>/repos/<path>.git`, created by
   `POST /api/v1/repos`. Each carries `core.hooksPath=<data>/hooks`,
-  `transfer.hideRefs=refs/branvil`, `receive.fsckObjects=true`, and
-  `core.logAllRefUpdates=always`; these are re-applied at every start.
+  `transfer.hideRefs=refs/branvil`, `receive.fsckObjects=true`,
+  `core.logAllRefUpdates=always`, and `http.lowSpeedLimit=1` with
+  `http.lowSpeedTime` set to `limits.git_command_timeout_secs` (a stalled
+  upstream host ends a fetch or push even when nothing times it out any more,
+  below); these are re-applied at every start.
 - Smart HTTP spawns `git http-backend` with an argv array and an environment
   built from scratch for the request (`PATH_INFO` uses the stored spelling of
   the path). `core.hooksPath` is also passed through `GIT_CONFIG_COUNT`, so
@@ -73,15 +76,55 @@ or diffs, and then run one short write transaction.
   `limits.git_http_timeout_secs` per Smart HTTP request
   (the child is killed), `limits.git_push_max_mib` request body,
   `limits.git_command_timeout_secs` and 64 MiB of output per service command.
+- Service-side Git children (Smart HTTP's included) run in a process group of
+  their own, so a terminal's Ctrl-C or a supervisor that kills the service's
+  group never reaches Git in the middle of a ref update: Git killed there
+  leaves its lock files (`packed-refs.lock`, `<ref>.lock`), and the repository
+  refuses every later update of those refs. A service command past its time
+  limit gets SIGTERM, with the hooks it started (its process group), on
+  which Git removes its lock files, and Git itself gets SIGKILL only 2 s
+  later; a dropped read is killed. A Smart HTTP request past its own time
+  limit has its `http-backend` killed at once.
+- **One generation of Git at a time.** A running service holds
+  `<data>/git/service.lock`, taken right after it opens the database and
+  before it touches any repository (`git::hold`), and every service-side Git
+  child, and what it starts in turn (receive-pack, hooks, a detached
+  `git gc --auto`, a backup's `git bundle`), inherits it (the runner and
+  every other child do not). The lock is free only once all of them have
+  exited, so a service that died with Git still running (a crash, `kill -9`,
+  a supervisor's deadline, the OOM killer) leaves it held: the next `serve`
+  logs that it waits and tries again every 100 ms (SIGINT or SIGTERM ends it
+  then), so a gc or a backup's bundle the killed service left running delays
+  the next start too. Only then does startup remove the lock files a killed
+  Git left in each repository (`git::remove_stale_locks`: its own, its refs'
+  and reflogs', and gc's in `objects/info` and `objects/pack`): no Git that
+  could own one runs any more. On Windows the children do not inherit the
+  lock (it ends with the service): neither this boundary nor the removal
+  applies there, and a push whose receive-pack is still running when the
+  service stops may update its refs after the next start's recovery.
 
 ## Ref changes and recovery
 
 Git ref updates and redb commits are separate, so Branvil never assumes they
 are atomic together.
 
-1. **One boundary per repository.** `App::repo_lock(repo id)` is an async
-   mutex taken by every ref change Branvil makes (merge) and by every recording
-   of ref changes (post-receive, startup rescan).
+1. **One boundary per repository, and operations that run to their end.**
+   `App::locked(repo id, op)` takes the repository's async mutex for every ref
+   change Branvil makes (merge, gates, the default branch's `HEAD`) and every
+   recording of ref changes (post-receive, startup rescan), and runs `op` in a
+   task of its own. Waiting for the lock is
+   cancellable; once it is held, `op` runs to its end even when its caller
+   stops waiting (a client that closed its request, a task of a stopping
+   service), so Git and the database are never left halfway by a caller.
+   `App::finish(op)` does the same for writes that also talk to the upstream
+   host (publishing a pull request, following the upstream's default branch,
+   a poll's work on one published pull request, connecting an upstream): they
+   take the lock only around their own changes (`App::lock_repo`), never while
+   waiting for the host. An operation never starts another one (checked in
+   debug builds). A stopping service starts no new operation and waits for the
+   running ones (`App::close`): they usually take milliseconds, and each Git
+   command and host request is bounded by its own time limit (see
+   `docs/ci.md`, "Stopping the service").
 2. **Pushes** are checked before and recorded after:
    - `pre-receive` (Branvil's script → `branvil hook pre-receive` → `POST
      /-/hooks/pre-receive` on the bound loopback address with a per-process
@@ -104,7 +147,9 @@ are atomic together.
    decided, which the pull request's view carries too); point the hidden ref of the merged head at it (`keep_merged`,
    below); write a `ref_journal` entry `{ref, old, new, op}`; run
    `git update-ref refs/heads/<base> <gate> <old>` (Git refuses if the base
-   moved); then one transaction applies the merge (`apply_journal`: PR merged,
+   moved; when Git fails, the ref tells what happened: at `<gate>` the merge
+   goes on, anywhere else nothing was written and the entry is deleted); then
+   one transaction applies the merge (`apply_journal`: PR merged,
    `closes` tickets closed and moved to `done`) and deletes the journal entry;
    then the head branch is retired (`retire_merged_head`, below);
    finally `record_refs_locked` records the snapshot and notifies CI. The

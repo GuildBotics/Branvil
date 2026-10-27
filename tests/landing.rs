@@ -46,6 +46,19 @@ async fn merge(w: &World, number: u64, p: &Value) -> Value {
 }
 
 async fn divergent_gate(jobs: &[&str]) -> (World, crate::ci::Runner, Value) {
+    let (w, runner, head) = divergent_feature(jobs).await;
+    for _ in jobs {
+        let claim = next_claim(&runner).await;
+        assert_eq!(claim["sha"], head);
+        assert_eq!(runner.finish(&claim, "success").await.0, 200);
+    }
+    let gating = landing(&w, 3, "gating").await;
+    (w, runner, gating)
+}
+
+/// Pull request 3 (`feature`, at the returned head) behind an advanced base,
+/// with `jobs` required and queued for its head.
+async fn divergent_feature(jobs: &[&str]) -> (World, crate::ci::Runner, String) {
     use crate::ci::{Runner, pipeline, sync_main};
     let w = World::new().await;
     let runner = Runner::new(&w, "gate-runner").await;
@@ -72,13 +85,7 @@ async fn divergent_gate(jobs: &[&str]) -> (World, crate::ci::Runner, Value) {
         .await;
     assert_eq!(status, 200, "{result}");
     w.open_pull("feature", json!([])).await;
-    for _ in jobs {
-        let claim = next_claim(&runner).await;
-        assert_eq!(claim["sha"], head);
-        assert_eq!(runner.finish(&claim, "success").await.0, 200);
-    }
-    let gating = landing(&w, 3, "gating").await;
-    (w, runner, gating)
+    (w, runner, head)
 }
 
 async fn retry(w: &World, attempt: &Value) {
@@ -254,6 +261,70 @@ async fn an_unrelated_base_advance_rebuilds_gating_and_passed_leaders_in_place()
             assert_eq!(old_job["cancel_requested"], true, "{old_job}");
         }
     }
+}
+
+/// Ctrl-C (SIGINT to the service's process group) while Git holds a new
+/// gate's ref in the landing task's update: the stop waits for it, and the
+/// gate's ref is there with no lock before the next start repairs anything.
+#[cfg(unix)]
+#[tokio::test]
+async fn ctrl_c_during_a_gate_update_waits_for_it() {
+    let (mut w, runner, head) = divergent_feature(&["test"]).await;
+    let hold = RefHold::new(&w, "refs/branvil/gate/3");
+    let claim = next_claim(&runner).await;
+    assert_eq!(claim["sha"], head);
+    assert_eq!(runner.finish(&claim, "success").await.0, 200);
+    hold.wait().await;
+    w.server.interrupt_group();
+    let line = w
+        .server
+        .line_within(Duration::from_secs(10))
+        .expect("a stop that waits says so");
+    assert!(line.starts_with("branvil stopping: "), "{line}");
+    assert!(w.server.running(), "the stop waits for the gate update");
+    hold.release();
+    let status = w.server.exit_within(Duration::from_secs(10));
+    assert!(status.is_some_and(|s| s.success()), "{status:?}");
+    let bare = w.server.data.join("repos/acme/demo.git");
+    assert!(!bare.join("refs/branvil/gate/3.lock").exists());
+    let gate = git_ok(&bare, &["rev-parse", "refs/branvil/gate/3"]);
+
+    w.restart(&[]);
+    let gating = landing(&w, 3, "gating").await;
+    assert_eq!(gating["landing"]["gate"], gate.as_str());
+}
+
+/// A stop signal while startup repairs a gate's ref (a hook holds its
+/// update) does not end the service in the middle: startup finishes, the
+/// service stops cleanly, and the gate's ref is back with no lock.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_signal_during_startup_waits_for_it() {
+    let (mut w, _runner, gating) = divergent_gate(&["test"]).await;
+    let gate = gating["landing"]["gate"].as_str().unwrap().to_string();
+    w.server.stop();
+    let bare = w.server.data.join("repos/acme/demo.git");
+    git_ok(&bare, &["update-ref", "-d", "refs/branvil/gate/3"]);
+    let hold = RefHold::new(&w, "refs/branvil/gate/3");
+    let signal = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !hold.reached() {
+            assert!(Instant::now() < deadline, "startup never repaired the gate");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let kill = std::process::Command::new("kill")
+            .args(["-INT", &hold.service_pid().to_string()])
+            .status()
+            .unwrap();
+        assert!(kill.success());
+        hold.release();
+    });
+    w.server = Server::start(w.dir.path());
+    signal.join().unwrap();
+    let status = w.server.exit_within(Duration::from_secs(10));
+    assert!(status.is_some_and(|s| s.success()), "{status:?}");
+    assert!(!bare.join("refs/branvil/gate/3.lock").exists());
+    assert_eq!(git_ok(&bare, &["rev-parse", "refs/branvil/gate/3"]), gate);
 }
 
 #[tokio::test]

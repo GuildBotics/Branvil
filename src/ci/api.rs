@@ -165,16 +165,17 @@ async fn job_retry(
     Path((repo, id)): Path<(String, String)>,
 ) -> R {
     let (repo, a) = attempt_of(&app, &c, &repo, &id).await?;
-    let new = {
-        // Ref cleanup may still be cancelling work after its landing state
-        // became visible. A new explicit retry must follow that cleanup.
-        let lock = app.repo_lock(&repo.id);
-        let _guard = lock.lock().await;
-        let (queue_max, now, id) = (app.ci.config().queue_max, util::now(), a.id.clone());
-        app.store
-            .write(move |w| queue::retry(w, &id, queue_max, &now))
-            .await?
-    };
+    // Ref cleanup may still be cancelling work after its landing state
+    // became visible. A new explicit retry must follow that cleanup.
+    let id = a.id.clone();
+    let new = app
+        .locked(&repo.id, move |app| async move {
+            let (queue_max, now) = (app.ci.config().queue_max, util::now());
+            app.store
+                .write(move |w| queue::retry(w, &id, queue_max, &now))
+                .await
+        })
+        .await?;
     app.events.publish("check", &repo.path, new.sha.clone());
     Ok(ok(view(&app, &new).await?))
 }
@@ -706,7 +707,6 @@ mod tests {
     use crate::config::Config;
     use crate::model::{self, Member};
     use crate::store::{self, Store};
-    use std::sync::Arc;
     use std::time::Duration;
 
     #[tokio::test]
@@ -717,13 +717,13 @@ mod tests {
             let layout = config.layout();
             layout.create().unwrap();
             let store = Store::open(&layout.db(), 1 << 20, 2).unwrap();
-            let app = Arc::new(App::new(
+            let app = App::new(
                 config,
                 "http://127.0.0.1:7878".into(),
                 store,
                 vec![],
                 "http://127.0.0.1:7878".into(),
-            ));
+            );
             let repo = Repo {
                 id: "repo_1".into(),
                 path: "acme/demo".into(),
@@ -805,8 +805,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let lock = app.repo_lock(&repo.id);
-            let held = lock.lock().await;
+            let held = app.hold_lock(&repo.id).await;
             let mut retry = Box::pin(job_retry(
                 State(app.clone()),
                 c,

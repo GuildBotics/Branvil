@@ -396,20 +396,22 @@ pub async fn record_auto_result(
     base: &str,
     error: Option<String>,
 ) -> AppResult<()> {
-    let lock = app.repo_lock(&repo.id);
-    let _guard = lock.lock().await;
-    let id = repo.id.clone();
-    if let Some(mut e) = app.store.read(move |r| current(r, &id, number)).await?
-        && e.state == "passed"
-        && e.head_sha == head
-        && e.base_sha == base
-        && e.error != error
-    {
-        e.error = error;
-        e.state_at = util::now();
-        save(app, repo, e, None).await?;
-    }
-    Ok(())
+    let (r, head, base) = (repo.clone(), head.to_string(), base.to_string());
+    app.locked(&repo.id, move |app| async move {
+        let id = r.id.clone();
+        if let Some(mut e) = app.store.read(move |r| current(r, &id, number)).await?
+            && e.state == "passed"
+            && e.head_sha == head
+            && e.base_sha == base
+            && e.error != error
+        {
+            e.error = error;
+            e.state_at = util::now();
+            save(&app, &r, e, None).await?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 pub async fn remove_merged_ref(app: &App, repo: &Repo, number: u64) -> AppResult<()> {
@@ -499,10 +501,21 @@ pub async fn resume_publish(
     app: &App,
     repo: &Repo,
     number: u64,
+    input: pulls::MergeInput,
+) -> AppResult<()> {
+    let r = repo.clone();
+    app.locked(&repo.id, move |app| async move {
+        resume_publish_locked(&app, &r, number, &input).await
+    })
+    .await
+}
+
+async fn resume_publish_locked(
+    app: &App,
+    repo: &Repo,
+    number: u64,
     input: &pulls::MergeInput,
 ) -> AppResult<()> {
-    let lock = app.repo_lock(&repo.id);
-    let _guard = lock.lock().await;
     let id = repo.id.clone();
     let r2 = repo.clone();
     let (p, mut e) = app
@@ -594,9 +607,9 @@ pub fn publication_changed(w: &Wtx, repo: &str, number: u64) -> AppResult<()> {
 /// The upstream has just confirmed this pull request is still open. A base
 /// containing its entire tree therefore came from another integration; it must
 /// no longer block other pulls while waiting for a merge that did not happen.
+/// For an operation (`App::finish`): the upstream's poll.
 pub async fn host_observed_open(app: &App, repo: &Repo, number: u64) -> AppResult<()> {
-    let lock = app.repo_lock(&repo.id);
-    let _guard = lock.lock().await;
+    let _guard = app.lock_repo(&repo.id).await;
     let id = repo.id.clone();
     let Some(mut e) = app.store.read(move |r| current(r, &id, number)).await? else {
         return Ok(());
@@ -633,9 +646,11 @@ pub async fn host_observed_open(app: &App, repo: &Repo, number: u64) -> AppResul
 
 /// Reconciles every queue, including repositories whose automatic landing is off.
 pub async fn sweep_repo(app: &App, repo: &Repo) -> AppResult<()> {
-    let lock = app.repo_lock(&repo.id);
-    let _guard = lock.lock().await;
-    reconcile_locked(app, repo).await
+    let r = repo.clone();
+    app.locked(&repo.id, move |app| async move {
+        reconcile_locked(&app, &r).await
+    })
+    .await
 }
 
 /// Caller holds the repository lock. Persist gate ownership before updating its

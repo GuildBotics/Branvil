@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use process::ServiceProcess;
+pub use process::ServiceProcess;
 
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -19,6 +19,8 @@ pub const BIN: &str = env!("CARGO_BIN_EXE_branvil");
 
 pub struct Server {
     child: Option<ServiceProcess>,
+    /// The service's standard output, line by line.
+    lines: std::sync::mpsc::Receiver<String>,
     pub url: String,
     pub data: PathBuf,
     pub http: reqwest::Client,
@@ -85,8 +87,16 @@ impl Server {
         }
         let mut child = ServiceProcess::spawn(&mut cmd).expect("spawn branvil serve");
         let stdout = child.take_stdout();
-        let mut line = String::new();
-        BufReader::new(stdout).read_line(&mut line).unwrap();
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let line = lines.recv().unwrap_or_default();
         let url = line
             .strip_prefix("branvil listening on ")
             .and_then(|l| l.split_whitespace().next())
@@ -99,14 +109,29 @@ impl Server {
             .to_string();
         Server {
             child: Some(child),
+            lines,
             url,
             data,
             http: reqwest::Client::new(),
         }
     }
 
-    /// Crash the service and drain its children before offline access or restart.
+    /// Stops the service as Ctrl-C does (no wait for CI jobs; the repository
+    /// operations already started finish) and drains its children, before
+    /// offline access or a restart. Crashes are failpoints' (`wait_exit`).
+    /// Without SIGINT (Windows) the service is killed.
     pub fn stop(&mut self) {
+        #[cfg(unix)]
+        if self.child.is_some() {
+            self.signal("INT");
+            let limit = std::time::Duration::from_secs(10);
+            let status = self.exit_within(limit);
+            assert!(
+                status.is_some_and(|s| s.success()),
+                "the service did not stop cleanly within {limit:?} of SIGINT: {status:?}; see {}",
+                self.data.with_file_name("serve.log").display()
+            );
+        }
         if let Some(mut c) = self.child.take() {
             c.stop().expect("stop service process group");
         }
@@ -124,6 +149,26 @@ impl Server {
         self.signal("TERM");
         self.exit_within(limit)
             .map(|status| (status, sent.elapsed()))
+    }
+
+    /// The next line of the service's standard output, if one comes within
+    /// `limit`.
+    pub fn line_within(&self, limit: std::time::Duration) -> Option<String> {
+        self.lines.recv_timeout(limit).ok()
+    }
+
+    /// Sends SIGINT to the service's process group, as a terminal's Ctrl-C
+    /// does, and returns at once.
+    #[cfg(unix)]
+    pub fn interrupt_group(&self) {
+        let pid = self.child.as_ref().expect("running").id();
+        // SAFETY: the service leads its own group (`ServiceProcess::spawn`).
+        assert_eq!(unsafe { libc::killpg(pid as libc::pid_t, libc::SIGINT) }, 0);
+    }
+
+    /// Whether the service process is still running.
+    pub fn running(&mut self) -> bool {
+        self.child.as_mut().is_some_and(|c| !c.exited().unwrap())
     }
 
     /// Sends `signal` (`TERM`, `INT`) and returns at once.
@@ -613,4 +658,85 @@ pub fn tables(db: &Path) -> Tables {
         out.insert(name, rows);
     }
     out
+}
+
+/// Holds the service's Git in the ref transactions of one ref (its
+/// `reference-transaction` hook in the `prepared` state, the ref's lock
+/// taken) until `release`, at most 30 s.
+#[cfg(unix)]
+pub struct RefHold {
+    reached: PathBuf,
+    released: PathBuf,
+}
+
+#[cfg(unix)]
+impl RefHold {
+    /// Installs the hook for `refname` in the service's hooks of `w`.
+    pub fn new(w: &World, refname: &str) -> RefHold {
+        use std::os::unix::fs::PermissionsExt;
+        let reached = w.dir.path().join("hold-reached");
+        let released = w.dir.path().join("hold-released");
+        let hook = w.server.data.join("hooks/reference-transaction");
+        // `reached` holds the service's pid: the hook's parent is Git, whose
+        // parent is the service.
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = prepared ] || {{ cat >/dev/null; exit 0; }}\n\
+                 grep -q ' {refname}$' || exit 0\n\
+                 ps -o ppid= -p $PPID >'{0}.tmp'\nmv '{0}.tmp' '{0}'\n\
+                 i=0\nwhile [ ! -e '{1}' ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i+1)); done\n",
+                reached.display(),
+                released.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        RefHold { reached, released }
+    }
+
+    /// Whether Git is held (or was).
+    pub fn reached(&self) -> bool {
+        self.reached.exists()
+    }
+
+    /// Waits until Git is held, at most 15 s.
+    pub async fn wait(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !self.reached() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Git never reached the hold"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The pid of the service whose Git is held.
+    pub fn service_pid(&self) -> u32 {
+        std::fs::read_to_string(&self.reached)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    pub fn release(&self) {
+        std::fs::write(&self.released, "").unwrap();
+    }
+
+    /// The file whose creation releases Git (`release`).
+    pub fn released_path(&self) -> PathBuf {
+        self.released.clone()
+    }
+}
+
+/// Sends `request` and drops it once `hold` holds the service's Git: the
+/// client gives up in the middle of the operation.
+#[cfg(unix)]
+pub async fn abandon_at(hold: &RefHold, request: impl std::future::Future) {
+    tokio::select! {
+        _ = request => panic!("the request ended before Git reached the hold"),
+        _ = hold.wait() => {}
+    }
 }

@@ -304,8 +304,27 @@ Stopping the service:
   so the next start runs it before the jobs queued after it (one already
   interrupted once ends for good, as above); the service then exits with
   status 3, which `scripts/serve.sh` notifies.
-- SIGINT (Ctrl-C), also during that wait, stops at once; the running jobs are
+- SIGINT (Ctrl-C), also during that wait, skips it; the running jobs are
   interrupted as in a restart above.
+- Then, after either signal, the GUI's event streams end, the service stops
+  accepting requests, and the requests in flight get 5 seconds. The
+  repository operations already started (a merge, a gate, recording a push,
+  following the upstream, publishing a pull request or a poll's work on one)
+  finish; none starts meanwhile, and the standard output says
+  `branvil stopping: waiting for the started repository operations …` while
+  it waits. Operations usually take milliseconds; each Git command and each
+  request to the upstream host is bounded by its own time limit. Git runs in
+  process groups of its own, so the terminal's Ctrl-C never reaches it, and
+  a second Ctrl-C does nothing. To end a stop at once, `kill -9` the service:
+  that is safe.
+- A service killed before it ends (`kill -9`, a supervisor's deadline such as
+  the launchd agent's `ExitTimeOut`, a crash) leaves its Git running; the
+  next `serve` waits until that Git has exited (it logs that it waits, and
+  SIGINT or SIGTERM ends it then) before it touches a repository, then
+  recovers what the killed service did not record, as after a crash
+  (`docs/architecture.md`, "Git hosting"). The signals are taken over before
+  startup runs any Git, so a signal during startup stops the service once
+  startup has finished.
 
 No runner, no executor:
 

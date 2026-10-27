@@ -121,25 +121,28 @@ pub struct State_ {
     /// What every read of Dependabot alerts or a job log is answered with
     /// instead.
     pub refusal: Option<Refusal>,
-    pull_read_pause: Option<(u64, Arc<PullReadPause>)>,
+    pull_read_pause: Option<(u64, Arc<Pause>)>,
+    /// (method, path suffix): the answer to such a request waits.
+    answer_pause: Option<(String, String, Arc<Pause>)>,
 }
 
-/// Pauses one pull read after following the host's default branch, so a test
-/// can inspect the interval before the host's merge is recorded locally.
-struct PullReadPause {
+/// Pauses one request until its `Paused` is dropped: a pull read before it is
+/// answered (`pause_pull_read`), or the answer to a request the host has
+/// already carried out (`pause_answer`).
+struct Pause {
     reached: Notify,
     release: Notify,
 }
 
-pub struct PausedPullRead(Arc<PullReadPause>);
+pub struct Paused(Arc<Pause>);
 
-impl PausedPullRead {
+impl Paused {
     pub async fn reached(&self) {
         self.0.reached.notified().await;
     }
 }
 
-impl Drop for PausedPullRead {
+impl Drop for Paused {
     fn drop(&mut self) {
         self.0.release.notify_one();
     }
@@ -410,6 +413,35 @@ async fn pulls_create(
     (StatusCode::CREATED, axum::Json(v)).into_response()
 }
 
+async fn late_answer(
+    State(state): State<Arc<Mutex<State_>>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let (method, path) = (
+        request.method().to_string(),
+        request.uri().path().to_string(),
+    );
+    let response = next.run(request).await;
+    let pause = {
+        let mut st = state.lock().unwrap();
+        if st
+            .answer_pause
+            .as_ref()
+            .is_some_and(|(m, suffix, _)| *m == method && path.ends_with(suffix.as_str()))
+        {
+            st.answer_pause.take().map(|(_, _, pause)| pause)
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause.reached.notify_one();
+        pause.release.notified().await;
+    }
+    response
+}
+
 async fn pull_get(
     State((state, _)): State<S>,
     UrlPath((owner, name, n)): UrlPath<(String, String, u64)>,
@@ -626,13 +658,25 @@ async fn alert_get(
 }
 
 impl FakeGitHub {
-    pub fn pause_pull_read(&self, number: u64) -> PausedPullRead {
-        let pause = Arc::new(PullReadPause {
+    pub fn pause_pull_read(&self, number: u64) -> Paused {
+        let pause = Arc::new(Pause {
             reached: Notify::new(),
             release: Notify::new(),
         });
         self.state.lock().unwrap().pull_read_pause = Some((number, pause.clone()));
-        PausedPullRead(pause)
+        Paused(pause)
+    }
+
+    /// Holds the answer to the next `method` request whose path ends with
+    /// `suffix`, after the host carried it out, until the result is dropped.
+    pub fn pause_answer(&self, method: &str, suffix: &str) -> Paused {
+        let pause = Arc::new(Pause {
+            reached: Notify::new(),
+            release: Notify::new(),
+        });
+        self.state.lock().unwrap().answer_pause =
+            Some((method.into(), suffix.into(), pause.clone()));
+        Paused(pause)
     }
 
     pub async fn start(root: &Path) -> FakeGitHub {
@@ -663,7 +707,11 @@ impl FakeGitHub {
                 "/repos/{owner}/{name}/dependabot/alerts/{n}",
                 get(alert_get),
             )
-            .with_state((state.clone(), root.to_path_buf()));
+            .with_state((state.clone(), root.to_path_buf()))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                late_answer,
+            ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {

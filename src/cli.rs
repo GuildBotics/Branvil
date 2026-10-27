@@ -179,6 +179,7 @@ pub fn init(
 /// Runs the service until a signal stops it; the exit status is 3 when the
 /// stop interrupted running CI jobs (`Ci::stop`).
 pub async fn serve(config: Config) -> anyhow::Result<u8> {
+    let (interrupt, terminate) = stop_signals()?;
     let layout = config.layout();
     layout.create()?;
     let store = Store::open(
@@ -192,6 +193,13 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
             layout.db().display()
         );
     }
+    // After the database: a service still running refuses the start there.
+    let (mut interrupt, mut terminate) = (Box::pin(interrupt), Box::pin(terminate));
+    tokio::select! {
+        held = crate::git::hold(&layout) => held?,
+        _ = &mut interrupt => return Ok(0),
+        _ = &mut terminate => return Ok(0),
+    }
     let cursor_key = layout.load_cursor_key()?;
     crate::auth::ensure_owner_token(&store, &layout)?;
     crate::hooks::install(&layout)?;
@@ -203,24 +211,27 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
         .base_url
         .clone()
         .unwrap_or_else(|| format!("http://{bound}"));
-    let app = std::sync::Arc::new(App::new(
+    let app = App::new(
         config,
         base_url.clone(),
         store,
         cursor_key,
         format!("http://{bound}"),
-    ));
+    );
     app.git
         .version()
         .await
         .map_err(|e| anyhow::anyhow!("git is not usable: {}", e.message))?;
 
     // Every managed repository carries Branvil's configuration (hooks path,
-    // hidden refs) even if it was changed on disk.
+    // hidden refs) even if it was changed on disk, and no lock file a killed
+    // Git left (no Git of a stopped service runs any more: `git::hold`).
     let repos: Vec<crate::model::Repo> =
         app.store.read(|r| r.prefix_all(store::REPOS, &[])).await?;
     for repo in &repos {
         let dir = app.git.repo_dir(&repo.path);
+        #[cfg(unix)]
+        crate::git::remove_stale_locks(&dir)?;
         app.git.configure(&dir).await?;
         app.git.set_head(&dir, &repo.default_branch).await?;
     }
@@ -242,22 +253,23 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
     std::io::stdout().flush()?;
     // SIGTERM stops CI first (`Ci::stop`: no new jobs, the running ones
     // finish) while the server keeps serving the runners and everyone else;
-    // SIGINT (Ctrl-C), also during that wait, stops at once. Then the event
-    // streams end and the server stops accepting; requests in flight get
-    // `SHUTDOWN_GRACE` to finish, then the process exits anyway (redb commits
-    // are atomic, and the ref journal recovers an interrupted ref change at
-    // the next start). It exits with 3 when the stop interrupted jobs.
+    // SIGINT (Ctrl-C), also during that wait, skips it. Then the event streams
+    // end and the server stops accepting; requests in flight get
+    // `SHUTDOWN_GRACE` to finish, then the stop goes on without waiting for
+    // them (their tasks live until the process exits). The repository
+    // operations already started (`App::finish`), a dropped request's or a
+    // background task's included, end first, each within its own limits; none
+    // starts meanwhile. It exits with 3 when the stop interrupted jobs.
     let (stopping, mut stopped) = tokio::sync::watch::channel(None);
     let events = app.events.clone();
     let ci = app.ci.clone();
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-        let interrupt = tokio::signal::ctrl_c();
         tokio::pin!(interrupt);
         let mut cut = 0;
         tokio::select! {
             _ = &mut interrupt => {},
-            _ = terminate() => {
-                tracing::info!("stopping: no new CI jobs; waiting for the running ones (SIGINT stops at once)");
+            _ = terminate => {
+                tracing::info!("stopping: no new CI jobs; waiting for the running ones (SIGINT skips the wait)");
                 tokio::select! {
                     _ = &mut interrupt => {},
                     stopped = ci.stop() => match stopped {
@@ -271,36 +283,76 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
         events.close();
         stopping.send_replace(Some(cut));
     });
-    tokio::select! {
-        served = server => served?,
+    let served = tokio::select! {
+        served = server => served,
         _ = async {
             let _ = stopped.wait_for(Option::is_some).await;
             tokio::time::sleep(SHUTDOWN_GRACE).await;
-        } => tracing::warn!(
-            "requests still open {} s after the shutdown signal; exiting",
-            SHUTDOWN_GRACE.as_secs()
-        ),
-    }
+        } => {
+            tracing::warn!(
+                "requests still open {} s after the shutdown signal; exiting",
+                SHUTDOWN_GRACE.as_secs()
+            );
+            Ok(())
+        }
+    };
     let cut = stopped.borrow().unwrap_or(0);
+    let code = if cut > 0 { 3 } else { 0 };
     if cut > 0 {
         tracing::warn!(
             "stopped with {cut} CI job(s) still running after ci.stop_wait_secs: they were interrupted, and queued again in their place unless interrupted before"
         );
-        return Ok(3);
     }
-    Ok(0)
+    let close = app.close();
+    tokio::pin!(close);
+    if futures_util::poll!(close.as_mut()).is_pending() {
+        // scripts/serve.sh waits for a serve that says this (as for CI jobs).
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(
+            out,
+            "branvil stopping: waiting for the started repository operations to finish"
+        )
+        .and_then(|_| out.flush());
+        drop(out);
+        tracing::info!("stopping: waiting for the started repository operations");
+        close.await;
+    }
+    served?;
+    Ok(code)
 }
 
 /// How long requests in flight may take after a shutdown signal.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-async fn terminate() {
+/// SIGINT and SIGTERM, taken over before `serve` starts any repository work:
+/// their default action would end the process in the middle of it.
+fn stop_signals() -> std::io::Result<(impl Future<Output = ()>, impl Future<Output = ()>)> {
     #[cfg(unix)]
-    if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-        s.recv().await;
-        return;
-    }
-    std::future::pending::<()>().await
+    let signals = {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        (
+            async move {
+                interrupt.recv().await;
+            },
+            async move {
+                terminate.recv().await;
+            },
+        )
+    };
+    #[cfg(windows)]
+    let signals = {
+        // Registered now, unlike `tokio::signal::ctrl_c`.
+        let mut interrupt = tokio::signal::windows::ctrl_c()?;
+        (
+            async move {
+                interrupt.recv().await;
+            },
+            std::future::pending::<()>(),
+        )
+    };
+    Ok(signals)
 }
 
 pub async fn admin(
