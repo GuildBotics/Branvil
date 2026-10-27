@@ -854,8 +854,8 @@ error remains on the published record.
 | `gate` | Wait for gate creation or required gate CI. |
 | `publishing` | Wait for Branvil to send the current head or create the host PR (including retries). |
 | `owner_publish` | Owner publishes/re-publishes from the PR page: automatic publishing is off, a previous upstream was used, sending was refused/stopped, or `resume_publish` is set. |
-| `host_checks` | Current head is on the host and at least one host check is not `completed`. |
-| `owner_merge_host` | Owner merges on the host; the current head is there and no check is pending. No checks read also means this value; required checks remain enforced by the host's branch protection. |
+| `host_checks` | Current head is on the host and its host checks have not all succeeded: one is not `completed`, one failed (until the entry leaves), or none is registered yet ("Checks (readiness data)"). |
+| `owner_merge_host` | Owner merges on the host; the current head is there and every host check succeeded, or the host had none once the time to register them passed. Required checks remain enforced by the host's branch protection. |
 | `following` | Host PR merged; wait for Branvil to bring that merge into the base. |
 | `owner_fix_following` | Owner restores following; `next_detail` holds its stopped/error reason. |
 | `host_closed` | Host PR closed without merging; owner decides whether to reopen it or close the Branvil PR. |
@@ -918,6 +918,8 @@ first is `passed`.
 
 Gate failures and conflicts add a comment by the service author `branvil`,
 including the gate inputs and failed jobs with log links or conflicting files.
+A `host_failed` departure adds one too, with the head and the failed host
+checks with their links, so that the author learns of it on the pull request.
 Required checks appear as `gate/<job>`; a conflict is a failed `gate` check.
 These checks remain visible, including retries after departure, only while
 the entry's `head_sha` equals the head of the pull request's checks response.
@@ -958,8 +960,9 @@ when it reaches the front and its gate can be created without conflicts.
 Branvil publishes a pull request by itself once: one that has an `upstream`
 record (published before, by the owner or Branvil, including a host refusal)
 is left to the owner's publish. An automatic publish has `upstream.auto: true`.
-Each automatic gate pass can notify the webhook once the host pull request
-exists, including a new gate for an already published head ("Webhook").
+Each automatic gate pass can notify the webhook once its next action is
+`owner_merge_host`, including a new gate for an already published head
+("Webhook").
 
 ### Checks (readiness data)
 
@@ -1039,6 +1042,12 @@ exists, including a new gate for an already published head ("Webhook").
   (`github/test-windows`), with `attempt_id` `<provider>-<id>`, `details_url`
   the host's page, and `details` the host's summary. Their log is read through
   the job-log endpoint below; the other job endpoints do not know them.
+  While the host may still register them for an open pull request's head (it
+  has none, and Branvil has not read the host since `[upstream]
+  checks_registration_secs`, 300 by default, passed after its push or the
+  host pull request's creation), a check named `<provider>` without
+  `attempt_id` stands for them: `queued`, `null`, with `details` "No check of GitHub is registered for
+  this commit yet".
 
 `GET /api/v1/repos/{repo}/commits/{sha}/checks` →
 `{"sha": "...", "checks": [...], "checks_expected": true, "run_registered": true}`: the checks of any
@@ -1296,7 +1305,7 @@ is polled when, and how conflicts are settled: `docs/architecture.md`,
 
 ### Webhook
 
-Branvil tells the webhook when an automatic landing gate passes, when a
+Branvil tells the webhook when an automatically landing pull request is ready to merge on the host, when a
 protected run's required checks finally fail, and when a scripted service
 update or activation stops. Its URL is a credential of another system:
 it is kept in `<data>/secrets/webhook.url` (`0600`), never returned, and not in
@@ -1310,9 +1319,10 @@ backups.
 - `DELETE /api/v1/admin/webhook` → the same, with `set: false`.
 
 For each passed entry with `landing.notify: true` and
-`landing.notified_at: null`, once the host pull request exists and sending is
-not stopped, Branvil posts
-`{"text": "<title> (<repo> !<n>) passed its landing gate and awaits a merge on GitHub.\n<Branvil pull request URL>\n<host pull request URL>"}`
+`landing.notified_at: null` whose queue's next action is `owner_merge_host`
+(its head is on the host, sending is not stopped, and every host check of it
+succeeded, or the host had none once the time to register them passed), Branvil posts
+`{"text": "<title> (<repo> !<n>) passed its landing gate and is ready to merge on GitHub.\n<Branvil pull request URL>\n<host pull request URL>"}`
 (a Slack Incoming Webhook takes it as it is). Every new automatic gate pass
 gets a notice, including when the head was already published. Automatic
 publication itself still happens once. A pending notice is retried even if the

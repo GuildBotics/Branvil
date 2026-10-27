@@ -1,34 +1,37 @@
-//! 23 → 24: images attached to tickets (`attachments`, new and empty) and the
-//! index of the references to them, derived from the ticket bodies and
-//! comments kept. Only the immediately preceding format is read here.
-
-use redb::TableHandle;
+//! 24 → 25: a pull request's publication records until when the host may
+//! register checks of its pushed head; those pushed before are past it. Only
+//! the immediately preceding format is read here.
 
 use crate::config::Layout;
-use crate::model;
-use crate::store::{self, Upgraded, Upgrading};
+use crate::model::Pull;
+use crate::store::{self, Rd, Upgraded, Upgrading};
 
-pub const FROM: u64 = 23;
+pub const FROM: u64 = 24;
 const _: () = assert!(FROM + 1 == store::SCHEMA_VERSION);
 
 pub fn upgrade(layout: &Layout) -> anyhow::Result<Option<Upgraded>> {
     let Some(db) = Upgrading::open(&layout.db())? else {
         return Ok(None);
     };
-    let refs: Vec<model::IxEntry> = db.read(|r| {
-        Ok(model::expected_index(r)?
-            .into_iter()
-            .filter(|e| e.table.name() == store::IX_ATTACHMENT_REFS.name())
-            .collect())
-    })?;
+    let pulls = db
+        .read(|r| r.prefix_raw(store::PULLS, &[], None, usize::MAX))?
+        .into_iter()
+        .map(|(key, bytes)| {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            if let Some(x) = value["upstream"].as_object_mut() {
+                x.insert("checks_registered_by".into(), serde_json::Value::Null);
+            }
+            Ok((key, serde_json::from_value::<Pull>(value)?))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(Some(db.finish(|w| {
-        for e in &refs {
-            w.put_raw(e.table, &e.key, &e.value)
+        for (key, pull) in &pulls {
+            w.put(store::PULLS, key, pull)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
         }
         Ok(format!(
-            "{} reference(s) of ticket attachments indexed",
-            refs.len()
+            "{} pull request(s) upgraded past the registration of their host checks",
+            pulls.len()
         ))
     })?))
 }

@@ -425,6 +425,10 @@ pub struct Published {
     pub sent_state: String,
     /// The host's check runs of `pushed`.
     pub checks: Vec<HostCheck>,
+    /// Until when the host may register checks of `pushed`: while set, none
+    /// is "not registered yet", not "no checks". Cleared by the first read
+    /// that finds some, or none after that time.
+    pub checks_registered_by: Option<String>,
     pub published_at: String,
     /// The last failure; the next poll retries.
     pub error: Option<String>,
@@ -445,6 +449,61 @@ pub struct HostCheck {
     pub conclusion: Option<String>,
     pub url: Option<String>,
     pub summary: Option<String>,
+}
+
+impl HostCheck {
+    /// Completed with a conclusion that lets the pull request merge.
+    pub fn succeeded(&self) -> bool {
+        self.status == "completed"
+            && self
+                .conclusion
+                .as_deref()
+                .is_some_and(|v| ["success", "neutral", "skipped"].contains(&v))
+    }
+}
+
+impl Published {
+    /// Gives the host `secs` from now to register checks of `pushed`.
+    pub fn await_checks(&mut self, secs: u64) {
+        self.checks_registered_by = Some(crate::util::format_time(
+            chrono::Utc::now() + chrono::Duration::seconds(secs as i64),
+        ));
+    }
+
+    /// Records that the host's branch is at `head`; the checks of another
+    /// head are not its own.
+    pub fn record_push(&mut self, head: String, registration_secs: u64) {
+        if self.pushed.as_ref() != Some(&head) {
+            self.checks.clear();
+            self.await_checks(registration_secs);
+        }
+        self.pushed = Some(head);
+    }
+
+    /// Records the host's checks of `pushed`, just read: once there are some,
+    /// or none after the time the host was given, no more are to come.
+    pub fn record_checks(&mut self, checks: Vec<HostCheck>) {
+        if !checks.is_empty()
+            || self
+                .checks_registered_by
+                .as_ref()
+                .is_some_and(|by| *by <= crate::util::now())
+        {
+            self.checks_registered_by = None;
+        }
+        self.checks = checks;
+    }
+
+    /// Whether the host may still register checks of `pushed`.
+    pub fn checks_registering(&self) -> bool {
+        self.checks_registered_by.is_some()
+    }
+
+    /// Whether every check of `pushed` on the host succeeded, none being
+    /// still to register.
+    pub fn checks_passed(&self) -> bool {
+        !self.checks_registering() && self.checks.iter().all(HostCheck::succeeded)
+    }
 }
 
 impl Pull {

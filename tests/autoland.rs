@@ -429,6 +429,100 @@ async fn a_pull_request_publishes_itself_as_its_author_and_the_webhook_is_told_o
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_webhook_is_told_only_once_the_hosts_checks_of_the_head_finish() {
+    let (mut w, gh) = followed().await;
+    // GitHub takes its time to register the checks of a new head.
+    let config = w.server.data.join("branvil.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let text = text.replace(
+        "checks_registration_secs = 0",
+        "checks_registration_secs = 3600",
+    );
+    std::fs::write(&config, text).unwrap();
+    w.restart(&[]);
+    let hook = Hook::start(&w, &[]).await;
+    let other = other_repo(&w, OTHER, true).await;
+    with_aiko_account(&w).await;
+    settings(&w, json!({"auto_land": true})).await;
+    let head = w.push_change("feat", "f.txt", "one\n");
+    let n = number(&w.open_pull("feat", json!([])).await);
+    eventually("the publish", || async {
+        pull(&w, n).await["upstream"]["number"].is_u64()
+    })
+    .await;
+    let waits = |what: &'static str| {
+        let (w, other) = (&w, &other);
+        async move {
+            refresh(w).await;
+            swept(w, other).await;
+            let p = pull(w, n).await;
+            assert_eq!(p["landing"]["state"], "passed", "{what}: {p}");
+            assert_eq!(p["landing"]["first"]["next"], "host_checks", "{what}: {p}");
+            assert!(p["landing"]["notified_at"].is_null(), "{what}: {p}");
+        }
+    };
+    // None registered yet: they are still to come.
+    waits("not registered").await;
+    let checks = w
+        .server
+        .ok(&format!("{}/pulls/{n}/checks", w.repo_path()), &w.aiko)
+        .await;
+    let pending: Vec<_> = checks["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"] == "github")
+        .collect();
+    assert_eq!(pending.len(), 1, "{checks}");
+    assert_eq!(pending[0]["status"], "queued");
+    assert!(pending[0]["attempt_id"].is_null());
+    gh.running(&head, 71, "test");
+    waits("running").await;
+    assert!(hook.received().is_empty());
+    let checks = w
+        .server
+        .ok(&format!("{}/pulls/{n}/checks", w.repo_path()), &w.aiko)
+        .await;
+    let names: Vec<_> = checks["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].clone())
+        .collect();
+    assert_eq!(names, [json!("github/test")], "{checks}");
+
+    gh.check(&head, 71, "test", "success", "ok\n");
+    refresh(&w).await;
+    eventually("the notice", || async {
+        pull(&w, n).await["landing"]["notified_at"].is_string()
+    })
+    .await;
+    let received = hook.received();
+    assert_eq!(received.len(), 1, "{received:?}");
+    let text = received[0].1["text"].as_str().unwrap();
+    assert!(
+        text.contains("passed its landing gate and is ready to merge on GitHub"),
+        "{text}"
+    );
+    assert_eq!(
+        pull(&w, n).await["landing"]["first"]["next"],
+        "owner_merge_host"
+    );
+
+    // A new head the poller sends waits for its own checks again.
+    let next = w.push_change("feat", "f.txt", "two\n");
+    waits("new head").await;
+    assert_eq!(pull(&w, n).await["upstream"]["pushed"], next);
+    assert_eq!(hook.received().len(), 1);
+    gh.check(&next, 72, "test", "success", "ok\n");
+    refresh(&w).await;
+    eventually("the new head's notice", || async {
+        hook.received().len() == 2
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_automatic_publish_the_host_refuses_is_left_to_the_owner() {
     let (w, gh) = followed().await;
     with_aiko_account(&w).await;

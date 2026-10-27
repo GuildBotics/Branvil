@@ -962,17 +962,29 @@ impl FakeGitHub {
         }));
     }
 
+    /// Completes check run `id` of `sha` (adding it if it is not there).
     pub fn check(&self, sha: &str, id: u64, name: &str, conclusion: &str, log: &str) {
+        self.check_run(sha, id, name, "completed", Some(conclusion));
+        self.state.lock().unwrap().logs.insert(id, log.into());
+    }
+
+    /// Starts check run `id` of `sha`, which has not finished yet.
+    pub fn running(&self, sha: &str, id: u64, name: &str) {
+        self.check_run(sha, id, name, "in_progress", None);
+    }
+
+    fn check_run(&self, sha: &str, id: u64, name: &str, status: &str, conclusion: Option<&str>) {
         let mut st = self.state.lock().unwrap();
-        st.checks.entry(sha.into()).or_default().push(json!({
+        let runs = st.checks.entry(sha.into()).or_default();
+        runs.retain(|r| r["id"] != id);
+        runs.push(json!({
             "id": id,
             "name": name,
-            "status": "completed",
+            "status": status,
             "conclusion": conclusion,
             "html_url": format!("https://github.test/runs/{id}"),
-            "output": {"title": format!("{name}: {conclusion}")},
+            "output": {"title": format!("{name}: {}", conclusion.unwrap_or(status))},
         }));
-        st.logs.insert(id, log.into());
     }
 
     /// Requests whose method and path match, with the login that made them.
@@ -1004,6 +1016,8 @@ impl FakeGitHub {
         // The tests poll explicitly (`/upstream/refresh`).
         upstream.insert("poll_active_secs".into(), toml::Value::Integer(3600));
         upstream.insert("poll_idle_secs".into(), toml::Value::Integer(3600));
+        // A head without checks has none, unless a test says otherwise.
+        upstream.insert("checks_registration_secs".into(), toml::Value::Integer(0));
         let mut github = toml::Table::new();
         github.insert("api_url".into(), toml::Value::String(self.url.clone()));
         github.insert(

@@ -728,6 +728,8 @@ pub async fn open_on_host(at: Place<'_>, writer: As<'_>, login: &str, p: &Pull, 
             x.sent_title = title;
             x.sent_body = body;
             x.error = None;
+            // The host checks pull requests only once they are there.
+            x.await_checks(at.app.upstream.config.checks_registration_secs);
         }
         Err(e) => x.error = Some(e.message),
     }
@@ -948,8 +950,7 @@ async fn send_changes(
             let lease = x.pushed.clone().unwrap_or_default();
             match push_branch(at, w, &p.head, &head, &lease).await {
                 Pushed::Done => {
-                    x.pushed = Some(head);
-                    x.checks.clear();
+                    x.record_push(head, at.app.upstream.config.checks_registration_secs)
                 }
                 Pushed::Refused(why) => x.stopped = Some(why),
                 Pushed::Failed(why) => x.error = Some(why),
@@ -977,7 +978,7 @@ async fn send_changes(
     }
     if let Some(sha) = x.pushed.clone() {
         match host.checks(reader, &setting.repository, &sha).await {
-            Ok(checks) => x.checks = checks,
+            Ok(checks) => x.record_checks(checks),
             Err(e) => x.error = Some(e.message),
         }
     }

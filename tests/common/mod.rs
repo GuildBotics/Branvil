@@ -616,18 +616,15 @@ pub fn edit_records(db: &Path, table: &str, mut f: impl FnMut(&mut Value)) {
 }
 
 /// Recreates the immediately preceding schema in a stopped database.
-pub fn as_schema_23(db: &Path) {
-    let database = redb::Database::open(db).unwrap();
-    let txn = database.begin_write().unwrap();
-    for table in ["attachments", "ix_attachment_refs"] {
-        let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
-        txn.delete_table(def).unwrap();
-    }
-    txn.commit().unwrap();
-    drop(database);
+pub fn as_schema_24(db: &Path) {
+    edit_records(db, "pulls", |v| {
+        if let Some(x) = v["upstream"].as_object_mut() {
+            x.remove("checks_registered_by");
+        }
+    });
     edit_records(db, "meta", |v| {
         if v.is_u64() {
-            *v = json!(23);
+            *v = json!(24);
         }
     });
 }

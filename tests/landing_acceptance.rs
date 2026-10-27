@@ -183,6 +183,21 @@ async fn a_published_heads_failed_host_check_releases_the_next_gate() {
     let failed = landing(&w, 1, "left").await;
     assert_eq!(failed["landing"]["reason"]["code"], "host_failed");
     assert_eq!(failed["landing"]["reason"]["jobs"], json!(["platform"]));
+    // The author is told on the pull request, with the failed check's link.
+    let comments = w
+        .server
+        .ok(&format!("{}/pulls/1/comments", w.repo_path()), &w.owner)
+        .await;
+    assert_eq!(comments["items"].as_array().unwrap().len(), 1, "{comments}");
+    assert_eq!(comments["items"][0]["author"], "branvil");
+    let body = comments["items"][0]["body"].as_str().unwrap();
+    for value in [
+        "Checks on GitHub failed.",
+        first["head_sha"].as_str().unwrap(),
+        "- platform: https://github.test/runs/441",
+    ] {
+        assert!(body.contains(value), "{body}");
+    }
     let next = landing(&w, 2, "passed").await;
     assert_eq!(next["landing"]["position"], 1);
     assert_eq!(next["landing"]["first"]["number"], 2);

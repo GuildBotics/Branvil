@@ -68,7 +68,7 @@ pub struct LandingView {
     pub first: Option<LandingFirst>,
 }
 
-fn first(
+pub(crate) fn first(
     repo: &Repo,
     p: &Pull,
     e: &Landing,
@@ -113,10 +113,10 @@ fn first(
         ("host_closed", detail)
     } else if let Some(x) = x.filter(|x| x.number.is_some() && x.pushed.as_deref() == Some(head)) {
         (
-            if x.checks.iter().any(|c| c.status != "completed") {
-                "host_checks"
-            } else {
+            if x.checks_passed() {
                 "owner_merge_host"
+            } else {
+                "host_checks"
             },
             x.error.clone(),
         )
@@ -352,12 +352,7 @@ fn published_problem(repo: &Repo, p: &Pull, head: &str, resume: bool) -> Option<
         let failed: Vec<_> = x
             .checks
             .iter()
-            .filter(|c| {
-                c.status == "completed"
-                    && c.conclusion
-                        .as_deref()
-                        .is_some_and(|v| !["success", "neutral", "skipped"].contains(&v))
-            })
+            .filter(|c| c.status == "completed" && !c.succeeded())
             .map(|c| c.name.clone())
             .collect();
         if !failed.is_empty() {
@@ -454,38 +449,50 @@ async fn leave(
     why: LandingReason,
     checks: &[Check],
 ) -> AppResult<()> {
-    let comment = if ["gate_failed", "conflict"].contains(&why.code.as_str()) {
-        let details = if why.code == "conflict" {
-            why.files.join("\n")
-        } else {
-            checks
-                .iter()
-                .filter(|c| why.jobs.contains(&c.name))
-                .map(|c| {
-                    format!(
-                        "- {}: {}",
-                        c.name,
-                        c.details_url.as_deref().unwrap_or("no log available")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        Some(format!(
+    let failed = || {
+        checks
+            .iter()
+            .filter(|c| why.jobs.contains(&c.name))
+            .map(|c| {
+                format!(
+                    "- {}: {}",
+                    c.name,
+                    c.details_url.as_deref().unwrap_or("no log available")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let comment = match why.code.as_str() {
+        "gate_failed" | "conflict" => Some(format!(
             "Landing gate failed.\n\nBase: `{}`\nHead: `{}`\nGate: `{}`\n\n{}\n{}{}",
             e.base_sha,
             e.head_sha,
             e.gate.as_deref().unwrap_or("not created"),
             why.message,
-            details,
+            if why.code == "conflict" {
+                why.files.join("\n")
+            } else {
+                failed()
+            },
             if why.code == "gate_failed" {
                 "\n\nRetry the failed and cancelled required gate jobs. Once all required jobs succeed, this pull request rejoins the end of the landing queue."
             } else {
                 ""
             }
-        ))
-    } else {
-        None
+        )),
+        "host_failed" => Some(format!(
+            "Checks on {host} failed.\n\nHead: `{}`\n\n{}\n{}\n\nPush a head that fixes them. If a failure was intermittent, the owner can re-run it on {host}: once the failed checks succeed, this pull request rejoins the end of the landing queue.",
+            e.head_sha,
+            why.message,
+            failed(),
+            host = repo
+                .upstream
+                .as_ref()
+                .map(|up| app.upstream.host_name(&up.provider))
+                .unwrap_or_default()
+        )),
+        _ => None,
     };
     e.state = "left".into();
     e.state_at = util::now();
@@ -727,7 +734,16 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
                             "The head or base moved.",
                         )
                     }),
-                    &[],
+                    &published(repo, p).map_or_else(Vec::new, |x| {
+                        x.checks
+                            .iter()
+                            .map(|c| Check {
+                                name: c.name.clone(),
+                                details_url: c.url.clone(),
+                                ..Check::default()
+                            })
+                            .collect()
+                    }),
                 )
                 .await?;
             } else {
@@ -769,15 +785,10 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
             && let Some(x) = published(repo, p)
         {
             let succeeded = x.pushed.as_deref() == Some(head.as_str())
-                && why.jobs.iter().all(|name| {
-                    x.checks.iter().any(|c| {
-                        &c.name == name
-                            && c.status == "completed"
-                            && c.conclusion
-                                .as_deref()
-                                .is_some_and(|v| ["success", "neutral", "skipped"].contains(&v))
-                    })
-                });
+                && why
+                    .jobs
+                    .iter()
+                    .all(|name| x.checks.iter().any(|c| &c.name == name && c.succeeded()));
             if !succeeded {
                 continue;
             }
@@ -1071,7 +1082,7 @@ mod tests {
         serde_json::from_value(json!({
             "provider":"test-host", "repository":"remote/demo", "account":"test-agent", "number":2,
             "url":"https://host.test/pulls/2", "state":"open", "pushed":"head", "sent_title":"Feature", "sent_body":"",
-            "sent_state":"open", "checks":[], "published_at":"now", "error":null, "stopped":null, "auto":true
+            "sent_state":"open", "checks":[], "checks_registered_by":null, "published_at":"now", "error":null, "stopped":null, "auto":true
         })).unwrap()
     }
 
@@ -1233,7 +1244,17 @@ mod tests {
         );
         e.error = None;
         p.upstream = Some(publication());
-        assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host"); // no host checks read
+        assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host"); // the host has none
+        let x = p.upstream.as_mut().unwrap();
+        x.await_checks(0);
+        assert_eq!(next(&repo, &p, &e, &following), "host_checks"); // not read yet
+        let x = p.upstream.as_mut().unwrap();
+        x.record_checks(Vec::new()); // read as none after the time given
+        assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host");
+        let x = p.upstream.as_mut().unwrap();
+        x.await_checks(60);
+        x.record_checks(Vec::new());
+        assert_eq!(next(&repo, &p, &e, &following), "host_checks"); // may still come
         assert_eq!(
             first(&repo, &p, &e, &following, "head").host_url.as_deref(),
             Some("https://host.test/pulls/2")
@@ -1243,17 +1264,21 @@ mod tests {
             "publishing"
         );
         for conclusion in ["success", "neutral", "skipped"] {
-            p.upstream.as_mut().unwrap().checks = vec![HostCheck {
+            p.upstream.as_mut().unwrap().record_checks(vec![HostCheck {
                 id: "1".into(),
                 name: "host/test".into(),
                 status: "completed".into(),
                 conclusion: Some(conclusion.into()),
                 url: None,
                 summary: None,
-            }];
+            }]);
             assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host");
         }
         p.upstream.as_mut().unwrap().checks[0].status = "queued".into();
+        assert_eq!(next(&repo, &p, &e, &following), "host_checks");
+        // A failure is not the owner's merge, even before it makes the entry leave.
+        let x = p.upstream.as_mut().unwrap();
+        (x.checks[0].status, x.checks[0].conclusion) = ("completed".into(), Some("failure".into()));
         assert_eq!(next(&repo, &p, &e, &following), "host_checks");
         p.upstream.as_mut().unwrap().state = "closed".into();
         assert_eq!(
