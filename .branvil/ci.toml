@@ -46,6 +46,7 @@ paths = [
   "src/**",
   "tests/*.rs",
   "tests/common/**",
+  "tests/fixtures/**",
   "examples/**",
   "Cargo.toml",
   "Cargo.lock",
@@ -69,6 +70,7 @@ paths = [
   "src/**",
   "tests/*.rs",
   "tests/common/**",
+  "tests/fixtures/**",
   "examples/**",
   "Cargo.toml",
   "Cargo.lock",
@@ -88,7 +90,7 @@ cache = { paths = [".ci/cargo-home/registry", "target"], key_files = ["Cargo.loc
 
 [[jobs]]
 name = "web"
-paths = ["web/**"]
+paths = ["web/**", "tests/fixtures/**"]
 image = "guildbotics/agent-environment:dev"
 commands = [
   "cd web && npm_config_cache=/work/.ci/npm npm ci",

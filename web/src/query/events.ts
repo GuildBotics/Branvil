@@ -107,6 +107,11 @@ export function predicatesFor(event: ChangeEvent, client: QueryClient): Predicat
 }
 
 export function applyChange(event: ChangeEvent, client: QueryClient): void {
+  // References may point across repositories, or to an item created since
+  // the last render. Refresh active Markdown when targets can have changed.
+  if (["ticket", "pull", "repo", "upstream"].includes(event.kind)) {
+    void client.invalidateQueries({ queryKey: ["markdown"] });
+  }
   const predicates = predicatesFor(event, client);
   if (predicates === null) {
     void client.invalidateQueries();

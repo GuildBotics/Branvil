@@ -4,6 +4,8 @@
 import DOMPurify from "dompurify";
 import { Marked } from "marked";
 import { useMemo } from "react";
+import { useT, type Translate } from "../i18n";
+import { useMarkdown } from "../query/hooks";
 
 const marked = new Marked({ gfm: true, breaks: false, async: false });
 
@@ -26,17 +28,34 @@ function installHooks(): void {
 }
 
 /** Markdown → sanitized HTML string. Exported for tests. */
-export function renderMarkdown(source: string): string {
+export function renderMarkdown(source: string, t?: Translate): string {
   installHooks();
   const html = marked.parse(source) as string;
-  return DOMPurify.sanitize(html, {
+  const clean = DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
     FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select", "iframe", "object", "embed", "svg", "math"],
     FORBID_ATTR: ["style", "class", "id"],
   });
+  if (!t) return clean;
+  const element = document.createElement("div");
+  element.innerHTML = clean;
+  for (const a of element.querySelectorAll<HTMLAnchorElement>("a[data-branvil-kind][data-branvil-state]")) {
+    const kind = a.dataset.branvilKind;
+    const state = a.dataset.branvilState;
+    if ((kind !== "ticket" && kind !== "pull") || (state !== "open" && state !== "closed" && state !== "merged")) continue;
+    const description = `${t(`markdown.${kind}`)}, ${t(`pull.state.${state}`)}`;
+    a.title = `${description}: ${a.title}`;
+    a.setAttribute("aria-label", `${a.textContent}, ${a.title}`);
+  }
+  return element.innerHTML;
 }
 
-export function Markdown({ source, className }: { source: string; className?: string }) {
-  const html = useMemo(() => renderMarkdown(source), [source]);
+export function Markdown({ repo, source, className }: { repo: string; source: string; className?: string }) {
+  const t = useT();
+  const resolved = useMarkdown(repo, source);
+  // Show the source while resolving (and if the request fails); no content
+  // is hidden by a failed enhancement, and source changes cannot use old links.
+  const markdown = resolved.data?.markdown ?? source;
+  const html = useMemo(() => renderMarkdown(markdown, t), [markdown, t]);
   return <div className={["markdown", className].filter(Boolean).join(" ")} dangerouslySetInnerHTML={{ __html: html }} />;
 }

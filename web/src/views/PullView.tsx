@@ -114,7 +114,7 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
       <Post head={<PostHead author={pr.author} kind={kindOf(pr.author)} at={pr.created_at} />}>
         <section aria-label={t("pull.description")}>
           {pr.body.trim() ? (
-            <Markdown source={pr.body} />
+            <Markdown repo={repo} source={pr.body} />
           ) : (
             <Text size="sm" c="dimmed">
               {t("common.notProvided")}

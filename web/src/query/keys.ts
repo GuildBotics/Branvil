@@ -2,6 +2,7 @@
 // change event (`{kind, path, id}`) maps to a key prefix.
 
 export const keys = {
+  markdown: (repo: string, source: string) => ["markdown", repo, source] as const,
   session: () => ["session"] as const,
   repos: () => ["repos"] as const,
   workspaces: () => ["workspaces"] as const,

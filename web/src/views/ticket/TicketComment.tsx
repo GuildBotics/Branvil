@@ -36,7 +36,7 @@ export function TicketComment({ repo, ticketKey, comment, kind, onReact }: {
     },
   });
   return (
-    <CommentView comment={comment} url={`${href.ticket(repo, ticketKey)}#${encodeURIComponent(comment.id)}`} kind={kind} onReact={onReact} actions={allowed && !editing && (
+    <CommentView repo={repo} comment={comment} url={`${href.ticket(repo, ticketKey)}#${encodeURIComponent(comment.id)}`} kind={kind} onReact={onReact} actions={allowed && !editing && (
       <Group gap={4} ml="auto">
         <ActionIcon variant="subtle" color="gray" aria-label={t("comment.edit")} disabled={change.isPending} onClick={() => { change.reset(); setEditing(true); }}>
           <Pencil size={16} />
@@ -51,7 +51,7 @@ export function TicketComment({ repo, ticketKey, comment, kind, onReact }: {
       {editing ? (
         <BodyEditor value={comment.body} label={t("comment.body")} required pending={change.isPending}
           onCancel={() => { setEditing(false); change.reset(); }} onSave={(body) => change.mutate(body)} />
-      ) : <Markdown source={comment.body} />}
+      ) : <Markdown repo={repo} source={comment.body} />}
       {change.isError && <ErrorMessage error={change.error} />}
     </CommentView>
   );

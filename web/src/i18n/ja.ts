@@ -3,6 +3,8 @@
 import type { MessageKey } from "./en";
 
 export const ja: Record<MessageKey, string> = {
+  "markdown.ticket": "チケット",
+  "markdown.pull": "プルリクエスト",
   "common.loading": "読み込み中…",
   "common.refreshing": "更新中…",
   "common.retry": "再試行",

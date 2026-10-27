@@ -7,7 +7,6 @@ mod github;
 pub mod host;
 pub mod http;
 pub mod ops;
-mod references;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,10 +18,12 @@ use tokio::sync::Notify;
 
 use crate::app::{App, KeyedGuard, KeyedLocks, Shared};
 use crate::config::UpstreamConfig;
+use crate::domain::markdown::{self, Item};
 use crate::domain::pulls::{self, load_pull};
 use crate::error::{AppError, AppResult};
 use crate::git::ZERO_SHA;
 use crate::model::{Member, MemberKind, Published, Pull, Repo, Ticket, Upstream as Setting};
+use crate::references;
 use crate::refs::RefChange;
 use crate::store::{self, Key, Rd};
 use crate::util::{self, fold};
@@ -305,47 +306,33 @@ fn targets(
     texts: &[&str],
     base_url: &str,
 ) -> AppResult<HashMap<references::Reference, Target>> {
+    let own = crate::domain::repo_by_id(r, &p.repo)?;
     let mut out = HashMap::new();
     for text in texts {
         for (_, reference) in references::find(text, base_url) {
             if out.contains_key(&reference) {
                 continue;
             }
-            let repo = match &reference.repository {
-                None => crate::domain::repo_by_id(r, &p.repo)?,
-                Some(path) => match crate::domain::repo_by_path(r, path) {
-                    Ok(repo) => repo,
-                    Err(_) => continue,
-                },
+            let Some((repo, item)) = markdown::resolve(r, &own, &reference)? else {
+                continue;
             };
             let n = reference.number;
-            // Only what exists in Branvil is Branvil's to rewrite; a dangling
-            // `#9` is left as written.
-            let target = match reference.kind {
-                references::Kind::Ticket => {
-                    let Some(t) = r.get::<Ticket>(store::TICKETS, &Ticket::key(&repo.id, n))?
-                    else {
-                        continue;
-                    };
-                    t.upstream_issue
-                        .map(Target::Issue)
-                        .unwrap_or_else(|| Target::Branvil(format!("{}#{n}", repo.path)))
-                }
-                references::Kind::Pull => {
-                    let Some(q) = r.get::<Pull>(store::PULLS, &Pull::key(&repo.id, n))? else {
-                        continue;
-                    };
-                    q.upstream
-                        .and_then(|x| {
-                            Some(Target::Pull {
-                                number: x.number?,
-                                provider: x.provider,
-                                repository: x.repository,
-                                url: x.url,
-                            })
+            let target = match item {
+                Item::Ticket(t) => t
+                    .upstream_issue
+                    .map(Target::Issue)
+                    .unwrap_or_else(|| Target::Branvil(format!("{}#{n}", repo.path))),
+                Item::Pull(q) => q
+                    .upstream
+                    .and_then(|x| {
+                        Some(Target::Pull {
+                            number: x.number?,
+                            provider: x.provider,
+                            repository: x.repository,
+                            url: x.url,
                         })
-                        .unwrap_or_else(|| Target::Branvil(format!("{}!{n}", repo.path)))
-                }
+                    })
+                    .unwrap_or_else(|| Target::Branvil(format!("{}!{n}", repo.path))),
             };
             out.insert(reference, target);
         }

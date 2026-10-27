@@ -51,6 +51,9 @@ export function useSession() {
 
 export const useRepos = () => useQuery({ queryKey: keys.repos(), queryFn: () => api.repos.list() });
 
+export const useMarkdown = (repo: string, source: string) =>
+  useQuery({ queryKey: keys.markdown(repo, source), queryFn: ({ signal }) => api.markdown(repo, source, signal), enabled: source.length > 0 });
+
 export const useWorkspaces = () => useQuery({ queryKey: keys.workspaces(), queryFn: () => api.workspaces.list() });
 
 /** A commit never changes: cached for the session. */

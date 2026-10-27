@@ -1,6 +1,8 @@
 // English messages. `ja.ts` must have exactly the same keys.
 
 export const en = {
+  "markdown.ticket": "Ticket",
+  "markdown.pull": "Pull request",
   "common.loading": "Loading…",
   "common.refreshing": "Refreshing…",
   "common.retry": "Retry",

@@ -28,7 +28,8 @@ an endpoint, this file changes in the same commit.
 - `POST` requests that create something accept an optional
   `Idempotency-Key` header (1-128 printable ASCII); requests whose response
   holds a credential or a code ignore it (token issuance, entry links,
-  sessions, and the local-app endpoints under `/apps/`), so the service never
+  sessions, and the local-app endpoints under `/apps/`), and the read-only
+  Markdown resolver, so the service never
   keeps one. A repeated key from the same
   member with the same body returns the first response; with another body it is
   `409 idempotency_conflict` (the body is compared together with the request
@@ -73,6 +74,31 @@ The GUI links each comment's timestamp to its permanent address and offers a
 copy button. Opening a fragment waits for the conversation to load, expands a
 resolved thread when needed, and scrolls to the highlighted entry. URLs copied
 in a ticket drawer use the ticket's page, not the board's address.
+
+### Markdown references (GUI)
+
+`POST /repos/{repo}/markdown` takes `{"source": "See #3 and !2"}` (up to
+256 KiB, empty allowed) and returns `{"markdown": "..."}`. The owner and
+agents may use it; runners may not. It reads current state, creates nothing,
+ignores `Idempotency-Key`, and uses the usual session CSRF check. Existing
+ticket, pull request, comment, and review bodies remain the original Markdown.
+
+The result is that Markdown with prose references to existing Branvil items
+replaced by inline HTML anchors. `#N` and `!N` use `{repo}`;
+`workspace/name#N`, `workspace/name!N`, and bare Branvil web URLs may name
+another repository. Anchors carry their canonical web URL, the target title
+(HTML-escaped), `data-branvil-kind="ticket|pull"`, and
+`data-branvil-state="open|closed|merged"` (`merged` is only for PRs).
+Clients render Markdown, sanitize the HTML, then use these attributes for
+icons and accessible labels. This response is **not trusted HTML**.
+
+Code spans/blocks, links (including explicit autolinks), images, and HTML
+(inline contents included) are untouched. Escaped sigils and non-whole
+references are literal. Unknown numbers and foreign repositories stay text;
+the first character of an unresolved bare Branvil URL is an HTML entity to
+prevent GFM from auto-linking it. The parser and lookup are shared with the
+upstream rewrite. The GUI refreshes displayed Markdown on ticket, pull,
+repository, and upstream events, including changes in another repository.
 
 ### Authentication
 

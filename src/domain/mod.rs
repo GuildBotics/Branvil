@@ -3,6 +3,7 @@
 //! transactions (never across Git), and returns the API view.
 
 pub mod apps;
+pub mod markdown;
 pub mod members;
 pub mod pulls;
 pub mod repos;

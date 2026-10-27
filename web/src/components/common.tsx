@@ -216,6 +216,7 @@ export function Post({ head, children }: { head: ReactNode; children: ReactNode 
 
 /** A comment; one with `meta.routing == "suppress"` is a status notice. */
 export function CommentView({
+  repo,
   comment,
   url,
   kind,
@@ -223,6 +224,7 @@ export function CommentView({
   actions,
   children,
 }: {
+  repo: string;
   comment: Comment;
   url: string;
   kind?: MemberKind;
@@ -240,7 +242,7 @@ export function CommentView({
         {actions}
       </PostHead>
       <div className="post-body">
-        {children ?? <Markdown source={comment.body} />}
+        {children ?? <Markdown repo={repo} source={comment.body} />}
         <Reactions reactions={comment.reactions ?? []} onReact={onReact} />
       </div>
     </article>
