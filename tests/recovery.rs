@@ -222,6 +222,129 @@ async fn ctrl_c_during_a_merge_waits_for_it() {
     assert_eq!(pending_ops(&w).await, 0);
 }
 
+/// The service exits while its Git, in a group of its own, still holds a
+/// merge's base in the ref update (as at the end of its stop's 60 s, or when
+/// killed), and a supervisor that waited only for the service's own exit
+/// starts the next one at once. The next start waits for that Git before it
+/// touches any repository: the merge is then recorded as Git did it, on
+/// another base than the default branch (whose recovery would otherwise drop
+/// the merge Git then did) and on the default branch (whose `HEAD.lock` would
+/// otherwise fail the start).
+#[cfg(unix)]
+#[tokio::test]
+async fn the_next_start_waits_for_the_git_a_stopped_service_left_running() {
+    for branch in ["release", "main"] {
+        let mut w = World::new().await;
+        let s = &w.server;
+        let t = w.ticket("Recover").await;
+        if branch != "main" {
+            w.push_change(branch, "r.txt", "r\n");
+        }
+        let head = w.push_change("feature", "f.txt", "one\n");
+        let (st, p) = s
+            .post(
+                &format!("{}/pulls", w.repo_path()),
+                &w.aiko,
+                json!({"head": "feature", "base": branch, "title": "Recover",
+                    "tickets": [{"url": t["url"], "closes": true}]}),
+            )
+            .await;
+        assert_eq!(st, 201, "{p}");
+        let pull = &p["pull"];
+        let base = format!("{}/pulls/{}", w.repo_path(), pull["number"]);
+        let old = pull["base_sha"].as_str().unwrap().to_string();
+        let refname = format!("refs/heads/{branch}");
+        let hold = RefHold::new(&w, &refname);
+        abandon_at(&hold, merge_request(&w, &base, &head, &old)).await;
+
+        // Only the service ends; its session is not drained.
+        w.server.signal("KILL");
+        while w.server.running() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // A start that waits still stops at Ctrl-C.
+        let waiting_log = w.dir.path().join("waiting.log");
+        let mut waiting = ServiceProcess::spawn(
+            std::process::Command::new(BIN)
+                .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+                .arg(&w.server.data)
+                .env_remove("BRANVIL_FAILPOINT")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::fs::File::create(&waiting_log).unwrap()),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !std::fs::read_to_string(&waiting_log)
+            .unwrap()
+            .contains("waiting for the Git a stopped service started to end")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the start did not wait"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let pid = waiting.id().to_string();
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-INT", &pid])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let status = waiting
+            .exit_within(std::time::Duration::from_secs(5))
+            .unwrap()
+            .expect("Ctrl-C stops it");
+        assert!(status.success(), "{status:?}");
+
+        let log = w.dir.path().join("serve.log");
+        let releasing = {
+            let (hold_reached, log) = (hold.reached(), log.clone());
+            let released = hold.released_path();
+            let bare = w.server.data.join("repos/acme/demo.git");
+            let (refname, old) = (refname.clone(), old.clone());
+            std::thread::spawn(move || {
+                assert!(hold_reached);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                while !std::fs::read_to_string(&log)
+                    .unwrap()
+                    .contains("waiting for the Git a stopped service started to end")
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the next start did not wait"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                let at = git_ok(
+                    &bare,
+                    &["--git-dir", bare.to_str().unwrap(), "rev-parse", &refname],
+                );
+                assert_eq!(at, old, "Git is still held");
+                std::fs::write(released, "").unwrap();
+            })
+        };
+        let next = Server::start_with(w.dir.path(), &[]);
+        let stopped = std::mem::replace(&mut w.server, next);
+        releasing.join().unwrap();
+        drop(stopped);
+
+        let pull = w.server.ok(&base, &w.aiko).await;
+        assert_eq!(pull["merged"], true, "{branch}: {pull}");
+        assert_eq!(bare_ref(&w, &refname), head);
+        let ticket = w
+            .server
+            .ok(&format!("/repos/{}/tickets/1", encode(REPO)), &w.aiko)
+            .await;
+        assert_eq!(ticket["state"], "closed", "{branch}");
+        assert_eq!(pending_ops(&w).await, 0);
+        let bare = w.server.data.join("repos/acme/demo.git");
+        assert!(!bare.join(format!("{refname}.lock")).exists());
+        assert!(!bare.join("HEAD.lock").exists());
+    }
+}
+
 #[tokio::test]
 async fn a_push_the_service_did_not_record_is_found_at_startup() {
     let mut w = World::new().await;

@@ -193,6 +193,13 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
             layout.db().display()
         );
     }
+    // After the database: a service still running refuses the start there.
+    let (mut interrupt, mut terminate) = (Box::pin(interrupt), Box::pin(terminate));
+    tokio::select! {
+        held = crate::git::hold(&layout) => held?,
+        _ = &mut interrupt => return Ok(0),
+        _ = &mut terminate => return Ok(0),
+    }
     let cursor_key = layout.load_cursor_key()?;
     crate::auth::ensure_owner_token(&store, &layout)?;
     crate::hooks::install(&layout)?;
@@ -315,9 +322,10 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
             // kill their Git children, in their own process groups otherwise
             // left to finish (Git killed in a ref update leaves lock files).
             // What they had not written yet is a crash at this point: the
-            // next start recovers it (the ref journal, the rescan, the gate
-            // repair, and redb's repair of an unclean shutdown). The
-            // automatic runner is stopped as the runtime's shutdown would.
+            // next start waits for that Git (`git::hold`), then recovers it
+            // (the ref journal, the rescan, the gate repair, and redb's repair
+            // of an unclean shutdown). The automatic runner is stopped as the
+            // runtime's shutdown would.
             runner.abort();
             let _ = runner.await;
             std::process::exit(code.into());

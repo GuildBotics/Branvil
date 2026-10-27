@@ -164,6 +164,10 @@ impl Layout {
     pub fn git_config(&self) -> PathBuf {
         self.root.join("git").join("gitconfig")
     }
+    /// Held by the service and by every Git it started (`git::hold`).
+    pub fn git_lock(&self) -> PathBuf {
+        self.root.join("git").join("service.lock")
+    }
     pub fn ci_logs(&self) -> PathBuf {
         self.root.join("ci").join("logs")
     }

@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use process::ServiceProcess;
+pub use process::ServiceProcess;
 
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -723,6 +723,11 @@ impl RefHold {
 
     pub fn release(&self) {
         std::fs::write(&self.released, "").unwrap();
+    }
+
+    /// The file whose creation releases Git (`release`).
+    pub fn released_path(&self) -> PathBuf {
+        self.released.clone()
     }
 }
 

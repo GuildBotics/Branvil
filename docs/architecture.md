@@ -78,7 +78,13 @@ or diffs, and then run one short write transaction.
   group never reaches Git in the middle of a ref update: Git killed there
   leaves its lock files (`packed-refs.lock`, `<ref>.lock`), and the repository
   refuses every later update of those refs. Only a Git command's own time
-  limit, and a dropped read, kill it.
+  limit, and a dropped read, kill it. So Git can outlive the service (a stop
+  that reached its 60 s, a killed service); it still changes refs then, and a
+  next start that recovered first would record the opposite of what Git did.
+  Every Git the service starts, and its hooks, inherit the lock
+  `git/service.lock` that the service takes at its start (`git::hold`), so the
+  next start waits for them before it touches any repository (unix; on
+  Windows the lock ends with the service).
 
 ## Ref changes and recovery
 

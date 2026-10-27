@@ -4,6 +4,8 @@
 //! own process group: a terminal's Ctrl-C, or a supervisor that kills the
 //! service's group, never reaches Git in the middle of a ref update (killed
 //! there, it leaves lock files that refuse every later update of the ref).
+//! So it can outlive the service; the lock it inherits (`hold`) keeps the
+//! next service from starting on its repositories until it has ended.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,48 @@ pub const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
 
 /// Largest stdout a service-side command may produce (diffs are the big ones).
 const MAX_OUTPUT: usize = 64 << 20;
+
+/// The data directory's Git lock, once this process holds it as the service.
+static HELD: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+/// Takes the data directory's Git lock (`Layout::git_lock`) for the service,
+/// before it reads or changes any repository. Every Git it starts from then
+/// on holds it too, and so do that Git's own children (its hooks), so the lock
+/// is free only once the service and all of them have ended: Git that a
+/// stopped service left running (it stopped at its deadline, or was killed)
+/// still updates its refs, and a next service that recovered first would
+/// record the opposite of what happened. That service waits for them here.
+/// On Windows the lock ends with the service.
+pub async fn hold(layout: &Layout) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let path = layout.git_lock();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut told = false;
+    // Polled rather than blocked on, so that the caller can give up waiting.
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if !std::mem::replace(&mut told, true) {
+                    tracing::warn!(
+                        "waiting for the Git a stopped service started to end (it holds {})",
+                        path.display()
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("locking {}", path.display()));
+            }
+        }
+    }
+    HELD.set(file)
+        .map_err(|_| anyhow::anyhow!("the Git lock is held already"))
+}
 
 #[derive(Clone)]
 pub struct Git {
@@ -64,6 +108,21 @@ pub fn base_command(global_config: &Path) -> tokio::process::Command {
     cmd.kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
+    #[cfg(unix)]
+    if let Some(lock) = HELD.get() {
+        use std::os::fd::AsRawFd;
+        let fd = lock.as_raw_fd();
+        // SAFETY: fcntl is async-signal-safe; this clears close-on-exec in the
+        // child only.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     // CREATE_NEW_PROCESS_GROUP: Ctrl-C is not delivered to it.
     #[cfg(windows)]
     cmd.creation_flags(0x0000_0200);

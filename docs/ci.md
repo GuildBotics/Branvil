@@ -316,9 +316,11 @@ Stopping the service:
   that talk to the upstream host are bounded by their own network time
   limits. Git runs in process groups of its own, so the terminal's Ctrl-C
   never reaches it. After 60 s the service stops its automatic runner and
-  exits without them: their Git still finishes, and what they had not written
-  yet is a crash at that point, which the next start recovers as such. The signals are taken over before startup runs any Git,
-  so a signal during startup stops the service once startup has finished.
+  exits without them: their Git still finishes, the next start waits for it
+  (as for Git left by a killed service), and what they had not written yet is
+  a crash at that point, which the next start recovers as such. The signals are taken over before startup runs any Git,
+  so a signal during startup stops the service once startup has finished; a
+  start still waiting for that Git stops at once.
 
 No runner, no executor:
 
