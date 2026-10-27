@@ -3,7 +3,7 @@
 //! Git ref updates and redb transactions are not one atomic operation, so:
 //!
 //! - Every ref change Branvil records or makes for a repository runs under that
-//!   repository's async mutex (`App::repo_lock`).
+//!   repository's async mutex, to its end (`App::locked`).
 //! - A ref change Branvil makes itself (a merge) writes a journal entry with
 //!   the expected old and new object before `git update-ref <ref> <new> <old>`
 //!   and removes it in the transaction that applies the change's effects.
@@ -44,9 +44,11 @@ fn snapshot_key(repo_id: &str, refname: &str) -> Vec<u8> {
 /// Compares the repository's refs with the recorded snapshot, records the
 /// difference, and applies its effects. Takes the repository lock.
 pub async fn record_refs(app: &App, repo: &Repo) -> AppResult<Vec<RefChange>> {
-    let lock = app.repo_lock(&repo.id);
-    let _guard = lock.lock().await;
-    record_refs_locked(app, repo).await
+    let r = repo.clone();
+    app.locked(&repo.id, move |app| async move {
+        record_refs_locked(&app, &r).await
+    })
+    .await
 }
 
 /// `record_refs` for a caller that already holds the repository lock.
@@ -187,11 +189,14 @@ pub async fn recover(app: &App) -> AppResult<RecoveryReport> {
     }
     let repos: Vec<Repo> = app.store.read(|r| r.prefix_all(store::REPOS, &[])).await?;
     for repo in repos {
-        let lock = app.repo_lock(&repo.id);
-        let _guard = lock.lock().await;
         // A gate's database record may precede its hidden ref after a crash.
         // Restore it before recording refs, so existing jobs are not cancelled.
-        let changes = crate::landing::repair_refs_locked(app, &repo).await?;
+        let r = repo.clone();
+        let changes = app
+            .locked(&repo.id, move |app| async move {
+                crate::landing::repair_refs_locked(&app, &r).await
+            })
+            .await?;
         if !changes.is_empty() {
             tracing::info!(
                 "recovery: recorded {} ref change(s) of {}",

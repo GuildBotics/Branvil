@@ -47,7 +47,7 @@ branvil-2026-10-14/          (0700)
 Git refs and redb are separate stores, and a backup must not catch one
 operation half in each. While the database is copied and the repositories are
 bundled, the service holds the lock that serializes repository creation and
-every repository's ref lock (`App::repo_lock`, taken in id order). Every ref
+every repository's ref lock (`App::quiesce`, taken in id order). Every ref
 change Branvil makes itself, and every recording of a push, runs under these
 locks, so during the backup:
 
@@ -278,9 +278,9 @@ the disk, and renamed. Write them by hand the same way, for instance
 | `builds/checks-seen` | Commit and first-observed Unix time, retained across updater and service restarts. |
 | `builds/told` | Commit/reason pairs already queued for a long-wait notice; successful waiting rounds do not clear it. |
 | `builds/*.notice` | Pending script webhook notices, including the installed build that can send each one (updated before its old build is retired); first sent at the next delivery round (normally within `--interval` seconds; slow deliveries or service transitions can delay it), removed after successful delivery, and retried each interval even while the service is stopped. |
-| `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line, and `branvil stopping: …` while a stop waits for its running CI jobs). |
+| `builds/serve.out` | The running serve's standard output (its `branvil listening on …` line, and `branvil stopping: …` while a stop waits for its running CI jobs or repository operations). |
 | `builds/rehearsal`, `builds/*.new`, `builds/*.tmp`, `<data>/branvil-schema-*.redb.partial` | Left only by something cut off; removed at the next start. |
-| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's required checks; the service handles their webhook notice), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. A stop that waited for running CI jobs logs "branvil serve of … stopped N seconds after TERM; it waited for its running CI jobs"; one that had to interrupt jobs logs and notifies "branvil serve of … stopped while CI jobs still ran". |
+| `~/Library/Logs/branvil.log` | Everything `scripts/serve.sh` and `scripts/update.sh` print, the output of what they run (builds, Git, `branvil` commands), and the service's log (`branvil serve`'s standard error; its standard output is `builds/serve.out`). Lines from `scripts/serve.sh` and the service's log lines carry times. A failure is a line containing "stopped while" ("The update to … stopped while …" or "<commit> stopped while …"), "did not all succeed; it is not installed" (the commit's required checks; the service handles their webhook notice), or, for the first install, "Could not install the checkout's HEAD". A "stopped while" line with "(exit status 143)" is not a failure: the agent was stopped or restarted, and the next round runs that update again. A stop that waited for running CI jobs or repository operations logs "branvil serve of … stopped N seconds after TERM; it waited for its running work"; one that had to interrupt jobs logs and notifies "branvil serve of … stopped while CI jobs still ran". |
 
 **The state.**
 

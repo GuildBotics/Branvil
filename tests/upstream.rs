@@ -861,6 +861,84 @@ async fn a_first_publish_replaces_only_what_branvil_pushed_and_survives_a_lost_a
     assert_eq!(gh.pull(opened[0].number).title, format!("PR {branch}"));
 }
 
+/// The client gives up on a publish while the host's answer to opening the
+/// pull request is late: the publish runs to its end and records the pull
+/// request the host opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publish_whose_client_gives_up_records_what_the_host_opened() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    w.push_change("feat", "f.txt", "one\n");
+    let n = w.open_pull("feat", json!([])).await["number"]
+        .as_u64()
+        .unwrap();
+    let pause = gh.pause_answer("POST", &format!("/repos/{GH}/pulls"));
+    tokio::select! {
+        _ = publish(&w, n) => panic!("the publish ended before the host answered"),
+        _ = pause.reached() => {}
+    }
+    drop(pause);
+    let opened = gh.pulls(GH);
+    assert_eq!(opened.len(), 1);
+    let pull = format!("{}/pulls/{n}", w.repo_path());
+    eventually("the publish to record the opened pull request", || async {
+        w.server.ok(&pull, &w.owner).await["upstream"]["number"] == opened[0].number
+    })
+    .await;
+}
+
+/// Ctrl-C while the host's answer to a poll's close of a published pull
+/// request is late: the stop waits for the poll, which records what it sent,
+/// so no later poll sends it again.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_c_during_a_poll_waits_for_it_to_record_what_it_sent() {
+    let (mut w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    w.push_change("feat", "f.txt", "one\n");
+    let n = w.open_pull("feat", json!([])).await["number"]
+        .as_u64()
+        .unwrap();
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let number = v["upstream"]["number"].as_u64().unwrap();
+    let host_pull = format!("/repos/{GH}/pulls/{number}");
+    let pause = gh.pause_answer("PATCH", &host_pull);
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/close", w.repo_path()),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), pause.reached())
+        .await
+        .expect("the poll sends the close");
+    w.server.interrupt_group();
+    let line = w
+        .server
+        .line_within(std::time::Duration::from_secs(10))
+        .expect("a stop that waits says so");
+    assert!(line.starts_with("branvil stopping: "), "{line}");
+    // Other operations end at once; the poll waits for the host's answer.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert!(w.server.running(), "the stop waits for the poll");
+    drop(pause);
+    let status = w.server.exit_within(std::time::Duration::from_secs(10));
+    assert!(status.is_some_and(|s| s.success()), "{status:?}");
+    assert!(!gh.pull(number).open);
+
+    w.restart(&[]);
+    refresh(&w).await;
+    assert_eq!(
+        gh.requests("PATCH", &host_pull).len(),
+        1,
+        "no later poll sends the close again"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pull_request_stays_with_the_repository_it_was_published_to() {
     let (w, gh) = followed().await;

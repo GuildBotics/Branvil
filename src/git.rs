@@ -1,6 +1,9 @@
 //! Git child processes. Every command is an argv array, runs with the
 //! service's `GIT_*` variables removed and with an empty global configuration,
-//! and is bounded in time, output, and concurrency.
+//! and is bounded in time, output, and concurrency. The service's run in their
+//! own process group: a terminal's Ctrl-C, or a supervisor that kills the
+//! service's group, never reaches Git in the middle of a ref update (killed
+//! there, it leaves lock files that refuse every later update of the ref).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -59,6 +62,11 @@ impl Output {
 pub fn base_command(global_config: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::from(base_command_sync(global_config));
     cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    // CREATE_NEW_PROCESS_GROUP: Ctrl-C is not delivered to it.
+    #[cfg(windows)]
+    cmd.creation_flags(0x0000_0200);
     cmd
 }
 
@@ -462,7 +470,9 @@ impl Git {
     }
 
     /// Conditional ref update: moves `refname` to `new` only if it is `old`.
-    /// Returns false when the ref was not at `old`.
+    /// Returns whether the ref is now at `new`. When Git fails, the ref tells
+    /// what happened: Git may have stopped after the update; a moved ref, a
+    /// stale lock file, or a lock a push holds all mean nothing was written.
     pub async fn update_ref(
         &self,
         dir: &Path,
@@ -471,10 +481,14 @@ impl Git {
         old: &str,
         reason: &str,
     ) -> AppResult<bool> {
-        let out = self
+        let ran = self
             .run(Some(dir), &["update-ref", "-m", reason, refname, new, old])
-            .await?;
-        Ok(out.ok())
+            .await;
+        if ran.is_ok_and(|out| out.ok()) {
+            return Ok(true);
+        }
+        let at = self.all_refs(dir).await?.remove(refname);
+        Ok(at.as_deref().unwrap_or(ZERO_SHA) == new)
     }
 
     /// Paths changed in `range` (`base...head` diffs from their merge base).
@@ -748,6 +762,60 @@ mod tests {
         git.run_ok(None, &["-C", dir.to_str().unwrap(), "rev-parse", "HEAD"])
             .await
             .unwrap()
+    }
+
+    /// `update_ref` goes by the ref, not by Git's exit status.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_ref_tells_what_happened_by_the_ref() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let layout = Layout::new(&temp.path().join("service"));
+        layout.create().unwrap();
+        let git = Git::new(layout.clone(), 2, Duration::from_secs(10));
+        let dir = temp.path().join("demo.git");
+        git.init_bare(&dir, "main").await.unwrap();
+        let mut blobs = Vec::new();
+        for content in ["a", "b"] {
+            let file = temp.path().join(content);
+            std::fs::write(&file, content).unwrap();
+            blobs.push(
+                git.run_ok(Some(&dir), &["hash-object", "-w", file.to_str().unwrap()])
+                    .await
+                    .unwrap(),
+            );
+        }
+        let (a, b, name) = (&blobs[0], &blobs[1], "refs/branvil/x");
+        git.run_ok(Some(&dir), &["update-ref", name, a])
+            .await
+            .unwrap();
+
+        // Git killed after it updated the ref: done.
+        let hook = layout.hooks().join("reference-transaction");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\ncat >/dev/null\n[ \"$1\" = committed ] && kill -9 $PPID\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(git.update_ref(&dir, name, b, a, "test").await.unwrap());
+        std::fs::remove_file(&hook).unwrap();
+
+        // A lock file (left by a killed Git, or held by a push): nothing
+        // written.
+        let lock = dir.join("refs/branvil/x.lock");
+        std::fs::write(&lock, "").unwrap();
+        assert!(!git.update_ref(&dir, name, a, b, "test").await.unwrap());
+        assert_eq!(git.all_refs(&dir).await.unwrap()[name], *b);
+        std::fs::remove_file(&lock).unwrap();
+
+        // The ref is elsewhere: nothing written.
+        assert!(
+            !git.update_ref(&dir, name, a, ZERO_SHA, "test")
+                .await
+                .unwrap()
+        );
+        assert_eq!(git.all_refs(&dir).await.unwrap()[name], *b);
     }
 
     #[tokio::test]

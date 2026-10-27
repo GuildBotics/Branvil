@@ -179,6 +179,7 @@ pub fn init(
 /// Runs the service until a signal stops it; the exit status is 3 when the
 /// stop interrupted running CI jobs (`Ci::stop`).
 pub async fn serve(config: Config) -> anyhow::Result<u8> {
+    let (interrupt, terminate) = stop_signals()?;
     let layout = config.layout();
     layout.create()?;
     let store = Store::open(
@@ -203,13 +204,13 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
         .base_url
         .clone()
         .unwrap_or_else(|| format!("http://{bound}"));
-    let app = std::sync::Arc::new(App::new(
+    let app = App::new(
         config,
         base_url.clone(),
         store,
         cursor_key,
         format!("http://{bound}"),
-    ));
+    );
     app.git
         .version()
         .await
@@ -233,7 +234,7 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
     );
 
     crate::ci::Ci::start(app.clone());
-    crate::ci::supervise::start(app.clone(), format!("http://{bound}"));
+    let runner = crate::ci::supervise::start(app.clone(), format!("http://{bound}"));
     crate::upstream::start(app.clone());
     crate::autoland::start(app.clone());
 
@@ -242,22 +243,23 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
     std::io::stdout().flush()?;
     // SIGTERM stops CI first (`Ci::stop`: no new jobs, the running ones
     // finish) while the server keeps serving the runners and everyone else;
-    // SIGINT (Ctrl-C), also during that wait, stops at once. Then the event
-    // streams end and the server stops accepting; requests in flight get
-    // `SHUTDOWN_GRACE` to finish, then the process exits anyway (redb commits
-    // are atomic, and the ref journal recovers an interrupted ref change at
-    // the next start). It exits with 3 when the stop interrupted jobs.
+    // SIGINT (Ctrl-C), also during that wait, skips it. Then the event streams
+    // end and the server stops accepting; requests in flight get
+    // `SHUTDOWN_GRACE` to finish, then they are dropped. The repository
+    // operations already started (`App::finish`), a dropped request's or a
+    // background task's included, and the Smart HTTP transfers end first, at
+    // most `STOP_WAIT`; none starts meanwhile. It exits with 3 when the stop
+    // interrupted jobs.
     let (stopping, mut stopped) = tokio::sync::watch::channel(None);
     let events = app.events.clone();
     let ci = app.ci.clone();
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-        let interrupt = tokio::signal::ctrl_c();
         tokio::pin!(interrupt);
         let mut cut = 0;
         tokio::select! {
             _ = &mut interrupt => {},
-            _ = terminate() => {
-                tracing::info!("stopping: no new CI jobs; waiting for the running ones (SIGINT stops at once)");
+            _ = terminate => {
+                tracing::info!("stopping: no new CI jobs; waiting for the running ones (SIGINT skips the wait)");
                 tokio::select! {
                     _ = &mut interrupt => {},
                     stopped = ci.stop() => match stopped {
@@ -271,36 +273,100 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
         events.close();
         stopping.send_replace(Some(cut));
     });
-    tokio::select! {
-        served = server => served?,
+    let served = tokio::select! {
+        served = server => served,
         _ = async {
             let _ = stopped.wait_for(Option::is_some).await;
             tokio::time::sleep(SHUTDOWN_GRACE).await;
-        } => tracing::warn!(
-            "requests still open {} s after the shutdown signal; exiting",
-            SHUTDOWN_GRACE.as_secs()
-        ),
-    }
+        } => {
+            tracing::warn!(
+                "requests still open {} s after the shutdown signal; exiting",
+                SHUTDOWN_GRACE.as_secs()
+            );
+            Ok(())
+        }
+    };
     let cut = stopped.borrow().unwrap_or(0);
+    let code = if cut > 0 { 3 } else { 0 };
     if cut > 0 {
         tracing::warn!(
             "stopped with {cut} CI job(s) still running after ci.stop_wait_secs: they were interrupted, and queued again in their place unless interrupted before"
         );
-        return Ok(3);
     }
-    Ok(0)
+    let close = app.close();
+    tokio::pin!(close);
+    if futures_util::poll!(close.as_mut()).is_pending() {
+        // scripts/serve.sh waits for a serve that says this (as for CI jobs).
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(
+            out,
+            "branvil stopping: waiting for the started repository operations and Git transfers to finish, at most {} s",
+            STOP_WAIT.as_secs()
+        )
+        .and_then(|_| out.flush());
+        drop(out);
+        tracing::info!("stopping: waiting for the started repository operations and Git transfers");
+        if tokio::time::timeout(STOP_WAIT, close).await.is_err() {
+            tracing::warn!(
+                "repository operations or Git transfers still running {} s after the server stopped; exiting without them (the next start completes or drops them)",
+                STOP_WAIT.as_secs()
+            );
+            // Not through the runtime's shutdown: dropping their tasks would
+            // kill their Git children, in their own process groups otherwise
+            // left to finish (Git killed in a ref update leaves lock files).
+            // What they had not written yet is a crash at this point: the
+            // next start recovers it (the ref journal, the rescan, the gate
+            // repair, and redb's repair of an unclean shutdown). The
+            // automatic runner is stopped as the runtime's shutdown would.
+            runner.abort();
+            let _ = runner.await;
+            std::process::exit(code.into());
+        }
+    }
+    served?;
+    Ok(code)
 }
 
 /// How long requests in flight may take after a shutdown signal.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-async fn terminate() {
+/// How long a stop waits for the repository operations and Git transfers
+/// still running after the server stopped. Operations usually take
+/// milliseconds, and those that talk to the upstream host are bounded by their
+/// own network time limits; past this, what is left is a crash at that point.
+/// With `SHUTDOWN_GRACE` it stays within the launchd agent's `ExitTimeOut`
+/// (`scripts/serve.sh --plist`).
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// SIGINT and SIGTERM, taken over before `serve` starts any repository work:
+/// their default action would end the process in the middle of it.
+fn stop_signals() -> std::io::Result<(impl Future<Output = ()>, impl Future<Output = ()>)> {
     #[cfg(unix)]
-    if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-        s.recv().await;
-        return;
-    }
-    std::future::pending::<()>().await
+    let signals = {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        (
+            async move {
+                interrupt.recv().await;
+            },
+            async move {
+                terminate.recv().await;
+            },
+        )
+    };
+    #[cfg(windows)]
+    let signals = {
+        // Registered now, unlike `tokio::signal::ctrl_c`.
+        let mut interrupt = tokio::signal::windows::ctrl_c()?;
+        (
+            async move {
+                interrupt.recv().await;
+            },
+            std::future::pending::<()>(),
+        )
+    };
+    Ok(signals)
 }
 
 pub async fn admin(

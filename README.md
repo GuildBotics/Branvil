@@ -53,9 +53,11 @@ web pages with a "GUI is not built" notice.
 # who uses Branvil. The owner's token goes to ./data/secrets/owner.token.
 branvil init --data-dir ./data --owner alice
 
-# Start the service. Ctrl-C stops it: open GUI event streams end at once, and
-# other requests get 5 seconds to finish. SIGTERM does the same once the
-# running CI jobs have finished (docs/ci.md, "Stopping the service").
+# Start the service. Ctrl-C stops it: open GUI event streams end at once,
+# other requests get 5 seconds to finish, and repository operations already
+# started (a merge, recording a push) finish, at most 60 s; Git never gets the
+# Ctrl-C. SIGTERM does the same once the running CI jobs have finished
+# (docs/ci.md, "Stopping the service").
 branvil serve --data-dir ./data
 
 # Open the GUI in the browser; there is no sign-in screen.

@@ -1,6 +1,10 @@
-//! A test service and its descendants share a private process group. Even
-//! before exec, a Git child can hold the service's database descriptor after
-//! the service dies. Every exit path drains the group before returning.
+//! A test service leads a session of its own: its descendants share its
+//! process group, except its Git children, each in a group of its own (so
+//! that a terminal's Ctrl-C never reaches them). Even before exec, a Git child
+//! can hold the service's database descriptor after the service dies. Every
+//! exit path drains the session before returning: the service's group is
+//! killed, and its Git children are left to finish, as under a supervisor
+//! that kills the service's group.
 
 use std::io;
 use std::process::{Child, ChildStdout, Command, ExitStatus};
@@ -16,7 +20,15 @@ impl ServiceProcess {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            command.process_group(0);
+            // SAFETY: setsid is async-signal-safe.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
         Ok(Self {
             child: command.spawn()?,
@@ -65,7 +77,7 @@ impl ServiceProcess {
     }
 
     #[cfg(unix)]
-    fn exited(&mut self) -> io::Result<bool> {
+    pub fn exited(&mut self) -> io::Result<bool> {
         // Keep the exited leader unreaped until its group is drained: reaping
         // first would allow its PID (and thus our group ID) to be reused.
         loop {
@@ -92,7 +104,7 @@ impl ServiceProcess {
     }
 
     #[cfg(not(unix))]
-    fn exited(&mut self) -> io::Result<bool> {
+    pub fn exited(&mut self) -> io::Result<bool> {
         self.child.try_wait().map(|status| status.is_some())
     }
 
@@ -100,8 +112,8 @@ impl ServiceProcess {
     fn drain_group(&self) -> io::Result<()> {
         let start = Instant::now();
         loop {
-            // SAFETY: spawn assigned this child a private group, and we have
-            // not reaped its leader, so this ID cannot name a different group.
+            // SAFETY: spawn made this child a session (and group) leader, and
+            // we have not reaped it, so this ID cannot name a different group.
             let signal_error =
                 if unsafe { libc::killpg(self.id() as libc::pid_t, libc::SIGKILL) } != 0 {
                     let error = io::Error::last_os_error();
@@ -109,46 +121,70 @@ impl ServiceProcess {
                 } else {
                     None
                 };
-            let mut ps = Command::new("ps");
-            // Linux can show a zombie leader while another thread still owns
-            // its descriptors. Include every thread, not just each leader.
-            #[cfg(target_os = "linux")]
-            ps.args(["-eLo", "pgid=,stat="]);
-            #[cfg(not(target_os = "linux"))]
-            ps.args(["-axo", "pgid=,stat="]);
-            let output = ps.output()?;
-            if !output.status.success() {
-                return Err(io::Error::other("cannot inspect service process group"));
-            }
-            let listing = String::from_utf8(output.stdout).map_err(io::Error::other)?;
-            let mut live = false;
-            for line in listing.lines() {
-                let mut fields = line.split_whitespace();
-                let group: u32 = fields
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| io::Error::other("invalid ps group"))?;
-                let state = fields
-                    .next()
-                    .ok_or_else(|| io::Error::other("missing ps state"))?;
-                // Orphan zombies may await the host's init; their descriptors
-                // are already closed. Waiting for killpg(0) would hang on them.
-                live |= group == self.id() && !state.starts_with('Z');
-            }
-            if !live {
+            let live = self.session()?;
+            if live.is_empty() {
                 // macOS may return EPERM for a group containing only zombies.
                 // Success means there are no live owners, not that a signal
                 // was delivered to an already-dead process.
                 return Ok(());
             }
-            if let Some(error) = signal_error {
+            if let Some(error) = signal_error
+                && live
+                    .iter()
+                    .any(|&(_, group)| group == self.id() as libc::pid_t)
+            {
                 return Err(error);
             }
             if start.elapsed() >= Duration::from_secs(10) {
-                return Err(io::Error::other("service process group did not exit"));
+                for &(pid, _) in &live {
+                    // SAFETY: a live member of our unreaped leader's session.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+                return Err(io::Error::other(format!(
+                    "service processes did not exit: {live:?}"
+                )));
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// The live processes of the service's session, with their groups.
+    #[cfg(unix)]
+    fn session(&self) -> io::Result<Vec<(libc::pid_t, libc::pid_t)>> {
+        let mut ps = Command::new("ps");
+        // Linux can show a zombie leader while another thread still owns
+        // its descriptors. Include every thread, not just each leader.
+        #[cfg(target_os = "linux")]
+        ps.args(["-eLo", "pid=,stat="]);
+        #[cfg(not(target_os = "linux"))]
+        ps.args(["-axo", "pid=,stat="]);
+        let output = ps.output()?;
+        if !output.status.success() {
+            return Err(io::Error::other("cannot inspect service processes"));
+        }
+        let listing = String::from_utf8(output.stdout).map_err(io::Error::other)?;
+        let mut live = Vec::new();
+        for line in listing.lines() {
+            let mut fields = line.split_whitespace();
+            let pid: libc::pid_t = fields
+                .next()
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| io::Error::other("invalid ps pid"))?;
+            let state = fields
+                .next()
+                .ok_or_else(|| io::Error::other("missing ps state"))?;
+            // Orphan zombies may await the host's init; their descriptors
+            // are already closed. Waiting for them would hang.
+            if state.starts_with('Z') {
+                continue;
+            }
+            // SAFETY: plain queries; -1 when the process is already gone.
+            let (session, group) = unsafe { (libc::getsid(pid), libc::getpgid(pid)) };
+            if session == self.id() as libc::pid_t && group != -1 && !live.contains(&(pid, group)) {
+                live.push((pid, group));
+            }
+        }
+        Ok(live)
     }
 }
 
@@ -200,9 +236,17 @@ mod tests {
             .parse()
             .unwrap();
         let _db = redb::Database::create(dir.join(format!("{depth}.redb"))).unwrap();
+        // The last generation in a group of its own, as a Git child is; it
+        // finishes once `release` exists.
+        let detached = std::env::var_os("BRANVIL_TEST_LOCK_DETACH").is_some();
         let _child = if depth < 2 {
             // Inherit the group: ServiceProcess::spawn is only for the root.
-            let mut child = command(dir, depth + 1).spawn().unwrap();
+            let mut command = command(dir, depth + 1);
+            if detached && depth == 1 {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            let mut child = command.spawn().unwrap();
             ready(child.stdout.take().unwrap());
             Some(child)
         } else {
@@ -214,6 +258,11 @@ mod tests {
             // fails. Exit then, rather than leaving mutation-test orphans.
             if !dir.exists() {
                 return;
+            }
+            // Without the test harness's report: its parent, which reads it,
+            // is gone.
+            if detached && depth == 2 && dir.join("release").exists() {
+                std::process::exit(0);
             }
             if depth == 0
                 && let Ok(code) = std::fs::read_to_string(dir.join("exit"))
@@ -296,5 +345,29 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{mode}, generation {depth}: {error}"));
             }
         }
+    }
+
+    #[test]
+    fn draining_waits_for_descendants_in_their_own_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut process =
+            ServiceProcess::spawn(command(dir.path(), 0).env("BRANVIL_TEST_LOCK_DETACH", "1"))
+                .unwrap();
+        ready(process.take_stdout());
+        let release = dir.path().join("release");
+        let later = release.clone();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::write(later, "").unwrap();
+        });
+        // A crash kills the service's group; the last generation finishes on
+        // its own, and the drain waits for it.
+        assert_eq!(process.stop().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(
+            release.exists(),
+            "the drain returned before the descendant in its own group finished"
+        );
+        releaser.join().unwrap();
+        redb::Database::open(dir.path().join("2.redb")).unwrap();
     }
 }

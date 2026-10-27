@@ -14,7 +14,9 @@ use crate::domain::pulls::{self, MergeInput, PullView, check_landable, load_pull
 use crate::domain::repos::{self, RepoView, repo_view};
 use crate::domain::{Page, PageReq, member_by_name, repo_by_id};
 use crate::error::{AppError, AppResult};
-use crate::model::{Account, Member, MemberKind, Published, Reader, Repo, Upstream as Setting};
+use crate::model::{
+    Account, Member, MemberKind, Published, Pull, Reader, Repo, Upstream as Setting,
+};
 use crate::store::{self, Rd};
 use crate::util;
 
@@ -101,42 +103,50 @@ pub async fn set(
     let token = token_of(app, &reader_member, host)
         .await
         .map_err(|why| AppError::conflict_code("no_account", why))?;
-    let reader = As {
-        member: &reader_member.name,
-        token: &token,
-    };
-    let at = Place {
-        app,
-        repo: &repo,
-        host,
-        setting: &setting,
-    };
-    match follow_once(at, reader).await {
-        Ok(_) => {}
-        Err(super::Stop::Failed(why)) => return Err(AppError::unavailable(why)),
-        Err(super::Stop::Stopped(_, why)) => return Err(AppError::conflict(why)),
-    }
-    let (id, s) = (repo.id.clone(), setting.clone());
+    // Following the host's branch, recording the setting, and following
+    // again are one write (`App::finish`).
     let updated = app
-        .store
-        .write(move |w| {
-            let mut r = repo_by_id(w, &id)?;
-            if r.upstream.as_ref() != Some(&s) {
-                r.upstream = Some(s);
-                r.revision += 1;
-                w.put(store::REPOS, &Repo::key(&r.id), &r)?;
+        .finish(move |app| async move {
+            let host = app.upstream.hosts.get(&setting.provider)?;
+            let reader = As {
+                member: &reader_member.name,
+                token: &token,
+            };
+            let at = Place {
+                app: &app,
+                repo: &repo,
+                host,
+                setting: &setting,
+            };
+            match follow_once(at, reader).await {
+                Ok(_) => {}
+                Err(super::Stop::Failed(why)) => return Err(AppError::unavailable(why)),
+                Err(super::Stop::Stopped(_, why)) => return Err(AppError::conflict(why)),
             }
-            Ok(r)
+            let (id, s) = (repo.id.clone(), setting.clone());
+            let updated = app
+                .store
+                .write(move |w| {
+                    let mut r = repo_by_id(w, &id)?;
+                    if r.upstream.as_ref() != Some(&s) {
+                        r.upstream = Some(s);
+                        r.revision += 1;
+                        w.put(store::REPOS, &Repo::key(&r.id), &r)?;
+                    }
+                    Ok(r)
+                })
+                .await?;
+            super::follow(
+                Place {
+                    repo: &updated,
+                    ..at
+                },
+                reader,
+            )
+            .await;
+            Ok(updated)
         })
         .await?;
-    super::follow(
-        Place {
-            repo: &updated,
-            ..at
-        },
-        reader,
-    )
-    .await;
     app.events.publish("repo", &updated.path, "");
     app.upstream.wake();
     Ok(repo_view(app, &updated))
@@ -377,7 +387,7 @@ pub async fn resume_landing(
 ) -> AppResult<PullView> {
     caller.require_owner()?;
     let repo = repos::visible(app, caller, path).await?;
-    crate::landing::resume_publish(app, &repo, number, &input).await?;
+    crate::landing::resume_publish(app, &repo, number, input).await?;
     let r2 = repo.clone();
     let p = app.store.read(move |r| load_pull(r, &r2, number)).await?;
     let tips = pulls::tips(app, &repo).await?;
@@ -393,11 +403,28 @@ pub async fn publish_pull(
     input: MergeInput,
     auto: bool,
 ) -> AppResult<PullView> {
-    let _guard = app.upstream.pull_lock(&repo.id, number).await;
+    let id = repo.id.clone();
+    let (repo, p) = app
+        .finish(move |app| async move { publish_op(&app, &id, number, input, auto).await })
+        .await?;
+    let tips = pulls::tips(app, &repo).await?;
+    pulls::pull_view(app, &repo, &p, &tips).await
+}
+
+/// `publish_pull` as one operation (`App::finish`): pushing the branch,
+/// opening the host's pull request, and recording what the host has are one
+/// write. Returns the repository and the pull request.
+async fn publish_op(
+    app: &App,
+    repo_id: &str,
+    number: u64,
+    input: MergeInput,
+    auto: bool,
+) -> AppResult<(Repo, Pull)> {
+    let _guard = app.upstream.pull_lock(repo_id, number).await;
     let (repo, setting, p, author, head) = {
-        let lock = app.repo_lock(&repo.id);
-        let _guard = lock.lock().await;
-        let id = repo.id.clone();
+        let _guard = app.lock_repo(repo_id).await;
+        let id = repo_id.to_string();
         let (repo, p, author) = app
             .store
             .read(move |r| {
@@ -444,8 +471,7 @@ pub async fn publish_pull(
     {
         // Already there; the poller carries every later change.
         app.upstream.wake();
-        let tips = pulls::tips(app, &repo).await?;
-        return pulls::pull_view(app, &repo, &p, &tips).await;
+        return Ok((repo, p));
     }
     let token = token_of(app, &author, host)
         .await
@@ -538,8 +564,7 @@ pub async fn publish_pull(
             host.display_name()
         )));
     }
-    let tips = pulls::tips(app, &repo).await?;
-    pulls::pull_view(app, &repo, &stored, &tips).await
+    Ok((repo, stored))
 }
 
 // ---------------------------------------------------------------- reads for clients

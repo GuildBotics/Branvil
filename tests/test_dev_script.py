@@ -1113,7 +1113,7 @@ class ServeScriptTests(ScriptTestCase):
         self.assert_runs("other")
         log = output.read_text(encoding="utf-8")
         self.assertIn(f"branvil serve of {self.base} stopped", log)
-        self.assertIn("it waited for its running CI jobs", log)
+        self.assertIn("it waited for its running work", log)
         self.assertNotIn("killing it", log)
         self.assertEqual(self.notifications(), [])
 

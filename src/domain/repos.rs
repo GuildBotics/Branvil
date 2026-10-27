@@ -91,19 +91,37 @@ pub struct NewRepo {
 
 pub async fn create(app: &App, caller: &Caller, input: NewRepo) -> AppResult<RepoView> {
     caller.require_owner()?;
-    util::validate_path(&input.path)?;
-    check_labels(&input.labels)?;
-    let default_branch = input.default_branch.unwrap_or_else(|| "main".to_string());
+    let NewRepo {
+        path,
+        default_branch,
+        labels,
+    } = input;
+    util::validate_path(&path)?;
+    check_labels(&labels)?;
+    let default_branch = default_branch.unwrap_or_else(|| "main".to_string());
     if !crate::git::valid_branch(&default_branch) {
         return Err(AppError::invalid(format!(
             "{default_branch} is not a valid branch name."
         )));
     }
     // Repository creation is serialized so the disk and the path index agree.
-    let lock = app.repo_lock("<create>");
-    let _guard = lock.lock().await;
-    let (ws, name) = input.path.split_once('/').unwrap_or_default();
-    let (ws, path) = (ws.to_string(), input.path.clone());
+    let repo = app
+        .locked("<create>", move |app| async move {
+            create_locked(&app, path, default_branch, labels).await
+        })
+        .await?;
+    app.events.publish("repo", &repo.path, "");
+    Ok(repo_view(app, &repo))
+}
+
+async fn create_locked(
+    app: &App,
+    requested: String,
+    default_branch: String,
+    labels: Vec<String>,
+) -> AppResult<Repo> {
+    let (ws, name) = requested.split_once('/').unwrap_or_default();
+    let (ws, path) = (ws.to_string(), requested.clone());
     let (workspace, taken) = app
         .store
         .read(move |r| {
@@ -115,8 +133,7 @@ pub async fn create(app: &App, caller: &Caller, input: NewRepo) -> AppResult<Rep
         .await?;
     if taken.is_some() {
         return Err(AppError::conflict(format!(
-            "Repository {} already exists.",
-            input.path
+            "Repository {requested} already exists."
         )));
     }
     // The path spells the workspace as the workspace does.
@@ -139,7 +156,7 @@ pub async fn create(app: &App, caller: &Caller, input: NewRepo) -> AppResult<Rep
         required_approvals: 1,
         auto_land: false,
         ci_network: false,
-        labels: input.labels,
+        labels,
         upstream: None,
         revision: 1,
         created_at: util::now(),
@@ -168,8 +185,7 @@ pub async fn create(app: &App, caller: &Caller, input: NewRepo) -> AppResult<Rep
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
     }
-    app.events.publish("repo", &repo.path, "");
-    Ok(repo_view(app, &repo))
+    Ok(repo)
 }
 
 #[derive(Deserialize, Debug)]
@@ -215,9 +231,24 @@ pub async fn update(
     if let Some(l) = &patch.labels {
         check_labels(l)?;
     }
-    let id = repo.id.clone();
+    // HEAD follows the default branch: under the lock, to its end.
+    let (id, old_branch) = (repo.id.clone(), repo.default_branch.clone());
     let updated = app
-        .store
+        .locked(&repo.id, move |app| async move {
+            let updated = update_record(&app, id, patch).await?;
+            if updated.default_branch != old_branch {
+                let dir = app.git.repo_dir(&updated.path);
+                app.git.set_head(&dir, &updated.default_branch).await?;
+            }
+            AppResult::Ok(updated)
+        })
+        .await?;
+    app.events.publish("repo", &updated.path, "");
+    Ok(repo_view(app, &updated))
+}
+
+async fn update_record(app: &App, id: String, patch: RepoPatch) -> AppResult<Repo> {
+    app.store
         .write(move |w| {
             let mut r: Repo = super::repo_by_id(w, &id)?;
             if r.revision != patch.revision {
@@ -259,13 +290,7 @@ pub async fn update(
             w.put(store::REPOS, &Repo::key(&r.id), &r)?;
             Ok(r)
         })
-        .await?;
-    if updated.default_branch != repo.default_branch {
-        let dir = app.git.repo_dir(&updated.path);
-        app.git.set_head(&dir, &updated.default_branch).await?;
-    }
-    app.events.publish("repo", &updated.path, "");
-    Ok(repo_view(app, &updated))
+        .await
 }
 
 #[derive(Serialize, Debug)]

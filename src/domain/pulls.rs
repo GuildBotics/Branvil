@@ -946,14 +946,14 @@ pub async fn set_open(
     open: bool,
 ) -> AppResult<PullView> {
     let (repo, _) = visible(app, caller, repo_path, number).await?;
-    let p = {
-        let lock = app.repo_lock(&repo.id);
-        let _guard = lock.lock().await;
-        let r2 = repo.clone();
-        app.store
-            .write(move |w| set_open_in(w, &r2, number, open))
-            .await?
-    };
+    let r2 = repo.clone();
+    let p = app
+        .locked(&repo.id, move |app| async move {
+            app.store
+                .write(move |w| set_open_in(w, &r2, number, open))
+                .await
+        })
+        .await?;
     app.events.publish("pull", &repo.path, number.to_string());
     if open && p.state == "open" {
         app.ci.on_pull_opened(app, &repo, &p.head).await;
@@ -1857,11 +1857,28 @@ pub async fn merge_pull(
     input: MergeInput,
     auto: bool,
 ) -> AppResult<PullView> {
-    let lock = app.repo_lock(&repo.id);
-    let _guard = lock.lock().await;
+    let id = repo.id.clone();
+    let (repo, merged) = app
+        .locked(&repo.id, move |app| async move {
+            merge_locked(&app, &id, number, input, auto).await
+        })
+        .await?;
+    let tips = self::tips(app, &repo).await?;
+    pull_view(app, &repo, &merged, &tips).await
+}
+
+/// `merge_pull` under the repository lock: returns the repository and the
+/// merged pull request.
+async fn merge_locked(
+    app: &App,
+    repo_id: &str,
+    number: u64,
+    input: MergeInput,
+    auto: bool,
+) -> AppResult<(Repo, Pull)> {
     // Everything below is re-read under the repository lock.
     let repo = {
-        let id = repo.id.clone();
+        let id = repo_id.to_string();
         app.store.read(move |r| repo_by_id(r, &id)).await?
     };
     if let Some(up) = &repo.upstream {
@@ -1889,7 +1906,9 @@ pub async fn merge_pull(
     let e = entry.clone();
     app.store.write(move |w| refs::journal_begin(w, &e)).await?;
     app.failpoint("merge_before_update_ref");
-    let moved = app
+    // When the ref cannot even be read, the entry stays: the next start
+    // settles it from the ref.
+    if !app
         .git
         .update_ref(
             &dir,
@@ -1898,11 +1917,10 @@ pub async fn merge_pull(
             &base,
             &format!("branvil: merge !{number}"),
         )
-        .await;
-    if !matches!(moved, Ok(true)) {
+        .await?
+    {
         let id = entry.id.clone();
         app.store.write(move |w| refs::journal_end(w, &id)).await?;
-        moved?;
         return Err(AppError::conflict_code(
             "base_moved",
             format!("The base of !{number} moved during the merge. Nothing was written."),
@@ -1923,8 +1941,7 @@ pub async fn merge_pull(
     refs::record_refs_locked(app, &repo).await?;
     app.events.publish("pull", &repo.path, number.to_string());
     tickets::publish_closed_by(app, &merged).await;
-    let tips = self::tips(app, &repo).await?;
-    pull_view(app, &repo, &merged, &tips).await
+    Ok((repo, merged))
 }
 
 /// Points the hidden ref `refs/branvil/merged/<number>` at the head a pull
@@ -2068,7 +2085,7 @@ mod tests {
     use crate::model::MemberKind;
     use std::time::Duration;
 
-    async fn fixture() -> (tempfile::TempDir, App, Caller, Repo, Pull) {
+    async fn fixture() -> (tempfile::TempDir, crate::app::Shared, Caller, Repo, Pull) {
         let temp = tempfile::tempdir().unwrap();
         let config = Config::load(None, Some(temp.path()), None, None).unwrap();
         let layout = config.layout();
@@ -2187,8 +2204,7 @@ mod tests {
             .write(move |w| write_pull(w, None, &p))
             .await
             .unwrap();
-        let lock = app.repo_lock(&repo.id);
-        let held = lock.lock().await;
+        let held = app.hold_lock(&repo.id).await;
         let mut closing = Box::pin(set_open(&app, &caller, &repo.path, 1, false));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), closing.as_mut())

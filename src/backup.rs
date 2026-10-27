@@ -159,17 +159,8 @@ pub async fn create(app: &App, to: &Path) -> AppResult<Manifest> {
     std::fs::create_dir_all(target.join("repos")).map_err(AppError::internal)?;
     restrict(&target, true).map_err(AppError::internal)?;
 
-    // Quiesce ref changes: repository creation first, then every
-    // repository in id order (every other holder takes one lock at a time).
-    let create_lock = app.repo_lock("<create>");
-    let _create_guard = create_lock.lock_owned().await;
-    let repos: Vec<Repo> = app.store.read(|r| r.prefix_all(store::REPOS, &[])).await?;
-    let mut ids: Vec<&Repo> = repos.iter().collect();
-    ids.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut guards = Vec::new();
-    for repo in &ids {
-        guards.push(app.repo_lock(&repo.id).lock_owned().await);
-    }
+    // Quiesce ref changes.
+    let (repos, guards) = app.quiesce().await?;
     let tables = app.store.export_to(&target.join(DB_FILE)).await?;
     // Its own Git runner: Smart HTTP children hold the shared permits while
     // their post-receive waits for the locks held here.
@@ -179,11 +170,10 @@ pub async fn create(app: &App, to: &Path) -> AppResult<Manifest> {
         std::time::Duration::from_secs(BUNDLE_TIMEOUT_SECS),
     );
     let mut entries = Vec::new();
-    for repo in &ids {
+    for repo in &repos {
         entries.push(bundle(&git, repo, &target).await?);
     }
     drop(guards);
-    drop(_create_guard);
 
     // CI logs and artifacts are written once and only referenced by the
     // database, so copying them after the snapshot keeps every reference.

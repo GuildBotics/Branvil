@@ -575,20 +575,19 @@ impl Ci {
 
     /// A pull request was opened or reopened: its head gets a run.
     pub async fn on_pull_opened(&self, app: &App, repo: &Repo, head: &str) {
-        let lock = app.repo_lock(&repo.id);
-        let _guard = lock.lock().await;
-        let dir = self.inner.git.repo_dir(&repo.path);
-        let result = async {
-            if let Some(sha) = self.inner.git.branch_tips(&dir).await?.get(head)
-                && self
-                    .consider(repo, &format!("refs/heads/{head}"), sha)
-                    .await?
-            {
-                self.publish(&[(repo.path.clone(), sha.clone())]);
-            }
-            AppResult::Ok(())
-        }
-        .await;
+        let (r, h) = (repo.clone(), head.to_string());
+        let result = app
+            .locked(&repo.id, move |app| async move {
+                let ci = &app.ci;
+                let dir = ci.inner.git.repo_dir(&r.path);
+                if let Some(sha) = ci.inner.git.branch_tips(&dir).await?.get(&h)
+                    && ci.consider(&r, &format!("refs/heads/{h}"), sha).await?
+                {
+                    ci.publish(&[(r.path.clone(), sha.clone())]);
+                }
+                AppResult::Ok(())
+            })
+            .await;
         if let Err(e) = result {
             tracing::error!("CI registration for {} {head} failed: {e}", repo.path);
         }
@@ -607,50 +606,60 @@ impl Ci {
             .await?;
         let mut registered = 0;
         for repo in repos {
-            let lock = app.repo_lock(&repo.id);
-            let _guard = lock.lock().await;
-            let dir = self.inner.git.repo_dir(&repo.path);
-            let tips = self.inner.git.all_refs(&dir).await?;
             let id = repo.id.clone();
-            let mut wanted: Vec<String> = self
-                .inner
-                .store
-                .read(move |r| {
-                    let mut wanted: Vec<String> = open_pull_heads(r, &id)?
-                        .into_iter()
-                        .map(|head| format!("refs/heads/{head}"))
-                        .collect();
-                    for entry in crate::landing::active(r, &id)? {
-                        if entry
-                            .gate
-                            .as_ref()
-                            .is_some_and(|sha| sha != &entry.head_sha)
-                        {
-                            wanted.push(format!("refs/branvil/gate/{}", entry.number));
-                        }
-                    }
-                    Ok(wanted)
+            registered += app
+                .locked(&id, move |app| async move {
+                    app.ci.reconcile_locked(&repo).await
                 })
                 .await?;
-            wanted.push(format!("refs/heads/{}", repo.default_branch));
-            wanted.sort();
-            wanted.dedup();
-            for branch in wanted {
-                let Some(sha) = tips.get(&branch) else {
-                    continue;
-                };
-                match self.consider(&repo, &branch, sha).await {
-                    Ok(true) => {
-                        tracing::warn!("CI: reconciled the run of {} {branch} {sha}", repo.path);
-                        registered += 1;
-                        self.publish(&[(repo.path.clone(), sha.clone())]);
+        }
+        Ok(registered)
+    }
+
+    /// `reconcile` of one repository, under its lock.
+    async fn reconcile_locked(&self, repo: &Repo) -> AppResult<usize> {
+        let mut registered = 0;
+        let dir = self.inner.git.repo_dir(&repo.path);
+        let tips = self.inner.git.all_refs(&dir).await?;
+        let id = repo.id.clone();
+        let mut wanted: Vec<String> = self
+            .inner
+            .store
+            .read(move |r| {
+                let mut wanted: Vec<String> = open_pull_heads(r, &id)?
+                    .into_iter()
+                    .map(|head| format!("refs/heads/{head}"))
+                    .collect();
+                for entry in crate::landing::active(r, &id)? {
+                    if entry
+                        .gate
+                        .as_ref()
+                        .is_some_and(|sha| sha != &entry.head_sha)
+                    {
+                        wanted.push(format!("refs/branvil/gate/{}", entry.number));
                     }
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!(
-                        "CI: registering {} {branch} {sha} failed (retried in a minute): {e}",
-                        repo.path
-                    ),
                 }
+                Ok(wanted)
+            })
+            .await?;
+        wanted.push(format!("refs/heads/{}", repo.default_branch));
+        wanted.sort();
+        wanted.dedup();
+        for branch in wanted {
+            let Some(sha) = tips.get(&branch) else {
+                continue;
+            };
+            match self.consider(repo, &branch, sha).await {
+                Ok(true) => {
+                    tracing::warn!("CI: reconciled the run of {} {branch} {sha}", repo.path);
+                    registered += 1;
+                    self.publish(&[(repo.path.clone(), sha.clone())]);
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    "CI: registering {} {branch} {sha} failed (retried in a minute): {e}",
+                    repo.path
+                ),
             }
         }
         Ok(registered)

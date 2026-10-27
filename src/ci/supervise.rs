@@ -68,8 +68,9 @@ async fn mint_token(app: &Shared) -> AppResult<String> {
 
 /// Supervises the runner child for the lifetime of the service: runs one
 /// while the mode is `auto`, and stops it when the owner switches the mode
-/// off.
-pub fn start(app: Shared, url: String) {
+/// off. Dropping the task (the service's runtime ends, or the task is
+/// aborted) kills the child.
+pub fn start(app: Shared, url: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut desired = app.ci.settings().subscribe();
         let mut backoff = 2;
@@ -140,7 +141,7 @@ pub fn start(app: Shared, url: String) {
             }
             backoff = (backoff * 2).min(120);
         }
-    });
+    })
 }
 
 /// Waits `secs`, or less when the mode changes; false when it never can

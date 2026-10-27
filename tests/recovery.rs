@@ -2,7 +2,8 @@
 //! interrupted between Git and the database, and pushes whose post-receive
 //! never reached the database. Crashes are simulated with
 //! `BRANVIL_FAILPOINT`, which aborts the process at a named point. This is
-//! process-kill testing, not power-loss testing.
+//! process-kill testing, not power-loss testing. Every other stop is a normal
+//! one (SIGINT), which waits for the repository operations already started.
 
 use crate::common;
 
@@ -143,6 +144,82 @@ async fn a_merge_interrupted_before_the_ref_update_is_dropped_at_startup() {
         )
         .await;
     assert_eq!(st, 200, "{v}");
+}
+
+/// Waits until pull request `base` is merged, at most 15 s.
+async fn merged(w: &World, base: &str) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let pull = w.server.ok(base, &w.aiko).await;
+        if pull["merged"] == true {
+            return pull;
+        }
+        assert!(std::time::Instant::now() < deadline, "never merged: {pull}");
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+}
+
+fn merge_request(w: &World, base: &str, head: &str, main: &str) -> impl std::future::Future {
+    w.server
+        .http
+        .post(format!("{}/api/v1{base}/merge", w.server.url))
+        .bearer_auth(&w.owner)
+        .json(&json!({"expected_head": head, "expected_base": main}))
+        .send()
+}
+
+/// The client gives up on a merge while Git holds the base's lock: the merge
+/// still runs to its end, and Git and the database agree without a restart.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_merge_whose_client_gives_up_runs_to_its_end() {
+    let w = World::new().await;
+    let (base, head, main) = ready_pull(&w).await;
+    let hold = RefHold::new(&w, "refs/heads/main");
+    abandon_at(&hold, merge_request(&w, &base, &head, &main)).await;
+    hold.release();
+    let pull = merged(&w, &base).await;
+    assert_eq!(pull["merge_sha"], head.as_str());
+    assert_eq!(bare_main(&w), head);
+    let bare = w.server.data.join("repos/acme/demo.git");
+    assert!(!bare.join("refs/heads/main.lock").exists());
+    assert_eq!(pending_ops(&w).await, 0);
+}
+
+/// Ctrl-C in the terminal (SIGINT to the service's process group) while Git
+/// holds the base's lock in a merge: Git, in a group of its own, is not
+/// interrupted, and the service says it waits for the merge, waits, and
+/// stops cleanly; the base moved and no lock is left.
+#[cfg(unix)]
+#[tokio::test]
+async fn ctrl_c_during_a_merge_waits_for_it() {
+    let mut w = World::new().await;
+    let (base, head, main) = ready_pull(&w).await;
+    let hold = RefHold::new(&w, "refs/heads/main");
+    abandon_at(&hold, merge_request(&w, &base, &head, &main)).await;
+    w.server.interrupt_group();
+    let line = w
+        .server
+        .line_within(std::time::Duration::from_secs(10))
+        .expect("a stop that waits says so");
+    assert!(
+        line.starts_with(
+            "branvil stopping: waiting for the started repository operations and Git transfers"
+        ),
+        "{line}"
+    );
+    assert!(w.server.running(), "the stop waits for the merge");
+    hold.release();
+    let status = w.server.exit_within(std::time::Duration::from_secs(10));
+    assert!(status.is_some_and(|s| s.success()), "{status:?}");
+    let bare = w.server.data.join("repos/acme/demo.git");
+    assert!(!bare.join("refs/heads/main.lock").exists());
+    assert_eq!(bare_main(&w), head);
+
+    w.restart(&[]);
+    let pull = w.server.ok(&base, &w.aiko).await;
+    assert_eq!(pull["merged"], true, "{pull}");
+    assert_eq!(pending_ops(&w).await, 0);
 }
 
 #[tokio::test]

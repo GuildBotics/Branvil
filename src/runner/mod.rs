@@ -1365,13 +1365,7 @@ mod tests {
             })
             .unwrap();
         let key = layout.load_cursor_key().unwrap();
-        let app = Arc::new(crate::app::App::new(
-            config,
-            url.clone(),
-            store,
-            key,
-            url.clone(),
-        ));
+        let app = crate::app::App::new(config, url.clone(), store, key, url.clone());
         let mut router = crate::http::router(app.clone());
         if let Some(gate) = gate {
             router = router.layer(axum::middleware::from_fn(

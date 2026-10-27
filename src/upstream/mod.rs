@@ -444,7 +444,8 @@ async fn poll_all(app: &App) -> bool {
 }
 
 /// One poll of one repository: its default branch, then its live published
-/// pull requests.
+/// pull requests, each an operation of its own (`App::finish`): what it sends
+/// to the host and what it records of it are one write.
 pub async fn poll_repo(app: &App, repo: &Repo) -> bool {
     let Some(setting) = repo.upstream.clone() else {
         return false;
@@ -491,24 +492,59 @@ pub async fn poll_repo(app: &App, repo: &Repo) -> bool {
             return !live.is_empty();
         }
     };
-    let reader = As {
-        member: &reader_member.name,
-        token: &token,
+    let polling = Polling {
+        repo: repo.clone(),
+        setting,
+        reader: reader_member,
+        token,
     };
-    let at = Place {
-        app,
-        repo,
-        host,
-        setting: &setting,
-    };
-    follow(at, reader).await;
-    for p in &live {
-        let _guard = app.upstream.pull_lock(&repo.id, p.number).await;
-        if let Err(e) = sync_pull(at, reader, &reader_member, p.number).await {
-            tracing::warn!("upstream: {} !{}: {e}", repo.path, p.number);
+    let p = polling.clone();
+    app.finish(move |app| async move {
+        if let Ok(at) = p.place(&app) {
+            follow(at, p.as_reader()).await;
+        }
+    })
+    .await;
+    for number in live.iter().map(|p| p.number) {
+        let p = polling.clone();
+        let synced = app
+            .finish(move |app| async move {
+                let _guard = app.upstream.pull_lock(&p.repo.id, number).await;
+                sync_pull(p.place(&app)?, p.as_reader(), &p.reader, number).await
+            })
+            .await;
+        if let Err(e) = synced {
+            tracing::warn!("upstream: {} !{number}: {e}", repo.path);
         }
     }
     !live.is_empty()
+}
+
+/// What a poll's operations need, owned for their tasks.
+#[derive(Clone)]
+struct Polling {
+    repo: Repo,
+    setting: Setting,
+    reader: Member,
+    token: String,
+}
+
+impl Polling {
+    fn place<'a>(&'a self, app: &'a App) -> AppResult<Place<'a>> {
+        Ok(Place {
+            app,
+            repo: &self.repo,
+            host: app.upstream.hosts.get(&self.setting.provider)?,
+            setting: &self.setting,
+        })
+    }
+
+    fn as_reader(&self) -> As<'_> {
+        As {
+            member: &self.reader.name,
+            token: &self.token,
+        }
+    }
 }
 
 fn note(app: &App, repo: &Repo, change: impl FnOnce(&mut Following)) {
@@ -601,8 +637,7 @@ async fn follow_once(at: Place<'_>, reader: As<'_>) -> Result<(String, bool), St
     )
     .await
     .map_err(Stop::Failed)?;
-    let lock = app.repo_lock(&repo.id);
-    let _guard = lock.lock().await;
+    let _guard = app.lock_repo(&repo.id).await;
     let refs = app.git.all_refs(&dir).await?;
     let theirs = refs
         .get(&hidden_ref(branch))
@@ -796,8 +831,7 @@ async fn sync_pull(
                     if landed {
                         // Under the lock, so a backup has the merge together
                         // with the ref that keeps its head.
-                        let lock = app.repo_lock(&repo.id);
-                        let _guard = lock.lock().await;
+                        let _guard = app.lock_repo(&repo.id).await;
                         let merge_sha = hp.merge_sha.clone().unwrap_or_default();
                         let dir = app.git.repo_dir(&repo.path);
                         // What the pull request brought: from where its pushed
@@ -869,8 +903,7 @@ async fn sync_pull(
         }
     }
     let changed = {
-        let lock = app.repo_lock(&repo.id);
-        let _guard = lock.lock().await;
+        let _guard = app.lock_repo(&repo.id).await;
         let r2 = repo.clone();
         app.store
             .write(move |w| pulls::store_published(w, &r2, number, x, open))

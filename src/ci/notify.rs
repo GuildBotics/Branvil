@@ -191,7 +191,7 @@ mod tests {
     use crate::model::Repo;
     use std::sync::{Arc, Mutex};
 
-    fn app(path: &std::path::Path) -> App {
+    fn app(path: &std::path::Path) -> crate::app::Shared {
         let config = Config::load(None, Some(path), None, None).unwrap();
         config.layout().create().unwrap();
         let store = store::Store::open(&config.layout().db(), 1 << 20, 1).unwrap();
