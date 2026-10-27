@@ -34,11 +34,11 @@ export const RelationCard = memo(function RelationCard({
   loadChecks: Set<string>;
   /** Whether its children are shown; undefined for a card without children in the figure. */
   open: boolean | undefined;
-  /** Not matching the filters: shown faintly, so the lines can still be followed. */
+  /** A nonmatching ancestor kept as context for a matching descendant. */
   dim: boolean;
   /** Its lane is being changed. */
   busy: boolean;
-  onToggle: (ref: string) => void;
+  onToggle: (ref: string, open: boolean) => void;
   onLane: (card: Card, lane: Lane) => void;
   onLinkStart: (card: Card, e: PointerEvent<HTMLElement>) => void;
   onAdd: (card: Card, addition: Addition) => void;
@@ -53,7 +53,7 @@ export const RelationCard = memo(function RelationCard({
       // A parent has the colour of the header it becomes once opened.
       className={[open !== undefined && "parent", dim && "dim"].filter(Boolean).join(" ")}
       lane={<LaneButton card={card} lanes={lanes} onLane={onLane} disabled={busy} />}
-      lead={open === undefined ? undefined : <ChildrenToggle open={open} onToggle={() => onToggle(ticketRef(card))} />}
+      lead={open === undefined ? undefined : <ChildrenToggle open={open} onToggle={() => onToggle(ticketRef(card), !open)} />}
     >
       <span
         className="rel-handle"

@@ -67,6 +67,8 @@ export interface CardFilter {
   text: string;
 }
 
+export const hasFilter = (f: CardFilter): boolean => !!(f.assignee || f.label || f.text.trim());
+
 export function matchesFilter(card: Card, f: CardFilter): boolean {
   if (f.assignee && (card.assignee?.name ?? "-") !== f.assignee) return false;
   if (f.label && !card.labels.includes(f.label)) return false;

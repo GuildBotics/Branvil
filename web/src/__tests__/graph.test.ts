@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Card, TicketRef } from "../api/types";
 import { buildGraph, type Graph, type GraphNode, type Level } from "../views/relations/graph";
+import type { CardFilter } from "../views/board/ordering";
 import { card } from "./fixtures";
 
 interface Spec {
@@ -45,6 +46,61 @@ const at = (level: Level, column: number, row: number) => level[column]![row] as
 const lines = (g: Graph) => g.edges.map((e) => `${short(e.from)}${e.dashed ? "..>" : ">"}${short(e.to)}`);
 
 describe("relations graph", () => {
+  const textFilter = (text: string): CardFilter => ({ text, assignee: "", label: "" });
+
+  it("filters before layout, opens all ancestors of matches, and removes unrelated branches and dependencies", () => {
+    const cards = board({ P: {}, Q: { parent: "P" }, R: { parent: "Q", blockedBy: ["B"] }, S: { parent: "P" }, B: {}, X: { blockedBy: ["R"] } });
+    const g = buildGraph(cards, { includeClosed: false, open: new Set(), filter: textFilter("Title of R") });
+    expect(layout(g.level)).toBe("P[Q[R]]");
+    expect(g.edges).toEqual([]);
+    expect(at(at(at(g.level, 0, 0).inner!, 0, 0).inner!, 0, 0)).toMatchObject({ hasChildren: false });
+  });
+
+  it("does not retain nonmatching children of a matching parent, or unrelated new tickets", () => {
+    const g = buildGraph(board({ P: {}, Q: { parent: "P" }, A: {} }), { includeClosed: false, open: new Set(["acme/demo#P"]), filter: textFilter("Title of P") });
+    expect(layout(g.level)).toBe("P");
+    expect(at(g.level, 0, 0)).toMatchObject({ hasChildren: false, inner: null });
+  });
+
+  it.each([
+    { assignee: "agent-one", label: "", text: "" },
+    { assignee: "", label: "bug", text: "" },
+    { assignee: "", label: "", text: "  NEEDLE  " },
+    { assignee: "", label: "", text: "acme/demo#R" },
+    { assignee: "agent-one", label: "bug", text: "needle" },
+  ])("uses the board's filter semantics to find descendants: %j", (filter) => {
+    const cards = board({ P: {}, Q: { parent: "P" }, R: { parent: "Q" }, S: { parent: "P" } });
+    Object.assign(cards.find((c) => c.key === "R")!, { assignee: { name: "agent-one", assigned_at: "2026-10-14T10:00:00Z" }, labels: ["bug"], body: "Needle in the body" } satisfies Partial<Card>);
+    const g = buildGraph(cards, { includeClosed: false, open: new Set(), filter });
+    expect(layout(g.level)).toBe("P[Q[R]]");
+    expect(buildGraph(cards, { includeClosed: false, open: new Set(), filter: { ...filter, label: "absent" } }).level).toEqual([]);
+  });
+
+  it("applies filters within the closed-ticket scope, including closed ancestors but not hidden closed matches", () => {
+    const cards = board({ P: { closed: true }, R: { parent: "P" }, X: { parent: "P", closed: true } });
+    expect(layout(buildGraph(cards, { includeClosed: false, open: new Set(), filter: textFilter("Title of R") }).level)).toBe("P[R]");
+    expect(buildGraph(cards, { includeClosed: false, open: new Set(), filter: textFilter("Title of X") }).level).toEqual([]);
+    expect(layout(buildGraph(cards, { includeClosed: true, open: new Set(), filter: textFilter("Title of X") }).level)).toBe("P[X]");
+  });
+
+  it("keeps direct lines between visible matches and gathers them when an automatically opened parent is manually folded", () => {
+    const cards = board({ P: {}, R: { parent: "P" }, X: { blockedBy: ["R"] } });
+    for (const c of cards.filter((c) => c.key !== "P")) c.labels = ["bug"];
+    const options = { includeClosed: false, open: new Set<string>(), filter: { ...textFilter(""), label: "bug" } };
+    const expanded = buildGraph(cards, options);
+    expect(layout(expanded.level)).toBe("P[R] | X");
+    expect(lines(expanded)).toEqual(["R>X"]);
+    const folded = buildGraph(cards, { ...options, openOverrides: new Map([["acme/demo#P", false]]) });
+    expect(layout(folded.level)).toBe("P | X");
+    expect(lines(folded)).toEqual(["P..>X"]);
+  });
+
+  it("leaves expansion unchanged for empty or whitespace-only filters, ignoring filter-time overrides", () => {
+    const cards = board({ P: {}, R: { parent: "P" }, X: {} });
+    const options = { includeClosed: false, open: new Set<string>() };
+    expect(buildGraph(cards, { ...options, filter: textFilter("  "), openOverrides: new Map([["acme/demo#P", true]]) })).toEqual(buildGraph(cards, options));
+  });
+
   it("puts a ticket in the column of its longest chain of blockers, in board order within a column", () => {
     const g = graph({
       C: { blockedBy: ["A", "B", "D"] },
