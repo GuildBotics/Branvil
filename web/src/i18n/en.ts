@@ -56,6 +56,7 @@ export const en = {
   "board.moveConflict": "{key} was changed by someone else meanwhile; the board was reloaded.",
   "board.blocked": "Blocked",
   "board.interactive": "Interactive",
+  "board.interactiveInherited": "Interactive via {ticket}",
   "board.moveUp": "Move {key} up",
   "board.moveDown": "Move {key} down",
   "board.up": "Up",

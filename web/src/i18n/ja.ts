@@ -58,6 +58,7 @@ export const ja: Record<MessageKey, string> = {
   "board.moveConflict": "{key} はその間に他の人が変更したため、ボードを再読み込みしました。",
   "board.blocked": "依存先が未完了",
   "board.interactive": "対話",
+  "board.interactiveInherited": "{ticket} で対話",
   "board.moveUp": "{key} を上へ",
   "board.moveDown": "{key} を下へ",
   "board.up": "上へ",
