@@ -116,7 +116,7 @@ What a job's commands find, as on common CI services:
 
 ## Trust: where the pipeline comes from
 
-Every commit runs its own pipeline: a tip of a protected branch and the head
+Every commit runs its own pipeline: a tip of the default branch and the head
 of an open pull request alike read `.branvil/ci.toml` from that commit. A pull
 request that changes the pipeline runs the changed pipeline as its checks, so
 a mistake in it shows before the merge. The first pull request in each
@@ -128,8 +128,9 @@ The run saves each PR's base name, tip and merge-base and its skipped job
 names. Re-registration updates this snapshot when PRs or base tips change;
 unchanged inputs do not create new attempts. Queue admission after waiting
 uses the saved selection and counts only jobs that actually run. Protected
-branches and gates always run every job; a protected registration of a SHA
-that had path skips queues those jobs too.
+branches and gates always run every job when registered by the triggers below;
+protection alone does not register a non-default branch. A protected
+registration of a SHA that had path skips queues those jobs too.
 
 Service path skips are completed `skipped` attempts with `path_skip`
 metadata and a `[branvil] skipped: no file matching paths changed since …`

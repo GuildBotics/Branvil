@@ -509,7 +509,7 @@ impl Ci {
             {
                 return Ok(false);
             }
-        } else if !repo.is_protected(branch) {
+        } else if branch != repo.default_branch {
             let (id, b) = (repo.id.clone(), branch.to_string());
             if !self
                 .inner
@@ -675,7 +675,7 @@ impl Ci {
                     Ok(wanted)
                 })
                 .await?;
-            wanted.extend(repo.protected().iter().map(|b| format!("refs/heads/{b}")));
+            wanted.push(format!("refs/heads/{}", repo.default_branch));
             wanted.sort();
             wanted.dedup();
             for branch in wanted {
@@ -1015,6 +1015,20 @@ mod tests {
             timeout_secs: None,
             artifacts: vec![],
             cache: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn non_default_refs_without_open_pulls_do_not_register_even_when_protected() {
+        let (_d, ci, mut repo) = setup();
+        repo.protected_branches = vec!["release".into()];
+        for branch in ["release", "feature"] {
+            // Admission must reject the ref before trying to read its pipeline.
+            assert!(
+                !ci.consider(&repo, &format!("refs/heads/{branch}"), "missing")
+                    .await
+                    .unwrap()
+            );
         }
     }
 

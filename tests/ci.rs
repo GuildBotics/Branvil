@@ -170,6 +170,51 @@ fn filtered_pipeline() -> String {
 }
 
 #[tokio::test]
+async fn paths_protected_non_default_tip_needs_a_pull_but_then_runs_all_jobs() {
+    let mut w = World::new().await;
+    let runner = Runner::new(&w, "paths-runner").await;
+    land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &filtered_pipeline())],
+        None,
+    )
+    .await;
+    runner.drain("success").await;
+    let head = w.push_change("release", "notes.md", "notes\n");
+    let repo = w.server.ok(&w.repo_path(), &w.owner).await;
+    let (st, v) = w
+        .server
+        .patch(
+            &w.repo_path(),
+            &w.owner,
+            json!({"revision": repo["revision"], "protected_branches": ["release"]}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    w.restart(&[]);
+    let runner = Runner::new(&w, "paths-runner-after-restart").await;
+    let report = w
+        .server
+        .ok(
+            &format!("{}/commits/{head}/checks", w.repo_path()),
+            &w.owner,
+        )
+        .await;
+    assert_eq!(report["run_registered"], false, "{report}");
+    assert!(runner.claim().await.is_none());
+
+    let p = w.open_pull("release", json!([])).await;
+    let report = checks(&w, p["number"].as_u64().unwrap()).await;
+    for name in ["rust", "web", "always"] {
+        let c = check(&report, name);
+        assert_eq!(c["status"], "queued", "{report}");
+        assert!(c["path_skip"].is_null(), "{report}");
+    }
+    assert_eq!(runner.drain("success").await, 3);
+}
+
+#[tokio::test]
 async fn paths_empty_tree_changes_leave_as_already_in_base() {
     let w = World::new().await;
     let runner = Runner::new(&w, "paths-runner").await;
