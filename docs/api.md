@@ -157,6 +157,7 @@ repository, and upstream events, including changes in another repository.
 | 409 | `not_mergeable` | Merge preconditions are not met (message says which). |
 | 409 | `children_open` | A ticket is closed as completed while one of its children is open. |
 | 409 | `blocked` | A ticket is moved into `in_progress` while one of its blockers is open. |
+| 409 | `delete_has_children`, `delete_blocks_tickets`, `delete_linked_pull`, `delete_upstream_issue` | Ticket deletion is refused because it has children, is named as a blocker, links a PR, or links an upstream issue, respectively. Closed children, dependents, and PRs count too. |
 | 409 | `no_account` | The member whose account the upstream host needs has none there, or its credential is not on this machine ("Upstream"). |
 | 409 | `upstream_refused` | The upstream host refused what Branvil sent or asked for (the message says why). |
 | 409 | `idempotency_conflict` | See conventions. |
@@ -490,6 +491,7 @@ workspace.
 - `GET /api/v1/repos/{repo}/tickets?state=open|closed|all&lane=...&assignee=...&label=...` → items in number order
   (`state` defaults to `open`; `assignee=me` is the requesting member).
 - `GET /api/v1/repos/{repo}/tickets/{number}` → ticket.
+- `DELETE /api/v1/repos/{repo}/tickets/{number}` (owner only; agents and runners receive `403 forbidden`) → `204`. Permanently removes the ticket, all its comments and reactions, its own parent/blocker links, and their derived indexes in one transaction. Refused with `409` and a specific reason (above) if it has any child, is named as another ticket's blocker, is linked from any PR, or has an `upstream_issue`; a refusal changes nothing. Missing tickets return `404`. Numbers are never reused. Attachment references are removed with each body/comment; repository attachments still referenced elsewhere remain, and unreferenced ones follow the usual attachment sweep. Emits `ticket` events for the deleted ticket and its former parent/blockers, plus a `board` event for the workspace. The GUI offers Delete last in the owner’s card menus on the task board and task flow, asks for irreversible-deletion confirmation, and shows a refusal's reason.
 - `PATCH /api/v1/repos/{repo}/tickets/{number}` — every field optional:
   `{"title", "body", "add_labels": [], "remove_labels": [], "interactive", "state", "state_reason", "upstream_issue", "parent", "add_blocked_by": [], "remove_blocked_by": [], "revision"}`.
   `parent` is the URL of a ticket of the same workspace, or `null` for none;

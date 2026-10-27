@@ -11,6 +11,265 @@ fn tickets_path() -> String {
 }
 
 #[tokio::test]
+async fn deleting_a_ticket_removes_its_sources_and_indexes_but_keeps_numbers() {
+    let mut w = World::new().await;
+    let s = &w.server;
+    let parent = w.ticket("Parent").await;
+    let blocker = w.ticket("Blocker").await;
+    w.ticket("To delete").await;
+    let path = format!("{}/3", tickets_path());
+    // The same attachment and mention have other sources that must survive.
+    let response = s
+        .http
+        .post(format!("{}/api/v1{}/attachments", s.url, w.repo_path()))
+        .bearer_auth(&w.aiko)
+        .header("content-type", "image/png")
+        .body(b"\x89PNG\r\n\x1a\nrest".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let image: Value = response.json().await.unwrap();
+    let body = format!("@aiko ![image]({})", image["url"].as_str().unwrap());
+    let (status, _) = s
+        .patch(
+            &path,
+            &w.owner,
+            json!({
+                "body": body, "add_labels": ["bug", "docs"], "parent": parent["url"],
+                "add_blocked_by": [blocker["url"]], "state": "closed", "state_reason": "not_planned"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, comment) = s
+        .post(&format!("{path}/comments"), &w.aiko, json!({"body": body}))
+        .await;
+    assert_eq!(
+        s.post(
+            &format!("{path}/reactions"),
+            &w.ken,
+            json!({"target_id": comment["id"], "reaction": "ack"})
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, kept) = s
+        .post(
+            &format!("{}/1/comments", tickets_path()),
+            &w.aiko,
+            json!({"body": body}),
+        )
+        .await;
+    let mut events = s
+        .http
+        .get(format!("{}/api/v1/events", s.url))
+        .bearer_auth(&w.owner)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), 200);
+    assert_eq!(s.delete(&path, &w.owner).await.0, 204);
+    let notices = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut text = String::new();
+        while !text.contains("\"kind\":\"board\"") {
+            text.push_str(std::str::from_utf8(&events.chunk().await.unwrap().unwrap()).unwrap());
+        }
+        text
+    })
+    .await
+    .expect("deletion events");
+    for key in ["1", "2", "3"] {
+        assert!(notices.contains(&format!("\"id\":\"{key}\"")), "{notices}");
+    }
+    assert!(notices.contains(&format!("\"path\":\"{WS}\"")));
+    drop(events);
+    for suffix in ["", "/comments", "/pulls", "/attachments"] {
+        assert_eq!(s.get(&format!("{path}{suffix}"), &w.aiko).await.0, 404);
+    }
+    assert_eq!(s.delete(&path, &w.owner).await.0, 404);
+    assert_eq!(
+        s.post(
+            &format!("{}/1/reactions", tickets_path()),
+            &w.owner,
+            json!({"target_id": comment["id"], "reaction": "ack"})
+        )
+        .await
+        .0,
+        404
+    );
+    assert_eq!(
+        s.ok(&format!("{}/1", tickets_path()), &w.aiko).await["children"],
+        json!([])
+    );
+    assert_eq!(
+        s.ok(&format!("{}/2", tickets_path()), &w.aiko).await["blocks"],
+        json!([])
+    );
+    for list in [
+        format!("{}?state=all&label=bug", tickets_path()),
+        format!("/workspaces/{WS}/board/closed"),
+    ] {
+        assert_eq!(s.ok(&list, &w.aiko).await["items"], json!([]));
+    }
+    let mentions = s
+        .ok(&format!("/workspaces/{WS}/tickets?mentions=me"), &w.aiko)
+        .await;
+    assert_eq!(mentions["items"].as_array().unwrap().len(), 1);
+    assert_eq!(mentions["items"][0]["key"], "1");
+    let attachments = s
+        .ok(&format!("{}/1/attachments", tickets_path()), &w.aiko)
+        .await;
+    assert_eq!(
+        attachments["items"][0]["referenced_by"],
+        json!([kept["id"]])
+    );
+    let cards = s
+        .ok(&format!("/workspaces/{WS}/board/cards?state=all"), &w.aiko)
+        .await;
+    assert_eq!(cards["items"].as_array().unwrap().len(), 2);
+    assert_eq!(w.ticket("Next").await["key"], "4");
+    // Open tickets are deletable as well.
+    assert_eq!(
+        s.delete(&format!("{}/4", tickets_path()), &w.owner).await.0,
+        204
+    );
+    assert_eq!(w.ticket("Next again").await["key"], "5");
+    w.server.stop();
+    let checked = w.server.cli(&w.owner, &["admin", "check"]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+#[tokio::test]
+async fn ticket_deletion_requires_owner_and_refuses_incoming_references() {
+    let mut w = World::new().await;
+    let s = &w.server;
+    let one = w.ticket("Target").await;
+    let two = w.ticket("Referrer").await;
+    let path = format!("{}/1", tickets_path());
+    let other = format!("{}/2", tickets_path());
+    let (_, comment) = s
+        .post(
+            &format!("{path}/comments"),
+            &w.aiko,
+            json!({"body": "@ken keep me"}),
+        )
+        .await;
+    let runner = s.member(&w.owner, "delete-runner", "runner").await;
+    let before = s.ok(&path, &w.owner).await;
+    for (token, expected) in [
+        (&w.aiko, 403),
+        (&w.ken, 403),
+        (&runner, 403),
+        (&String::from("invalid"), 401),
+    ] {
+        assert_eq!(s.delete(&path, token).await.0, expected);
+        assert_eq!(s.ok(&path, &w.owner).await, before);
+    }
+    for (patch, code, clear) in [
+        (
+            json!({"parent": one["url"]}),
+            "delete_has_children",
+            json!({"parent": null}),
+        ),
+        (
+            json!({"add_blocked_by": [one["url"]]}),
+            "delete_blocks_tickets",
+            json!({"remove_blocked_by": [one["url"]]}),
+        ),
+    ] {
+        assert_eq!(s.patch(&other, &w.owner, patch).await.0, 200);
+        // Closed referrers still protect their target.
+        for state in ["open", "closed"] {
+            assert_eq!(
+                s.patch(&other, &w.owner, json!({"state": state})).await.0,
+                200
+            );
+            let before = s.ok(&path, &w.owner).await;
+            let referring = s.ok(&other, &w.owner).await;
+            let (status, refusal) = s.delete(&path, &w.owner).await;
+            assert_eq!(status, 409, "{refusal}");
+            assert_eq!(refusal["error"]["code"], code);
+            assert_eq!(s.ok(&path, &w.owner).await, before);
+            assert_eq!(s.ok(&other, &w.owner).await, referring);
+            assert_eq!(
+                s.ok(&format!("{path}/comments"), &w.owner).await["items"],
+                json!([comment])
+            );
+        }
+        assert_eq!(s.patch(&other, &w.owner, clear).await.0, 200);
+    }
+    w.push_change("delete-linked", "change.txt", "change\n");
+    let pull = w
+        .open_pull(
+            "delete-linked",
+            json!([{"url": one["url"], "closes": false}]),
+        )
+        .await;
+    let pull_path = format!("{}/pulls/{}", w.repo_path(), pull["number"]);
+    for closed in [false, true] {
+        if closed {
+            assert_eq!(
+                s.post(&format!("{pull_path}/close"), &w.owner, json!({}))
+                    .await
+                    .0,
+                200
+            );
+        }
+        let before = s.ok(&path, &w.owner).await;
+        let (status, refusal) = s.delete(&path, &w.owner).await;
+        assert_eq!(status, 409, "{refusal}");
+        assert_eq!(refusal["error"]["code"], "delete_linked_pull");
+        assert_eq!(s.ok(&path, &w.owner).await, before);
+    }
+    assert_eq!(
+        s.patch(&pull_path, &w.owner, json!({"tickets": []}))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(s.delete(&path, &w.owner).await.0, 204);
+    assert_eq!(s.ok(&other, &w.owner).await["url"], two["url"]);
+    w.server.stop();
+    assert!(w.server.cli(&w.owner, &["admin", "check"]).status.success());
+}
+
+#[tokio::test]
+async fn ticket_deletion_refuses_an_upstream_issue_without_changing_it() {
+    let (mut w, _gh) = crate::upstream::followed().await;
+    let s = &w.server;
+    let (status, ticket) = s
+        .post(
+            &tickets_path(),
+            &w.owner,
+            json!({
+                "title": "Upstream", "upstream_issue": "https://github.test/octo/demo/issues/7"
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "{ticket}");
+    let path = format!("{}/1", tickets_path());
+    let (status, refusal) = s.delete(&path, &w.owner).await;
+    assert_eq!(status, 409, "{refusal}");
+    assert_eq!(refusal["error"]["code"], "delete_upstream_issue");
+    assert_eq!(s.ok(&path, &w.owner).await, ticket);
+    assert_eq!(
+        s.patch(&path, &w.owner, json!({"upstream_issue": null}))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(s.delete(&path, &w.owner).await.0, 204);
+    w.server.stop();
+    assert!(w.server.cli(&w.owner, &["admin", "check"]).status.success());
+}
+
+#[tokio::test]
 async fn comment_edit_and_delete_preserve_identity_and_enforce_permissions() {
     let mut w = World::new().await;
     let s = &w.server;

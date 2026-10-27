@@ -488,6 +488,15 @@ async fn ticket_patch(
     ))
 }
 
+async fn ticket_delete(
+    State(app): State<Shared>,
+    c: Caller,
+    P((repo, key)): P<(String, String)>,
+) -> R {
+    tickets::delete_ticket(&app, &c, &repo, &key).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 async fn ticket_pulls(
     State(app): State<Shared>,
     c: Caller,
@@ -1354,7 +1363,7 @@ pub fn router(app: Shared) -> Router {
         )
         .route(
             "/repos/{repo}/tickets/{number}",
-            get(ticket_get).patch(ticket_patch),
+            get(ticket_get).patch(ticket_patch).delete(ticket_delete),
         )
         .route("/repos/{repo}/attachments", post(attachments_create))
         .route("/repos/{repo}/attachments/{id}", get(attachment_get))

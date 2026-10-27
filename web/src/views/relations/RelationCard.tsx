@@ -4,7 +4,7 @@ import { memo, type PointerEvent } from "react";
 import { ticketRef, type Card, type Lane } from "../../api/types";
 import type { Person } from "../../components/PeoplePicker";
 import { useT } from "../../i18n";
-import { CardView, ChildrenToggle, CopyUrlItem, LaneButton, LazyMenu } from "../board/CardView";
+import { CardView, ChildrenToggle, CopyUrlItem, DeleteCardItem, LaneButton, LazyMenu } from "../board/CardView";
 
 /** A ticket made from a card's menu: its parent, a child of it, or the next one, which waits for it. */
 export type Addition = "parent" | "child" | "next";
@@ -84,6 +84,7 @@ export const RelationCard = memo(function RelationCard({
           </Menu.Item>
           <Menu.Divider />
           <CopyUrlItem url={card.url} />
+          <DeleteCardItem card={card} />
         </LazyMenu>
       </div>
     </CardView>
