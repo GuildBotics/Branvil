@@ -1018,6 +1018,7 @@ esac
         std::fs::create_dir_all(&work).unwrap();
         std::fs::create_dir_all(&log_dir).unwrap();
         let job = JobDef {
+            paths: Vec::new(),
             name: "j".into(),
             image: "img:dev".into(),
             commands: vec![],

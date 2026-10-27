@@ -1692,7 +1692,7 @@ pub async fn checks(
             .count()
     };
     let mut checks = head.checks;
-    checks.extend(crate::landing::checks(app, &repo, number).await?);
+    checks.extend(crate::landing::checks(app, &repo, number, &head_sha).await?);
     app.ci.estimate(&repo, &head_sha, &mut checks).await;
     if let Some(published) = &p.upstream
         && published.pushed.as_deref() == Some(head_sha.as_str())
@@ -1786,7 +1786,7 @@ pub async fn check_landable(
             !checks
                 .checks
                 .iter()
-                .any(|c| &c.name == *name && c.succeeded())
+                .any(|c| &c.name == *name && c.head_satisfied())
         })
         .map(String::as_str)
         .collect();

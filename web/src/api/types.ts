@@ -390,7 +390,13 @@ export interface ReusedFrom {
   sha: string;
 }
 
+export interface PathSkip {
+  paths: string[];
+  bases: { pull: number; base: string; base_sha: string; merge_base: string | null }[];
+}
+
 export interface Check {
+  path_skip?: PathSkip | null;
   name: string;
   status: CheckStatus;
   conclusion: CheckConclusion;
@@ -432,6 +438,7 @@ export interface Branch {
 }
 
 export interface Job {
+  path_skip?: PathSkip | null;
   purpose: "check" | "cache_refresh";
   cache_refresh: string | null;
   id: string;

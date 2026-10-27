@@ -237,6 +237,7 @@ mod tests {
                 queue::register(
                     w,
                     queue::Registration {
+                        selection: None,
                         repo: repo.id.clone(),
                         repo_path: repo.path.clone(),
                         sha: sha.into(),
@@ -271,6 +272,7 @@ mod tests {
     fn jobs() -> PipelineState {
         PipelineState::Jobs {
             jobs: vec![JobDef {
+                paths: Vec::new(),
                 name: "test".into(),
                 image: "alpine".into(),
                 commands: vec!["true".into()],
@@ -315,6 +317,7 @@ mod tests {
                 queue::register(
                     w,
                     queue::Registration {
+                        selection: None,
                         repo: repo.id.clone(),
                         repo_path: repo.path.clone(),
                         sha: "sha".into(),
@@ -423,6 +426,7 @@ mod tests {
                 queue::register(
                     w,
                     queue::Registration {
+                        selection: None,
                         repo: repo.id.clone(),
                         repo_path: repo.path.clone(),
                         sha: "missing-test".into(),
@@ -461,6 +465,7 @@ mod tests {
             .write_sync(|w| {
                 w.put(store::REPOS, &Repo::key(&repo.id), &repo)?;
                 let mut registration = queue::Registration {
+                    selection: None,
                     repo: repo.id.clone(),
                     repo_path: repo.path.clone(),
                     sha: "same".into(),
@@ -478,6 +483,7 @@ mod tests {
                     jobs[0].commands.push("different".into());
                 }
                 registration = queue::Registration {
+                    selection: None,
                     repo: repo.id.clone(),
                     repo_path: repo.path.clone(),
                     sha: "same".into(),

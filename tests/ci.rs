@@ -14,7 +14,7 @@ const IMAGE: &str = "docker.io/library/alpine:3.22";
 const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
 #[tokio::test]
-async fn schema_21_upgrade_preserves_attempts_and_indexes_pending_failure_notices() {
+async fn schema_22_upgrade_preserves_attempts_and_indexes_pending_failure_notices() {
     let mut w = World::new().await;
     let runner = Runner::new(&w, "runner1").await;
     let head = land(
@@ -32,7 +32,7 @@ async fn schema_21_upgrade_preserves_attempts_and_indexes_pending_failure_notice
     let db = data.join("branvil.redb");
     let attempts = records(&db, "ci_attempts");
     let pulls = records(&db, "pulls");
-    as_schema_21(&db);
+    as_schema_22(&db);
     let before = tables(&db);
     let admin = |what: &str| {
         let out = std::process::Command::new(BIN)
@@ -52,7 +52,7 @@ async fn schema_21_upgrade_preserves_attempts_and_indexes_pending_failure_notice
     assert!(admin("check").1.contains("branvil admin upgrade"));
     let (code, output) = admin("upgrade");
     assert_eq!(code, 3, "{output}");
-    assert!(output.contains("from schema version 21 to 22"), "{output}");
+    assert!(output.contains("from schema version 22 to 23"), "{output}");
     assert_eq!(records(&db, "ci_attempts"), attempts);
     assert_eq!(records(&db, "pulls"), pulls);
     let runs = records(&db, "ci_runs");
@@ -67,7 +67,7 @@ async fn schema_21_upgrade_preserves_attempts_and_indexes_pending_failure_notice
             p.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("branvil-schema-21-")
+                .starts_with("branvil-schema-22-")
         })
         .unwrap();
     assert_eq!(tables(&backup), before);
@@ -158,6 +158,401 @@ pub(crate) fn pipeline(jobs: &[&str]) -> String {
         ));
     }
     s
+}
+
+fn filtered_pipeline() -> String {
+    format!(
+        "{}paths=['src/**']\n{}paths=['web/**']\n{}",
+        pipeline(&["rust"]),
+        pipeline(&["web"]),
+        pipeline(&["always"])
+    )
+}
+
+#[tokio::test]
+async fn paths_protected_non_default_tip_needs_a_pull_but_then_runs_all_jobs() {
+    let mut w = World::new().await;
+    let runner = Runner::new(&w, "paths-runner").await;
+    land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &filtered_pipeline())],
+        None,
+    )
+    .await;
+    runner.drain("success").await;
+    let head = w.push_change("release", "notes.md", "notes\n");
+    let repo = w.server.ok(&w.repo_path(), &w.owner).await;
+    let (st, v) = w
+        .server
+        .patch(
+            &w.repo_path(),
+            &w.owner,
+            json!({"revision": repo["revision"], "protected_branches": ["release"]}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    w.restart(&[]);
+    let runner = Runner::new(&w, "paths-runner-after-restart").await;
+    let report = w
+        .server
+        .ok(
+            &format!("{}/commits/{head}/checks", w.repo_path()),
+            &w.owner,
+        )
+        .await;
+    assert_eq!(report["run_registered"], false, "{report}");
+    assert!(runner.claim().await.is_none());
+
+    let p = w.open_pull("release", json!([])).await;
+    let report = checks(&w, p["number"].as_u64().unwrap()).await;
+    for name in ["rust", "web", "always"] {
+        let c = check(&report, name);
+        assert_eq!(c["status"], "queued", "{report}");
+        assert!(c["path_skip"].is_null(), "{report}");
+    }
+    assert_eq!(runner.drain("success").await, 3);
+}
+
+#[tokio::test]
+async fn paths_empty_tree_changes_leave_as_already_in_base() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "paths-runner").await;
+    land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &filtered_pipeline())],
+        None,
+    )
+    .await;
+    runner.drain("success").await;
+    set_required(&w, &["rust", "web", "always"]).await;
+    git_ok(&w.work, &["checkout", "-qb", "empty"]);
+    git_ok(&w.work, &["commit", "--allow-empty", "-qm", "same tree"]);
+    git_as_ok(&w.work, "aiko", &w.aiko, &["push", "-q", "origin", "empty"]);
+    let p = w.open_pull("empty", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    assert_eq!(check(&checks(&w, n).await, "rust")["conclusion"], "skipped");
+    let c = runner.claim().await.unwrap();
+    assert_eq!(c["job"]["name"], "always");
+    runner.finish(&c, "success").await;
+    eventually("a no-op gate leaves the queue", || async {
+        w.server
+            .ok(&format!("{}/pulls/{n}", w.repo_path()), &w.owner)
+            .await["landing"]["reason"]["code"]
+            == "already_in_base"
+    })
+    .await;
+    assert!(runner.claim().await.is_none());
+}
+
+#[tokio::test]
+async fn paths_head_skips_have_logs_and_gates_execute_every_job_before_owner_merge() {
+    paths_land(false).await;
+}
+
+#[tokio::test]
+async fn paths_head_skips_allow_auto_merge_after_the_full_gate() {
+    paths_land(true).await;
+}
+
+async fn paths_land(auto: bool) {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "paths-runner").await;
+    let base = land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &filtered_pipeline())],
+        None,
+    )
+    .await;
+    assert_eq!(runner.drain("success").await, 3, "main runs all jobs");
+    set_required(&w, &["rust", "web", "always"]).await;
+    let head = w.push_change("docs", "notes.md", "documentation\n");
+    let p = w.open_pull("docs", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    let report = checks(&w, n).await;
+    for name in ["rust", "web"] {
+        let c = check(&report, name);
+        assert_eq!(c["conclusion"], "skipped");
+        assert_eq!(c["path_skip"]["bases"][0]["merge_base"], base);
+        assert_eq!(c["path_skip"]["bases"][0]["base_sha"], base);
+        let id = c["attempt_id"].as_str().unwrap();
+        let job = w
+            .server
+            .ok(&format!("{}/jobs/{id}", w.repo_path()), &w.owner)
+            .await;
+        assert_eq!(job["path_skip"], c["path_skip"]);
+        let log = w
+            .server
+            .ok(&format!("{}/jobs/{id}/log", w.repo_path()), &w.owner)
+            .await;
+        assert!(log["log"].as_str().unwrap().starts_with(&format!(
+            "[branvil] skipped: no file matching paths changed since {base}"
+        )));
+        assert!(log["log"].as_str().unwrap().contains(&base));
+    }
+    let always = runner.claim().await.unwrap();
+    assert_eq!(always["job"]["name"], "always");
+    assert_eq!(always["sha"], head);
+    assert!(
+        runner.claim().await.is_none(),
+        "filtered jobs never reach a runner"
+    );
+    runner.finish(&always, "skipped").await;
+    // A runner's skipped is not a path decision, so the PR cannot enter the gate.
+    let pull_path = format!("{}/pulls/{n}", w.repo_path());
+    let current = w.server.ok(&pull_path, &w.owner).await;
+    assert!(current["landing"].is_null());
+    let id = always["attempt_id"].as_str().unwrap();
+    assert_eq!(
+        w.server
+            .post(
+                &format!("{}/jobs/{id}/retry", w.repo_path()),
+                &w.owner,
+                json!({})
+            )
+            .await
+            .0,
+        200
+    );
+    let actual = runner.claim().await.unwrap();
+    assert_eq!(runner.finish(&actual, "success").await.0, 200);
+    eventually("a separate gate with all selected skips queued", || async {
+        checks(&w, n).await["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "gate/rust")
+    })
+    .await;
+    let mut seen = Vec::new();
+    while let Some(c) = runner.claim().await {
+        assert_ne!(c["sha"], head, "head remains satisfied throughout gating");
+        let name = c["job"]["name"].as_str().unwrap().to_string();
+        if name == "always" {
+            assert_eq!(c["reuse"]["attempt_id"], actual["attempt_id"]);
+            let source = c["reuse"]["attempt_id"].clone();
+            assert_eq!(runner.post(&c, "finish", json!({"lease":c["lease"],"conclusion":"success","image_digest":DIGEST,"reused_from":source})).await.0, 200);
+        } else {
+            assert!(c["reuse"].is_null(), "service skips are not reuse sources");
+            assert_eq!(runner.finish(&c, "success").await.0, 200);
+        }
+        seen.push(name);
+        assert_eq!(check(&checks(&w, n).await, "rust")["conclusion"], "skipped");
+    }
+    seen.sort();
+    assert_eq!(seen, ["always", "rust", "web"]);
+    eventually("gate passed", || async {
+        w.server.ok(&pull_path, &w.owner).await["landing"]["state"] == "passed"
+    })
+    .await;
+    if auto {
+        let repo = w.server.ok(&w.repo_path(), &w.owner).await;
+        assert_eq!(
+            w.server
+                .patch(
+                    &w.repo_path(),
+                    &w.owner,
+                    json!({"revision":repo["revision"],"auto_land":true})
+                )
+                .await
+                .0,
+            200
+        );
+        eventually("automatic merge after the full gate", || async {
+            w.server.ok(&pull_path, &w.owner).await["merged"] == true
+        })
+        .await;
+    } else {
+        let (status, result) = w
+            .server
+            .post(
+                &format!("{pull_path}/merge"),
+                &w.owner,
+                json!({"expected_head":head,"expected_base":p["base_sha"]}),
+            )
+            .await;
+        assert_eq!(status, 200, "{result}");
+    }
+}
+
+#[tokio::test]
+async fn paths_match_git_globs_and_a_pipeline_change_disables_selection() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "paths-runner").await;
+    land(
+        &w,
+        "setup",
+        &[
+            (".branvil/ci.toml", &filtered_pipeline()),
+            ("src/nested/a.rs", "before\n"),
+        ],
+        None,
+    )
+    .await;
+    runner.drain("success").await;
+    std::fs::create_dir_all(w.work.join("src/nested")).unwrap();
+    w.push_change("rust", "src/nested/a.rs", "changed\n");
+    let p = w.open_pull("rust", json!([])).await;
+    let report = checks(&w, p["number"].as_u64().unwrap()).await;
+    assert_eq!(check(&report, "rust")["status"], "queued");
+    assert_eq!(check(&report, "web")["conclusion"], "skipped");
+    git_ok(&w.work, &["mv", "src/nested/a.rs", "renamed.txt"]);
+    git_ok(&w.work, &["commit", "-qm", "rename source out of filter"]);
+    git_as_ok(&w.work, "aiko", &w.aiko, &["push", "-q", "origin", "rust"]);
+    let report = checks(&w, p["number"].as_u64().unwrap()).await;
+    assert_eq!(
+        check(&report, "rust")["status"],
+        "queued",
+        "the deleted side of a rename still matches"
+    );
+    assert_eq!(check(&report, "web")["conclusion"], "skipped");
+    sync_main(&w);
+    w.push_change(
+        "pipeline-change",
+        ".branvil/ci.toml",
+        &format!("{}\n# changed", filtered_pipeline()),
+    );
+    let p = w.open_pull("pipeline-change", json!([])).await;
+    let report = checks(&w, p["number"].as_u64().unwrap()).await;
+    for name in ["rust", "web", "always"] {
+        assert_eq!(check(&report, name)["status"], "queued");
+    }
+}
+
+#[tokio::test]
+async fn paths_retry_actually_executes_a_skipped_job() {
+    let w = World::new().await;
+    let runner = Runner::new(&w, "paths-runner").await;
+    land(
+        &w,
+        "setup",
+        &[(".branvil/ci.toml", &filtered_pipeline())],
+        None,
+    )
+    .await;
+    runner.drain("success").await;
+    set_required(&w, &["always"]).await;
+    let head = w.push_change("docs", "notes.md", "notes\n");
+    let p = w.open_pull("docs", json!([])).await;
+    let report = checks(&w, p["number"].as_u64().unwrap()).await;
+    let id = check(&report, "rust")["attempt_id"].as_str().unwrap();
+    let (st, retry) = w
+        .server
+        .post(
+            &format!("{}/jobs/{id}/retry", w.repo_path()),
+            &w.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, 200, "{retry}");
+    assert!(retry["path_skip"].is_null());
+    let mut seen = Vec::new();
+    while let Some(c) = runner.claim().await {
+        if c["sha"] == head {
+            if c["job"]["name"] == "rust" {
+                assert!(c["reuse"].is_null());
+            }
+            seen.push(c["job"]["name"].as_str().unwrap().to_string());
+        }
+        assert_eq!(runner.finish(&c, "success").await.0, 200);
+    }
+    seen.sort();
+    assert_eq!(seen, ["always", "rust"]);
+}
+
+#[tokio::test]
+async fn paths_reselect_for_another_pr_and_ref_of_the_same_sha_and_remain_stable_on_restart() {
+    let mut w = World::new().await;
+    let runner = Runner::new(&w, "paths-runner").await;
+    let older = land(
+        &w,
+        "setup",
+        &[
+            (".branvil/ci.toml", &filtered_pipeline()),
+            ("src/a.rs", "before\n"),
+        ],
+        None,
+    )
+    .await;
+    runner.drain("success").await;
+    land(&w, "advance", &[("src/a.rs", "after\n")], None).await;
+    runner.drain("success").await;
+    set_required(&w, &["always"]).await;
+    let head = w.push_change("docs", "notes.md", "notes\n");
+    let p = w.open_pull("docs", json!([])).await;
+    let n = p["number"].as_u64().unwrap();
+    assert_eq!(check(&checks(&w, n).await, "rust")["conclusion"], "skipped");
+    git_ok(&w.work, &["branch", "older", &older]);
+    git_ok(&w.work, &["branch", "alias", &head]);
+    git_as_ok(
+        &w.work,
+        "aiko",
+        &w.aiko,
+        &["push", "-q", "origin", "older", "alias"],
+    );
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls", w.repo_path()),
+            &w.aiko,
+            json!({"head":"alias", "base":"older", "title":"Same head, older base"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    let mut before = checks(&w, n).await;
+    assert_eq!(check(&before, "rust")["status"], "queued");
+    assert_eq!(check(&before, "rust")["attempt"], 2);
+    assert_eq!(
+        check(&before, "web")["path_skip"]["bases"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    w.restart(&[]);
+    let mut after = checks(&w, n).await;
+    for report in [&mut before, &mut after] {
+        for check in report["checks"].as_array_mut().unwrap() {
+            check.as_object_mut().unwrap().remove("details_url");
+        }
+    }
+    assert_eq!(
+        after["checks"], before["checks"],
+        "reconcile does not recreate skipped attempts"
+    );
+    let report = w
+        .server
+        .ok(
+            &format!("{}/commits/{head}/checks", w.repo_path()),
+            &w.owner,
+        )
+        .await;
+    assert_eq!(check(&report, "rust")["status"], "queued");
+    git_ok(
+        &w.work,
+        &[
+            "update-ref",
+            "refs/heads/older",
+            p["base_sha"].as_str().unwrap(),
+        ],
+    );
+    git_as_ok(&w.work, "aiko", &w.aiko, &["push", "-q", "origin", "older"]);
+    w.restart(&[]);
+    eventually("reconcile observes the changed base tip", || async {
+        check(&checks(&w, n).await, "web")["path_skip"]["bases"][1]["base_sha"] == p["base_sha"]
+    })
+    .await;
+    let report = checks(&w, n).await;
+    let bases = check(&report, "web")["path_skip"]["bases"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        bases[1]["base_sha"], p["base_sha"],
+        "unchanged PR ids still reselect when a base tip moves"
+    );
+    assert_eq!(check(&report, "web")["attempt"], 3);
 }
 
 #[tokio::test]
@@ -294,7 +689,7 @@ async fn cache_refresh_never_changes_main_checks_or_required_readiness() {
             .iter()
             .any(|a| a["cache_refresh"] == refresh_id)
     );
-    as_schema_21(&db);
+    as_schema_22(&db);
     for (command, expected) in [("upgrade", 3), ("check", 0)] {
         let out = std::process::Command::new(BIN)
             .args(["admin", command, "--data-dir"])

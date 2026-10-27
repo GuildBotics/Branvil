@@ -50,9 +50,51 @@ pub enum PipelineState {
     },
 }
 
+/// The exact PR/base snapshot used to select a commit's jobs.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SelectionBase {
+    pub pull: u64,
+    pub base: String,
+    pub base_sha: String,
+    pub merge_base: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct JobSelection {
+    pub bases: Vec<SelectionBase>,
+    pub skipped_jobs: Vec<String>,
+}
+
+/// A service decision, never a conclusion supplied by a runner.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PathSkip {
+    pub paths: Vec<String>,
+    pub bases: Vec<SelectionBase>,
+}
+
+impl PathSkip {
+    pub fn reason(&self) -> String {
+        format!(
+            "no file matching paths changed since {}",
+            self.bases
+                .iter()
+                .map(|b| format!(
+                    "{} (!{} base {} at {})",
+                    b.merge_base.as_deref().unwrap_or("unknown"),
+                    b.pull,
+                    b.base,
+                    b.base_sha
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    }
+}
+
 /// The CI of one commit of one repository.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Run {
+    pub selection: Option<JobSelection>,
     pub repo: String,
     pub repo_path: String,
     pub sha: String,
@@ -82,6 +124,19 @@ pub struct Run {
     pub failure_pending: bool,
 }
 
+impl Run {
+    pub fn skips(&self, name: &str) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|s| s.skipped_jobs.iter().any(|n| n == name))
+    }
+
+    /// A previous selection is history once this job must actually execute.
+    pub fn includes(&self, a: &Attempt) -> bool {
+        a.path_skip.is_none() || self.skips(&a.job.name)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ArtifactMeta {
     pub name: String,
@@ -106,6 +161,7 @@ pub struct AutoRetry {
 /// One try of one job.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Attempt {
+    pub path_skip: Option<PathSkip>,
     pub id: String,
     pub purpose: Purpose,
     /// The refresh requested by this reused check, including an existing one.
@@ -305,7 +361,10 @@ fn refresh_failure(r: &impl Rd, run: &mut Run) -> AppResult<()> {
             failed = true;
             continue;
         }
-        let Some(a) = latest.iter().find(|a| &a.job.name == name) else {
+        let Some(a) = latest
+            .iter()
+            .find(|a| &a.job.name == name && run.includes(a))
+        else {
             if run.superseded_by.is_some() {
                 continue;
             }
@@ -408,11 +467,15 @@ fn jobs_to_run(r: &impl Rd, run: &Run) -> AppResult<Vec<JobDef>> {
     Ok(jobs
         .iter()
         .filter(|j| {
+            if run.skips(&j.name) {
+                return false;
+            }
             current
                 .iter()
                 .find(|a| a.job.name == j.name)
                 .is_none_or(|a| {
                     a.superseded
+                        || a.path_skip.is_some()
                         || (protected
                             && j.cache.is_some()
                             && a.status != "queued"
@@ -453,6 +516,7 @@ fn cut(text: &str) -> String {
 fn new_attempt(w: &Wtx, run: &Run, job: &JobDef, network: bool, now: &str) -> AppResult<Attempt> {
     let number = next_number(w, &run.repo, &run.sha, &job.name)?;
     Ok(Attempt {
+        path_skip: None,
         id: util::new_id("att"),
         purpose: Purpose::Check,
         cache_refresh: None,
@@ -499,6 +563,7 @@ fn conclude(a: &mut Attempt, conclusion: &str, details: Option<String>, now: &st
 
 /// What a registration asks for.
 pub struct Registration {
+    pub selection: Option<JobSelection>,
     pub repo: String,
     pub repo_path: String,
     pub sha: String,
@@ -548,6 +613,7 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
             run
         }
         None => Run {
+            selection: None,
             repo: reg.repo,
             repo_path: reg.repo_path,
             sha: reg.sha,
@@ -568,6 +634,34 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
             failure_pending: false,
         },
     };
+    run.selection = if run.cache_scope == "protected" {
+        None
+    } else {
+        reg.selection
+    };
+    // Skipped attempts consume no queue capacity, including while waiting.
+    let mut skipped = false;
+    if let PipelineState::Jobs { jobs } = &run.pipeline {
+        let current = current_attempts(w, &run.repo, &run.sha, jobs)?;
+        for job in jobs.iter().filter(|j| run.skips(&j.name)) {
+            let skip = PathSkip {
+                paths: job.paths.clone(),
+                bases: run.selection.as_ref().unwrap().bases.clone(),
+            };
+            let old = current.iter().find(|a| a.job.name == job.name);
+            // Keep real executions and manual retries. Refresh only decisions.
+            if old.is_some_and(|a| !a.superseded && a.path_skip.is_none())
+                || old.is_some_and(|a| a.path_skip.as_ref() == Some(&skip))
+            {
+                continue;
+            }
+            let mut a = new_attempt(w, &run, job, reg.network, now)?;
+            conclude(&mut a, "skipped", Some(skip.reason()), now);
+            a.path_skip = Some(skip);
+            put_attempt(w, None, &a)?;
+            skipped = true;
+        }
+    }
     let queued = !run.waiting && {
         let todo = jobs_to_run(w, &run)?;
         // A pull request's job still running stops: its protected branch's
@@ -588,7 +682,7 @@ pub fn register(w: &Wtx, reg: Registration, queue_max: usize, now: &str) -> AppR
     refresh_failure(w, &mut run)?;
     let changed = old.as_ref() != Some(&run);
     put_run(w, &run)?;
-    Ok(queued || changed)
+    Ok(queued || skipped || changed)
 }
 
 /// Gives `run` (written by the caller) its commit's pipeline. Every
@@ -1673,6 +1767,7 @@ mod tests {
 
     fn job(name: &str) -> JobDef {
         JobDef {
+            paths: Vec::new(),
             name: name.into(),
             image: "alpine".into(),
             commands: vec!["true".into()],
@@ -1684,6 +1779,7 @@ mod tests {
 
     fn reg(sha: &str, branch: &str, jobs: &[&str]) -> Registration {
         Registration {
+            selection: None,
             repo: "repo_1".into(),
             repo_path: "acme/demo".into(),
             sha: sha.into(),
@@ -1723,8 +1819,121 @@ mod tests {
 
     fn same_tree(sha: &str) -> Registration {
         Registration {
+            selection: None,
             tree: Some("same-tree".into()),
             ..reg(sha, "main", &["test"])
+        }
+    }
+
+    fn selected(sha: &str, skipped: &[&str]) -> Registration {
+        let mut reg = reg(sha, "feature", &["web", "rust"]);
+        if let PipelineState::Jobs { jobs } = &mut reg.pipeline {
+            for job in jobs {
+                job.paths = vec![format!("{}/**", job.name)];
+            }
+        }
+        reg.selection = Some(JobSelection {
+            bases: vec![SelectionBase {
+                pull: 1,
+                base: "main".into(),
+                base_sha: "base".into(),
+                merge_base: Some("merge-base".into()),
+            }],
+            skipped_jobs: skipped.iter().map(|s| s.to_string()).collect(),
+        });
+        reg
+    }
+
+    #[test]
+    fn path_selection_is_idempotent_uses_only_real_slots_and_survives_waiting() {
+        let (_d, s) = store();
+        s.write_sync(|w| register(w, reg("busy", "other", &["busy"]), 1, T0))
+            .unwrap();
+        s.write_sync(|w| register(w, selected("s1", &["rust"]), 1, T0))
+            .unwrap();
+        let before = latest(&s, "s1");
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].conclusion.as_deref(), Some("skipped"));
+        assert!(before[0].path_skip.is_some());
+        assert!(
+            s.read_sync(|r| get_run(r, "repo_1", "s1"))
+                .unwrap()
+                .unwrap()
+                .waiting
+        );
+        assert!(
+            !s.write_sync(|w| register(w, selected("s1", &["rust"]), 1, T1))
+                .unwrap()
+        );
+        assert_eq!(latest(&s, "s1"), before);
+        s.write_sync(|w| {
+            let a = latest_attempts(w, "repo_1", "busy")?;
+            cancel(w, &a[0].id, "member1", T1)
+        })
+        .unwrap();
+        s.write_sync(|w| admit_waiting(w, 1, T1)).unwrap();
+        let c = s
+            .write_sync(|w| claim(w, "runner", 60, T1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.attempt.job.name, "web");
+        assert!(
+            s.write_sync(|w| claim(w, "runner", 60, T1))
+                .unwrap()
+                .is_none()
+        );
+        s.write_sync(|w| register(w, selected("s1", &[]), 1, T2))
+            .unwrap();
+        let c = s
+            .write_sync(|w| claim(w, "runner", 60, T2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.attempt.job.name, "rust");
+        assert!(c.attempt.path_skip.is_none());
+        assert_eq!(c.attempt.number, 2);
+        assert!(
+            s.read_sync(crate::model::index_problems)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn protected_registration_and_retry_execute_selected_skips_and_cannot_reuse_them() {
+        for protected in [false, true] {
+            let (_d, s) = store();
+            s.write_sync(|w| register(w, selected("s1", &["web", "rust"]), 1, T0))
+                .unwrap();
+            let a = latest(&s, "s1")[0].clone();
+            if protected {
+                let mut reg = selected("s1", &["web", "rust"]);
+                reg.branch = "main".into();
+                reg.protected = true;
+                s.write_sync(|w| register(w, reg, 2, T1)).unwrap();
+            } else {
+                s.write_sync(|w| retry(w, &a.id, 1, T1)).unwrap();
+            }
+            let c = s
+                .write_sync(|w| claim(w, "runner", 60, T1))
+                .unwrap()
+                .unwrap();
+            assert!(c.attempt.path_skip.is_none());
+            assert!(c.reuse.is_none());
+            assert!(!s.read_sync(|r| can_reuse(r, &c.attempt, &a)).unwrap());
+            let mut changed = a.clone();
+            changed.job.paths.push("extra/**".into());
+            assert_ne!(changed.job, a.job, "paths participate in job identity");
+            if protected {
+                s.write_sync(|w| register(w, selected("s1", &["web", "rust"]), 2, T2))
+                    .unwrap();
+                assert!(
+                    s.read_sync(|r| get_run(r, "repo_1", "s1"))
+                        .unwrap()
+                        .unwrap()
+                        .selection
+                        .is_none()
+                );
+            }
         }
     }
 
@@ -2358,6 +2567,7 @@ mod tests {
             .unwrap();
         }
         let merged = || Registration {
+            selection: None,
             pipeline: pipeline.clone(),
             ..reg("s1", "main", &[])
         };

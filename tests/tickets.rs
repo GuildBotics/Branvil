@@ -1386,16 +1386,27 @@ async fn a_ticket_is_interactive_only_while_a_member_says_so() {
 }
 
 #[tokio::test]
-async fn upgrade_leaves_every_ticket_not_interactive() {
+async fn upgrade_preserves_ticket_interactive_flags() {
     let mut w = World::new().await;
     w.ticket("First").await;
     w.ticket("Second").await;
+    assert_eq!(
+        w.server
+            .patch(
+                &format!("{}/2", tickets_path()),
+                &w.ken,
+                json!({"interactive":true})
+            )
+            .await
+            .0,
+        200
+    );
     w.server.stop();
     let db = w.server.data.join("branvil.redb");
-    as_schema_21(&db);
+    as_schema_22(&db);
     let old = tables(&db);
     for (command, expected, says) in [
-        ("upgrade", 3, "2 ticket(s) upgraded as not interactive"),
+        ("upgrade", 3, "CI run(s) upgraded with no path selection"),
         ("check", 0, "indexes: ok"),
     ] {
         let out = std::process::Command::new(BIN)
@@ -1413,7 +1424,13 @@ async fn upgrade_leaves_every_ticket_not_interactive() {
     }
     let tickets = records(&db, "tickets");
     assert_eq!(tickets.len(), 2);
-    assert!(tickets.iter().all(|t| t["interactive"] == false));
+    assert_eq!(
+        tickets
+            .iter()
+            .map(|t| t["interactive"].as_bool().unwrap())
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
     let copy = std::fs::read_dir(&w.server.data)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -1421,7 +1438,7 @@ async fn upgrade_leaves_every_ticket_not_interactive() {
             p.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("branvil-schema-21-")
+                .starts_with("branvil-schema-22-")
         })
         .unwrap();
     assert_eq!(tables(&copy), old);

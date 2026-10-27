@@ -21,6 +21,46 @@ pub fn valid_attempt_id(id: &str) -> bool {
 }
 
 impl Ci {
+    /// These attempts never reach a runner. Reconciliation also repairs a
+    /// log missed if the process stopped after the queue transaction.
+    pub(super) async fn write_skip_logs(
+        &self,
+        repo: &crate::model::Repo,
+        sha: &str,
+    ) -> AppResult<()> {
+        let (id, sha) = (repo.id.clone(), sha.to_string());
+        let attempts = self
+            .inner
+            .store
+            .read(move |r| queue::attempts_of(r, &id, &sha))
+            .await?;
+        for a in attempts {
+            if !a.files_pruned
+                && let Some(skip) = a.path_skip
+            {
+                let path = self.log_path(&a.id);
+                if !tokio::fs::try_exists(&path)
+                    .await
+                    .map_err(AppError::internal)?
+                {
+                    tokio::fs::create_dir_all(self.inner.layout.ci_logs())
+                        .await
+                        .map_err(AppError::internal)?;
+                    let temporary = path.with_extension("tmp");
+                    tokio::fs::write(
+                        &temporary,
+                        format!("[branvil] skipped: {}\n", skip.reason()),
+                    )
+                    .await
+                    .map_err(AppError::internal)?;
+                    tokio::fs::rename(temporary, path)
+                        .await
+                        .map_err(AppError::internal)?;
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn log_path(&self, id: &str) -> PathBuf {
         self.inner.layout.ci_logs().join(format!("{id}.log"))
     }

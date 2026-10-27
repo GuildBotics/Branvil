@@ -86,6 +86,8 @@ pub struct JobDef {
     pub name: String,
     pub image: String,
     pub commands: Vec<String>,
+    /// Git pathspec globs selecting PR-head jobs; empty means every change.
+    pub paths: Vec<String>,
     /// The job's own time limit, when it gives one; the runner lowers it to
     /// its limit and runs a job that gives none with its limit.
     pub timeout_secs: Option<u64>,
@@ -131,6 +133,8 @@ struct JobSchema {
     name: String,
     image: String,
     commands: Vec<String>,
+    #[serde(default)]
+    paths: Vec<String>,
     timeout_secs: Option<u64>,
     #[serde(default)]
     artifacts: Vec<ArtifactDef>,
@@ -209,6 +213,12 @@ fn validate_job(j: JobSchema) -> Result<JobDef, String> {
     if j.timeout_secs.is_some_and(|t| !(1..=86_400).contains(&t)) {
         return Err(at("timeout_secs must be between 1 and 86400."));
     }
+    if j.paths.len() > MAX_PATHS {
+        return Err(at(&format!("paths takes at most {MAX_PATHS} entries.")));
+    }
+    for path in &j.paths {
+        check_relative(path).map_err(|m| at(&m))?;
+    }
     if j.cpus.is_some() || j.memory_mib.is_some() {
         return Err(at(
             "cpus and memory_mib are not pipeline settings: every job runs with the CPUs and memory set for the runner (Settings → CI).",
@@ -253,6 +263,7 @@ fn validate_job(j: JobSchema) -> Result<JobDef, String> {
         name,
         image: j.image,
         commands: j.commands,
+        paths: j.paths,
         timeout_secs: j.timeout_secs,
         artifacts: j.artifacts,
         cache: j.cache,
@@ -307,6 +318,42 @@ mod tests {
     use super::*;
 
     const DIGEST: &str = "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
+
+    #[test]
+    fn paths_are_optional_bounded_relative_git_globs_without_magic() {
+        let job = "[[jobs]]\nname='test'\nimage='alpine'\ncommands=['true']\n";
+        assert!(parse(job).unwrap()[0].paths.is_empty());
+        let paths = [
+            "src/**",
+            "tests/*.rs",
+            "Cargo.lock",
+            "rust-toolchain*",
+            "-file",
+            "a b/**",
+        ];
+        let jobs = parse(&format!("{job}paths={paths:?}")).unwrap();
+        assert_eq!(jobs[0].paths, paths);
+        for path in [
+            "",
+            "/root",
+            "../x",
+            "a/../x",
+            "a//b",
+            "a/./b",
+            "a\\b",
+            ":(glob)src/**",
+            "a:b",
+            "\0",
+        ] {
+            let escaped = serde_json::to_string(path).unwrap();
+            assert!(
+                parse(&format!("{job}paths=[{escaped}]")).is_err(),
+                "{path:?}"
+            );
+        }
+        assert!(parse(&format!("{job}paths={:?}", vec!["x"; MAX_PATHS])).is_ok());
+        assert!(parse(&format!("{job}paths={:?}", vec!["x"; MAX_PATHS + 1])).is_err());
+    }
 
     #[test]
     fn a_minimal_pipeline_leaves_the_limits_to_the_runner() {

@@ -42,6 +42,7 @@ fn json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> AppResult<T> {
 
 #[derive(Serialize, Debug)]
 pub struct AttemptView {
+    pub path_skip: Option<queue::PathSkip>,
     pub id: String,
     pub purpose: queue::Purpose,
     pub cache_refresh: Option<String>,
@@ -70,6 +71,7 @@ async fn view(app: &Shared, a: &Attempt) -> AppResult<AttemptView> {
         .read(move |r| queue::result_attempt(r, &own))
         .await?;
     Ok(AttemptView {
+        path_skip: a.path_skip.clone(),
         id: a.id.clone(),
         purpose: a.purpose,
         cache_refresh: a.cache_refresh.clone(),
@@ -766,6 +768,7 @@ mod tests {
                     queue::register(
                         w,
                         queue::Registration {
+                            selection: None,
                             repo: r2.id,
                             repo_path: r2.path,
                             sha: "gate-sha".into(),
@@ -774,6 +777,7 @@ mod tests {
                             protected: false,
                             pipeline: queue::PipelineState::Jobs {
                                 jobs: vec![JobDef {
+                                    paths: Vec::new(),
                                     name: "build".into(),
                                     image: "alpine".into(),
                                     commands: vec!["true".into()],

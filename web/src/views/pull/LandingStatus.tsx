@@ -123,13 +123,13 @@ export function GateStage({ pull, repository }: { pull: PullRequest; repository:
   const landing = pull.landing;
   const queue = useLanding(pull.repository);
   const checks = useChecks(pull.repository, pull.number, landing?.state === "gating" || landing?.state === "left");
-  const gateChecks = checks.data?.checks.filter((c) => c.name.startsWith("gate/")) ?? [];
+  const gateChecks = checks.data?.head_sha === pull.head_sha ? checks.data.checks.filter((c) => c.name.startsWith("gate/")) : [];
   const entries = queue.data?.items.filter((e) => e.base === pull.base && e.number !== pull.number) ?? [];
   if (landing) entries.push(landing);
   return (
     <Stack gap={6} component="section" aria-label={t("landing.gate")} style={{ overflowWrap: "anywhere" }}>
       <Text size="sm" fw={700}>{t("landing.gate")}</Text>
-      {!landing ? <Text size="sm" c="dimmed">{t("landing.notQueued")}</Text> : (
+      {!landing ? <Text size="sm" c="dimmed">{t("landing.notQueued")}</Text> : landing.head_sha !== pull.head_sha ? <Text size="sm" c="dimmed">{t("landing.headChanged")}</Text> : (
         <>
           <Group gap="xs"><LandingBadge landing={landing} host={repository.upstream?.host} />{landing.gate && <Sha repo={pull.repository} value={landing.gate} />}</Group>
           {queue.isError ? <ErrorMessage error={queue.error} /> : queue.isPending ? <Loading /> : <QueueLine repo={pull.repository} entries={entries} repository={repository} highlight={pull.number} />}

@@ -21,11 +21,11 @@ function refusalOf(t: Translate, err: unknown, notReady: "merge.notMergeable" | 
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Match check_landable: only completed/success on the displayed head satisfies a required name. */
+/** Match check_landable: real success or a service path selection on this head. */
 function useMissingChecks(pull: PullRequest, requiredChecks: string[]): string[] {
   const checks = useChecks(pull.repository, pull.number, requiredChecks.length > 0);
   const current = !checks.isError && checks.data?.head_sha === pull.head_sha ? checks.data : undefined;
-  return requiredChecks.filter((name) => !current?.checks.some((c) => c.name === name && c.status === "completed" && c.conclusion === "success"));
+  return requiredChecks.filter((name) => !current?.checks.some((c) => c.name === name && c.status === "completed" && (c.conclusion === "success" || (c.conclusion === "skipped" && !!c.path_skip))));
 }
 
 function RequiredChecks({ pull, checks, missing }: { pull: PullRequest; checks: string[]; missing: string[] }) {
@@ -37,7 +37,7 @@ function RequiredChecks({ pull, checks, missing }: { pull: PullRequest; checks: 
       <Text size="sm">{checks.length ? t("merge.requiredChecks", { checks: checks.join(", ") }) : t("merge.noRequiredChecks")}</Text>
       {checks.map((name) => {
         const check = current?.checks.find((c) => c.name === name);
-        const state = !current ? "checking" : !check ? "check.missing" : check.status !== "completed" ? "check.running" : check.conclusion === "success" ? "check.success" : "check.failure";
+        const state = !current ? "checking" : !check ? "check.missing" : check.status !== "completed" ? "check.running" : check.conclusion === "skipped" && check.path_skip ? "check.pathsSkipped" : check.conclusion === "success" ? "check.success" : "check.failure";
         return <Text key={name} size="sm">{name} · {t(`landing.${state}`)}</Text>;
       })}
       {missing.length > 0 && (

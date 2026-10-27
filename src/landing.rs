@@ -322,7 +322,7 @@ async fn eligibility(
         checks
             .checks
             .iter()
-            .any(|c| c.name == *name && c.succeeded())
+            .any(|c| c.name == *name && c.head_satisfied())
     }) {
         return Ok(Some(reason(
             "head_checks",
@@ -860,6 +860,7 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
                             &e.base_sha,
                             &e.head_sha,
                             e.number,
+                            !app.ci.needs_gate_commit(repo, &e.head_sha).await?,
                         )
                         .await?
                 }
@@ -1010,12 +1011,16 @@ pub async fn repair_refs_locked(app: &App, repo: &Repo) -> AppResult<Vec<crate::
     crate::refs::record_refs_locked(app, repo).await
 }
 
-/// Gate checks remain visible after departure, including their retry attempts.
-pub async fn checks(app: &App, repo: &Repo, number: u64) -> AppResult<Vec<Check>> {
+/// Gate checks, including retries after departure, belong only to their head.
+/// The caller supplies the same head it uses for the checks response.
+pub async fn checks(app: &App, repo: &Repo, number: u64, head: &str) -> AppResult<Vec<Check>> {
     let id = repo.id.clone();
     let Some(e) = app.store.read(move |r| current(r, &id, number)).await? else {
         return Ok(Vec::new());
     };
+    if e.head_sha != head {
+        return Ok(Vec::new());
+    }
     if let Some(why) = e.reason.as_ref().filter(|r| r.code == "conflict") {
         return Ok(vec![Check {
             name: "gate".into(),
@@ -1068,6 +1073,130 @@ mod tests {
             "url":"https://host.test/pulls/2", "state":"open", "pushed":"head", "sent_title":"Feature", "sent_body":"",
             "sent_state":"open", "checks":[], "published_at":"now", "error":null, "stopped":null, "auto":true
         })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn gate_checks_follow_the_requested_head_in_every_state_and_retry() {
+        use crate::ci::{pipeline::JobDef, queue};
+        let temp = tempfile::tempdir().unwrap();
+        let config = crate::config::Config::load(None, Some(temp.path()), None, None).unwrap();
+        config.layout().create().unwrap();
+        let store = store::Store::open(&config.layout().db(), 1 << 20, 1).unwrap();
+        let app = App::new(
+            config,
+            "http://127.0.0.1:7878".into(),
+            store,
+            vec![],
+            "http://127.0.0.1:7878".into(),
+        );
+        let (repo, _, mut entry) = fixture();
+        entry.head_sha = "old-head".into();
+        entry.gate = Some("old-gate".into());
+        let register = |sha: &str| {
+            app.store
+                .write_sync(|w| {
+                    queue::register(
+                        w,
+                        queue::Registration {
+                            selection: None,
+                            repo: repo.id.clone(),
+                            repo_path: repo.path.clone(),
+                            sha: sha.into(),
+                            tree: None,
+                            branch: format!("gate/{}", entry.number),
+                            protected: false,
+                            pipeline: queue::PipelineState::Jobs {
+                                jobs: vec![JobDef {
+                                    paths: Vec::new(),
+                                    name: "test".into(),
+                                    image: "alpine".into(),
+                                    commands: vec!["true".into()],
+                                    timeout_secs: None,
+                                    artifacts: vec![],
+                                    cache: None,
+                                }],
+                            },
+                            network: false,
+                        },
+                        10,
+                        &util::now(),
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        };
+        register("old-gate");
+        let failed_id = app
+            .store
+            .write_sync(|w| {
+                let now = util::now();
+                let c = queue::claim(w, "runner1", 60, &now)?.unwrap();
+                queue::finish(
+                    w,
+                    &c.attempt.id,
+                    &c.lease,
+                    "failure",
+                    None,
+                    queue::ResultInfo::default(),
+                    10,
+                    &now,
+                )?;
+                Ok(c.attempt.id)
+            })
+            .unwrap();
+        for state in ["waiting", "gating", "passed", "left"] {
+            entry.state = state.into();
+            entry.reason = (state == "left").then(|| reason("gate_failed", "Gate failed."));
+            app.store
+                .write_sync(|w| w.put(store::LANDING, &Pull::key(&repo.id, entry.number), &entry))
+                .unwrap();
+            let current = checks(&app, &repo, entry.number, "old-head").await.unwrap();
+            assert_eq!(current.len(), 1, "{state}");
+            assert_eq!(current[0].name, "gate/test");
+            assert_eq!(current[0].conclusion.as_deref(), Some("failure"));
+            for head in ["new-head", ""] {
+                assert!(
+                    checks(&app, &repo, entry.number, head)
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "{state}: {head}"
+                );
+            }
+        }
+        // A departed entry keeps the newest retry of its own head visible.
+        let retry = app
+            .store
+            .write_sync(|w| queue::retry(w, &failed_id, 10, &util::now()))
+            .unwrap();
+        let current = checks(&app, &repo, entry.number, "old-head").await.unwrap();
+        assert_eq!(current[0].attempt_id.as_deref(), Some(retry.id.as_str()));
+        assert_eq!(current[0].status, "queued");
+        assert!(
+            checks(&app, &repo, entry.number, "new-head")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // A new admission exposes only its new gate's jobs.
+        register("new-gate");
+        entry.head_sha = "new-head".into();
+        entry.gate = Some("new-gate".into());
+        entry.state = "gating".into();
+        entry.reason = None;
+        app.store
+            .write_sync(|w| w.put(store::LANDING, &Pull::key(&repo.id, entry.number), &entry))
+            .unwrap();
+        let current = checks(&app, &repo, entry.number, "new-head").await.unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].name, "gate/test");
+        assert_ne!(current[0].attempt_id.as_deref(), Some(retry.id.as_str()));
+        assert!(
+            checks(&app, &repo, entry.number, "old-head")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

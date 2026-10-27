@@ -6,7 +6,7 @@ import { useMutation, useQueryClient, type UseQueryResult } from "@tanstack/reac
 import { ChevronRight, CircleCheck, CircleDashed, CircleX, ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
 import * as api from "../../api/endpoints";
-import type { Check, CheckSet, PullRequest } from "../../api/types";
+import type { Check, CheckSet, PathSkip, PullRequest } from "../../api/types";
 import { ErrorMessage, Loading, Sha, StateBadge, Time, type Tone } from "../../components/common";
 import { useT } from "../../i18n";
 import { useChecks, useCommitChecks, useJob, useJobLog } from "../../query/hooks";
@@ -28,10 +28,20 @@ function toneOf(c: Pick<Check, "status" | "conclusion">): Tone {
 
 const ROLLUP_TONE: Record<CiRollup, Tone> = { passing: "success", failing: "danger", pending: "warning", not_registered: "warning", none: "neutral" };
 
-export function CheckStatusBadge({ status, conclusion }: Pick<Check, "status" | "conclusion">) {
+export function CheckStatusBadge({ status, conclusion, path_skip }: Pick<Check, "status" | "conclusion" | "path_skip">) {
   const t = useT();
-  const label = status === "completed" && conclusion ? t(`ci.conclusion.${conclusion}`) : t(`ci.status.${status}`);
+  const label = status === "completed" && conclusion === "skipped" && path_skip ? t("ci.pathsSkipped") : status === "completed" && conclusion ? t(`ci.conclusion.${conclusion}`) : t(`ci.status.${status}`);
   return <StateBadge tone={toneOf({ status, conclusion })}>{label}</StateBadge>;
+}
+
+function PathSkipReason({ repo, skip }: { repo: string; skip: PathSkip }) {
+  const t = useT();
+  return <Stack gap={2}>
+    <Text size="xs" c="dimmed">{t("ci.pathsReason", { paths: skip.paths.join(", ") })}</Text>
+    {skip.bases.map((b) => <Text key={b.pull} size="xs" c="dimmed">
+      !{b.pull} · {b.base} <Sha repo={repo} value={b.base_sha} /> · merge-base {b.merge_base && <Sha repo={repo} value={b.merge_base} />}
+    </Text>)}
+  </Stack>;
 }
 
 function StatusIcon({ check }: { check: Check }) {
@@ -181,7 +191,7 @@ function CheckRow({ check, repo, required, onOpen }: { check: Check; repo: strin
       )}
       <span style={{ marginLeft: "auto" }} />
       {check.started_at && <RunTime startedAt={check.started_at} finishedAt={check.finished_at} expectedSecs={check.expected_secs} />}
-      <CheckStatusBadge status={check.status} conclusion={check.conclusion} />
+      <CheckStatusBadge status={check.status} conclusion={check.conclusion} path_skip={check.path_skip} />
       {check.attempt_id && <ChevronRight size={16} color="var(--mantine-color-dimmed)" />}
     </>
   );
@@ -208,6 +218,7 @@ function CheckRow({ check, repo, required, onOpen }: { check: Check; repo: strin
           </Link>{" "}· <Sha repo={repo} value={check.reused_from.sha} />
         </Text>
       )}
+      {check.path_skip && <Box ml={24} mb={4}><PathSkipReason repo={repo} skip={check.path_skip} /></Box>}
       {check.cache_refresh && (
         <Text size="xs" ml={24} mb={4}>
           <Link to={href.job(repo, check.cache_refresh)}>{t("ci.cacheRefresh")}</Link>
@@ -274,6 +285,7 @@ function JobDetails({ repo, attemptId, onAttempt }: { repo: string; attemptId: s
   const j = job.data;
   return (
     <Stack gap="md">
+      {j.path_skip && <PathSkipReason repo={repo} skip={j.path_skip} />}
       {j.purpose === "cache_refresh" && (
         <Stack gap="xs">
           <Text fw={600}>{t("ci.cacheRefresh")}</Text>
@@ -371,7 +383,7 @@ export function CheckDrawer({ repo, check, onClose }: { repo: string; check: { a
       <Text span c="dimmed">
         #{job.data.attempt}
       </Text>
-      <CheckStatusBadge status={job.data.status} conclusion={job.data.conclusion} />
+      <CheckStatusBadge status={job.data.status} conclusion={job.data.conclusion} path_skip={job.data.path_skip} />
     </Group>
   ) : (
     t("pull.checks")
