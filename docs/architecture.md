@@ -59,8 +59,11 @@ or diffs, and then run one short write transaction.
 
 - Repositories are bare, at `<data>/repos/<path>.git`, created by
   `POST /api/v1/repos`. Each carries `core.hooksPath=<data>/hooks`,
-  `transfer.hideRefs=refs/branvil`, `receive.fsckObjects=true`, and
-  `core.logAllRefUpdates=always`; these are re-applied at every start.
+  `transfer.hideRefs=refs/branvil`, `receive.fsckObjects=true`,
+  `core.logAllRefUpdates=always`, and `http.lowSpeedLimit=1` with
+  `http.lowSpeedTime` set to `limits.git_command_timeout_secs` (a stalled
+  upstream host ends a fetch or push even when nothing times it out any more,
+  below); these are re-applied at every start.
 - Smart HTTP spawns `git http-backend` with an argv array and an environment
   built from scratch for the request (`PATH_INFO` uses the stored spelling of
   the path). `core.hooksPath` is also passed through `GIT_CONFIG_COUNT`, so
@@ -77,14 +80,28 @@ or diffs, and then run one short write transaction.
   their own, so a terminal's Ctrl-C or a supervisor that kills the service's
   group never reaches Git in the middle of a ref update: Git killed there
   leaves its lock files (`packed-refs.lock`, `<ref>.lock`), and the repository
-  refuses every later update of those refs. Only a Git command's own time
-  limit, and a dropped read, kill it. So Git can outlive the service (a stop
-  that reached its 60 s, a killed service); it still changes refs then, and a
-  next start that recovered first would record the opposite of what Git did.
-  Every Git the service starts, and its hooks, inherit the lock
-  `git/service.lock` that the service takes at its start (`git::hold`), so the
-  next start waits for them before it touches any repository (unix; on
-  Windows the lock ends with the service).
+  refuses every later update of those refs. A service command past its time
+  limit gets SIGTERM, with the hooks it started (its process group), on
+  which Git removes its lock files, and Git itself gets SIGKILL only 2 s
+  later; a dropped read is killed. A Smart HTTP request past its own time
+  limit has its `http-backend` killed at once.
+- **One generation of Git at a time.** A running service holds
+  `<data>/git/service.lock`, taken right after it opens the database and
+  before it touches any repository (`git::hold`), and every service-side Git
+  child, and what it starts in turn (receive-pack, hooks, a detached
+  `git gc --auto`, a backup's `git bundle`), inherits it (the runner and
+  every other child do not). The lock is free only once all of them have
+  exited, so a service that died with Git still running (a crash, `kill -9`,
+  a supervisor's deadline, the OOM killer) leaves it held: the next `serve`
+  logs that it waits and tries again every 100 ms (SIGINT or SIGTERM ends it
+  then), so a gc or a backup's bundle the killed service left running delays
+  the next start too. Only then does startup remove the lock files a killed
+  Git left in each repository (`git::remove_stale_locks`: its own, its refs'
+  and reflogs', and gc's in `objects/info` and `objects/pack`): no Git that
+  could own one runs any more. On Windows the children do not inherit the
+  lock (it ends with the service): neither this boundary nor the removal
+  applies there, and a push whose receive-pack is still running when the
+  service stops may update its refs after the next start's recovery.
 
 ## Ref changes and recovery
 
@@ -105,11 +122,9 @@ are atomic together.
    take the lock only around their own changes (`App::lock_repo`), never while
    waiting for the host. An operation never starts another one (checked in
    debug builds). A stopping service starts no new operation and waits for the
-   running ones and the Smart HTTP transfers (`App::close`): operations usually
-   take milliseconds, and host calls are bounded by their own network time
-   limits. After 60 s the service exits without them, and what they had not
-   written yet is a crash at that point, recovered as such at the next start
-   (see `docs/ci.md`, "Stopping the service").
+   running ones (`App::close`): they usually take milliseconds, and each Git
+   command and host request is bounded by its own time limit (see
+   `docs/ci.md`, "Stopping the service").
 2. **Pushes** are checked before and recorded after:
    - `pre-receive` (Branvil's script → `branvil hook pre-receive` → `POST
      /-/hooks/pre-receive` on the bound loopback address with a per-process

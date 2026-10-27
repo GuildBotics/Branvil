@@ -224,11 +224,14 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
         .map_err(|e| anyhow::anyhow!("git is not usable: {}", e.message))?;
 
     // Every managed repository carries Branvil's configuration (hooks path,
-    // hidden refs) even if it was changed on disk.
+    // hidden refs) even if it was changed on disk, and no lock file a killed
+    // Git left (no Git of a stopped service runs any more: `git::hold`).
     let repos: Vec<crate::model::Repo> =
         app.store.read(|r| r.prefix_all(store::REPOS, &[])).await?;
     for repo in &repos {
         let dir = app.git.repo_dir(&repo.path);
+        #[cfg(unix)]
+        crate::git::remove_stale_locks(&dir)?;
         app.git.configure(&dir).await?;
         app.git.set_head(&dir, &repo.default_branch).await?;
     }
@@ -241,7 +244,7 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
     );
 
     crate::ci::Ci::start(app.clone());
-    let runner = crate::ci::supervise::start(app.clone(), format!("http://{bound}"));
+    crate::ci::supervise::start(app.clone(), format!("http://{bound}"));
     crate::upstream::start(app.clone());
     crate::autoland::start(app.clone());
 
@@ -252,11 +255,11 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
     // finish) while the server keeps serving the runners and everyone else;
     // SIGINT (Ctrl-C), also during that wait, skips it. Then the event streams
     // end and the server stops accepting; requests in flight get
-    // `SHUTDOWN_GRACE` to finish, then they are dropped. The repository
+    // `SHUTDOWN_GRACE` to finish, then the stop goes on without waiting for
+    // them (their tasks live until the process exits). The repository
     // operations already started (`App::finish`), a dropped request's or a
-    // background task's included, and the Smart HTTP transfers end first, at
-    // most `STOP_WAIT`; none starts meanwhile. It exits with 3 when the stop
-    // interrupted jobs.
+    // background task's included, end first, each within its own limits; none
+    // starts meanwhile. It exits with 3 when the stop interrupted jobs.
     let (stopping, mut stopped) = tokio::sync::watch::channel(None);
     let events = app.events.clone();
     let ci = app.ci.clone();
@@ -307,29 +310,12 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
         let mut out = std::io::stdout().lock();
         let _ = writeln!(
             out,
-            "branvil stopping: waiting for the started repository operations and Git transfers to finish, at most {} s",
-            STOP_WAIT.as_secs()
+            "branvil stopping: waiting for the started repository operations to finish"
         )
         .and_then(|_| out.flush());
         drop(out);
-        tracing::info!("stopping: waiting for the started repository operations and Git transfers");
-        if tokio::time::timeout(STOP_WAIT, close).await.is_err() {
-            tracing::warn!(
-                "repository operations or Git transfers still running {} s after the server stopped; exiting without them (the next start completes or drops them)",
-                STOP_WAIT.as_secs()
-            );
-            // Not through the runtime's shutdown: dropping their tasks would
-            // kill their Git children, in their own process groups otherwise
-            // left to finish (Git killed in a ref update leaves lock files).
-            // What they had not written yet is a crash at this point: the
-            // next start waits for that Git (`git::hold`), then recovers it
-            // (the ref journal, the rescan, the gate repair, and redb's repair
-            // of an unclean shutdown). The automatic runner is stopped as the
-            // runtime's shutdown would.
-            runner.abort();
-            let _ = runner.await;
-            std::process::exit(code.into());
-        }
+        tracing::info!("stopping: waiting for the started repository operations");
+        close.await;
     }
     served?;
     Ok(code)
@@ -337,14 +323,6 @@ pub async fn serve(config: Config) -> anyhow::Result<u8> {
 
 /// How long requests in flight may take after a shutdown signal.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// How long a stop waits for the repository operations and Git transfers
-/// still running after the server stopped. Operations usually take
-/// milliseconds, and those that talk to the upstream host are bounded by their
-/// own network time limits; past this, what is left is a crash at that point.
-/// With `SHUTDOWN_GRACE` it stays within the launchd agent's `ExitTimeOut`
-/// (`scripts/serve.sh --plist`).
-const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// SIGINT and SIGTERM, taken over before `serve` starts any repository work:
 /// their default action would end the process in the middle of it.

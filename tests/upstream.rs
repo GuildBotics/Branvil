@@ -1090,8 +1090,8 @@ async fn a_pull_request_the_host_never_opened_is_left_alone_once_closed() {
     let (st, v) = publish(&w, n).await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
     refresh(&w).await;
-    let tries = gh.requests("POST", "/pulls").len();
-    assert!(tries >= 2, "retried while open: {tries}");
+    let open = gh.requests("POST", "/pulls").len();
+    assert!(open >= 2, "retried while open: {open}");
     let (st, _) = s
         .post(
             &format!("{}/pulls/{n}/close", w.repo_path()),
@@ -1100,6 +1100,10 @@ async fn a_pull_request_the_host_never_opened_is_left_alone_once_closed() {
         )
         .await;
     assert_eq!(st, StatusCode::OK);
+    // A poll the refused publish woke may still try once around the close
+    // (it read the pull request before): count from the first poll after it.
+    refresh(&w).await;
+    let tries = gh.requests("POST", "/pulls").len();
     refresh(&w).await;
     refresh(&w).await;
     assert_eq!(gh.requests("POST", "/pulls").len(), tries);

@@ -41,7 +41,7 @@ pub struct App {
     /// `quiesce` for a backup take it.
     repo_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Held (read) by every operation `finish` runs; `close` takes it for
-    /// good.
+    /// good, and none starts once it waits for it.
     operations: Arc<tokio::sync::RwLock<()>>,
     /// This app, for the tasks `finish` spawns.
     me: Weak<App>,
@@ -62,11 +62,6 @@ pub struct App {
 }
 
 pub type Shared = Arc<App>;
-
-/// Smart HTTP transfers at a time (`LimitsConfig::git_http_concurrency`).
-fn transfer_slots(config: &Config) -> u32 {
-    config.limits.git_http_concurrency.max(1) as u32
-}
 
 tokio::task_local! {
     /// Set inside the task of an operation (`App::finish`).
@@ -151,7 +146,9 @@ impl App {
             layout,
             store,
             git,
-            transfers: Arc::new(tokio::sync::Semaphore::new(transfer_slots(&config) as usize)),
+            transfers: Arc::new(tokio::sync::Semaphore::new(
+                config.limits.git_http_concurrency.max(1),
+            )),
             events,
             ci,
             upstream: crate::upstream::Upstream::new(&config.upstream),
@@ -242,10 +239,15 @@ impl App {
             IN_OPERATION.try_with(|_| ()).is_err(),
             "an operation must not start another one"
         );
-        let open = self.operations.clone().read_owned().await;
         let lock = match repo_id {
             Some(id) => Some(self.repo_lock(id).lock_owned().await),
             None => None,
+        };
+        // Never waited for while the lock is held: an operation waiting for
+        // its lock has not started, and `close` waits only for started ones.
+        let Ok(open) = self.operations.clone().try_read_owned() else {
+            drop(lock);
+            return std::future::pending().await;
         };
         let app = self.me.upgrade().expect("the app outlives its requests");
         let run = IN_OPERATION.scope((), async move {
@@ -272,19 +274,11 @@ impl App {
         Ok((repos, guards))
     }
 
-    /// Starts no operation (`finish`) and no Smart HTTP transfer from now on:
-    /// later ones wait until the process exits. Then waits until the running
-    /// ones have ended.
+    /// Starts no operation (`finish`) from now on: later ones wait until the
+    /// process exits. Then waits until the running ones have ended.
     pub async fn close(&self) {
         // Never released: the service is about to exit.
         std::mem::forget(self.operations.clone().write_owned().await);
-        if let Ok(all) = self
-            .transfers
-            .acquire_many(transfer_slots(&self.config))
-            .await
-        {
-            all.forget();
-        }
     }
 
     /// Simulates a crash at a named point when `BRANVIL_FAILPOINT` names it.
@@ -406,11 +400,31 @@ mod tests {
         assert!(running.await.unwrap().load(SeqCst));
         let after = app.finish(|_| async {});
         assert!(tokio::time::timeout(SOON, after).await.is_err());
-        let transfer = app.transfers.acquire();
+    }
+
+    #[tokio::test]
+    async fn close_does_not_wait_for_an_operation_waiting_for_its_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(temp.path());
+        // A backup holds the lock (`quiesce`); an operation waits for it.
+        let held = app.hold_lock("r").await;
+        let ran = Arc::new(AtomicBool::new(false));
+        let (a, r) = (app.clone(), Arc::clone(&ran));
+        let waiting = tokio::spawn(async move {
+            a.locked("r", move |_| async move { r.store(true, SeqCst) })
+                .await
+        });
+        tokio::time::sleep(SOON).await;
+        tokio::time::timeout(Duration::from_secs(5), app.close())
+            .await
+            .expect("close waits only for started operations");
+        drop(held);
+        tokio::time::sleep(SOON).await;
         assert!(
-            tokio::time::timeout(SOON, transfer).await.is_err(),
-            "no Smart HTTP transfer starts once closing"
+            !waiting.is_finished() && !ran.load(SeqCst),
+            "it never starts"
         );
+        waiting.abort();
     }
 
     #[cfg(debug_assertions)]

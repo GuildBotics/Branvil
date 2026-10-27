@@ -114,9 +114,8 @@ EOF
   ready() { grep -q '^branvil listening on ' "$builds/serve.out" 2>/dev/null; }
   # Stops the serve: TERM, and KILL when it has not ended 30 ticks later.
   # A serve that says it waits for its running work (its CI jobs, at most
-  # ci.stop_wait_secs, or its repository operations, at most 60 s) is waited
-  # for until it ends; one that had to interrupt jobs then (exit status 3) is
-  # told.
+  # ci.stop_wait_secs, or its repository operations) is waited for until it
+  # ends; one that had to interrupt jobs then (exit status 3) is told.
   stopped() {
     local i=0 status=0
     if [[ -z "$serve_pid" ]]; then return; fi

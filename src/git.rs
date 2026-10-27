@@ -24,6 +24,10 @@ pub const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
 /// Largest stdout a service-side command may produce (diffs are the big ones).
 const MAX_OUTPUT: usize = 64 << 20;
 
+/// How long a command stopped at its time limit gets to remove its lock files
+/// before it is killed.
+const TERM_GRACE: Duration = Duration::from_secs(2);
+
 /// The data directory's Git lock, once this process holds it as the service.
 static HELD: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
 
@@ -31,8 +35,8 @@ static HELD: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
 /// before it reads or changes any repository. Every Git it starts from then
 /// on holds it too, and so do that Git's own children (its hooks), so the lock
 /// is free only once the service and all of them have ended: Git that a
-/// stopped service left running (it stopped at its deadline, or was killed)
-/// still updates its refs, and a next service that recovered first would
+/// stopped service left running (it was killed or crashed, or a push's
+/// receive-pack or a detached gc outlived its stop) still updates its refs, and a next service that recovered first would
 /// record the opposite of what happened. That service waits for them here.
 /// On Windows the lock ends with the service.
 pub async fn hold(layout: &Layout) -> anyhow::Result<()> {
@@ -147,6 +151,46 @@ pub fn base_command_sync(global_config: &Path) -> std::process::Command {
     cmd
 }
 
+/// Removes the lock files a killed Git can leave in the repository `dir`:
+/// its own (`HEAD.lock`, `packed-refs.lock`, `config.lock`), its refs' and
+/// reflogs', and those of gc and maintenance (`objects/info`, its
+/// `commit-graphs`, `objects/pack`; the rest of `objects` is not walked).
+/// Only at startup, once no Git of a stopped service runs (`hold`): unix
+/// only, where that Git holds the lock.
+#[cfg(unix)]
+pub fn remove_stale_locks(dir: &Path) -> std::io::Result<()> {
+    fn remove(dir: &Path, deep: bool) -> std::io::Result<()> {
+        let entries = match std::fs::read_dir(dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            entries => entries?,
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                if deep {
+                    remove(&path, true)?;
+                }
+            } else if path.extension().is_some_and(|e| e == "lock") {
+                std::fs::remove_file(&path)?;
+                tracing::warn!("removed {}, left by a Git that was killed", path.display());
+            }
+        }
+        Ok(())
+    }
+    for (sub, deep) in [
+        ("", false),
+        ("refs", true),
+        ("logs", true),
+        ("objects/info", false),
+        ("objects/info/commit-graphs", false),
+        ("objects/pack", false),
+    ] {
+        remove(&dir.join(sub), deep)?;
+    }
+    Ok(())
+}
+
 impl Git {
     pub fn new(layout: Layout, concurrency: usize, timeout: Duration) -> Self {
         Self {
@@ -205,12 +249,24 @@ impl Git {
             let status = child.wait().await?;
             Ok::<_, std::io::Error>((status, out, err))
         };
-        let (status, mut out, err) = tokio::time::timeout(self.timeout, work)
-            .await
-            .map_err(|_| {
-                AppError::unavailable(format!("git {} timed out.", args.first().unwrap_or(&"")))
-            })?
-            .map_err(|e| AppError::internal(format!("git i/o: {e}")))?;
+        let Ok(done) = tokio::time::timeout(self.timeout, work).await else {
+            // SIGTERM to its group (Git and the hooks it started) lets Git
+            // remove its lock files; it is killed (on drop) only when it has
+            // not ended a moment later.
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                // SAFETY: our own child leads its process group (with the
+                // hooks it started) and is not reaped yet.
+                unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) };
+                let _ = tokio::time::timeout(TERM_GRACE, child.wait()).await;
+            }
+            return Err(AppError::unavailable(format!(
+                "git {} timed out.",
+                args.first().unwrap_or(&"")
+            )));
+        };
+        let (status, mut out, err) =
+            done.map_err(|e| AppError::internal(format!("git i/o: {e}")))?;
         let truncated = out.len() > MAX_OUTPUT;
         out.truncate(MAX_OUTPUT);
         Ok(Output {
@@ -257,8 +313,13 @@ impl Git {
     /// (Re)applies the configuration every managed repository carries.
     pub async fn configure(&self, dir: &Path) -> AppResult<()> {
         let hooks = self.layout.hooks().to_string_lossy().to_string();
+        // A stalled upstream host ends a fetch or push even when nothing
+        // times it out any more (its service is gone: `hold`).
+        let stalled = self.timeout.as_secs().to_string();
         for (key, value) in [
             ("core.hooksPath", hooks.as_str()),
+            ("http.lowSpeedLimit", "1"),
+            ("http.lowSpeedTime", stalled.as_str()),
             ("core.logAllRefUpdates", "always"),
             ("http.receivepack", "true"),
             ("http.uploadpack", "true"),
@@ -882,6 +943,94 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(git.all_refs(&dir).await.unwrap()[name], *b);
+    }
+
+    /// A command stopped at its time limit inside a ref transaction (a hook
+    /// holds it with the ref's lock taken) removes its lock file, and the
+    /// hook stops with it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_stopped_at_its_time_limit_leaves_no_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let layout = Layout::new(&temp.path().join("service"));
+        layout.create().unwrap();
+        // Long enough for Git to reach its hook on a loaded runner.
+        let git = Git::new(layout.clone(), 2, Duration::from_secs(5));
+        let dir = temp.path().join("demo.git");
+        git.init_bare(&dir, "main").await.unwrap();
+        let blob = git
+            .run_ok(Some(&dir), &["hash-object", "-w", "--stdin"])
+            .await
+            .unwrap();
+        let reached = temp.path().join("reached");
+        let hook = layout.hooks().join("reference-transaction");
+        // `reached` holds the hook's pid, which `exec` gives to the sleep.
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\n[ \"$1\" = prepared ] || exit 0\necho $$ >'{0}.tmp'\nmv '{0}.tmp' '{0}'\nexec sleep 30\n",
+                reached.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let name = "refs/branvil/x";
+        assert!(
+            !git.update_ref(&dir, name, &blob, ZERO_SHA, "test")
+                .await
+                .unwrap()
+        );
+        let sleep: libc::pid_t = std::fs::read_to_string(&reached)
+            .expect("Git reached the hook before its time limit")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!dir.join("refs/branvil/x.lock").exists());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // Gone, or a zombie no one has reaped yet (as under a PID 1 that
+        // does not reap).
+        let running = || {
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &sleep.to_string()])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&ps.stdout);
+            !stat.trim().is_empty() && !stat.trim_start().starts_with('Z')
+        };
+        while running() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hook outlived Git"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_locks_are_removed_where_git_leaves_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let stale = [
+            "HEAD.lock",
+            "refs/heads/feature/x.lock",
+            "logs/refs/heads/main.lock",
+            "objects/info/commit-graphs/commit-graph-chain.lock",
+            "objects/pack/pack-1.idx.lock",
+        ];
+        let kept = ["objects/ab/cdef.lock", "refs/heads/main"];
+        for file in stale.iter().chain(&kept) {
+            std::fs::create_dir_all(dir.join(file).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        remove_stale_locks(dir).unwrap();
+        for file in stale {
+            assert!(!dir.join(file).exists(), "{file}");
+        }
+        for file in kept {
+            assert!(dir.join(file).exists(), "{file}");
+        }
     }
 
     #[tokio::test]

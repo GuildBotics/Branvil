@@ -1093,6 +1093,10 @@ class ServeScriptTests(ScriptTestCase):
     def restarted_with(self, **settings):
         """Kills the running fake serve, which scripts/serve.sh starts again
         with these settings; returns its pid."""
+        # The first update round starts as soon as the service is ready, by
+        # reaching it (`branvil member list`); a kill then fails that round,
+        # which tells the owner. Its next step is the fetch from the host.
+        self.wait_until(lambda: self.server.fetches, self.runs_watcher)
         first = self.service_pid()
         self.control(**settings)
         os.kill(first, signal.SIGKILL)

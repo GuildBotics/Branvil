@@ -203,9 +203,7 @@ async fn ctrl_c_during_a_merge_waits_for_it() {
         .line_within(std::time::Duration::from_secs(10))
         .expect("a stop that waits says so");
     assert!(
-        line.starts_with(
-            "branvil stopping: waiting for the started repository operations and Git transfers"
-        ),
+        line.starts_with("branvil stopping: waiting for the started repository operations"),
         "{line}"
     );
     assert!(w.server.running(), "the stop waits for the merge");
@@ -223,8 +221,7 @@ async fn ctrl_c_during_a_merge_waits_for_it() {
 }
 
 /// The service exits while its Git, in a group of its own, still holds a
-/// merge's base in the ref update (as at the end of its stop's 60 s, or when
-/// killed), and a supervisor that waited only for the service's own exit
+/// merge's base in the ref update (it was killed), and a supervisor that waited only for the service's own exit
 /// starts the next one at once. The next start waits for that Git before it
 /// touches any repository: the merge is then recorded as Git did it, on
 /// another base than the default branch (whose recovery would otherwise drop
@@ -343,6 +340,92 @@ async fn the_next_start_waits_for_the_git_a_stopped_service_left_running() {
         assert!(!bare.join(format!("{refname}.lock")).exists());
         assert!(!bare.join("HEAD.lock").exists());
     }
+}
+
+/// The service is killed while a push's Git holds the branch's lock: the next
+/// service waits for it (it never takes the lock for a stale one), the push
+/// lands, and the next service's startup rescan records it: the open pull
+/// request of that branch shows the activity.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_push_outlives_its_killed_service() {
+    let mut w = World::new().await;
+    w.push_change("crossing", "c.txt", "one\n");
+    let p = w.open_pull("crossing", json!([])).await;
+    let pull = format!("{}/pulls/{}", w.repo_path(), p["number"]);
+    let before = w.server.ok(&pull, &w.aiko).await["updated_at"].clone();
+    std::fs::write(w.work.join("c.txt"), "two\n").unwrap();
+    git_ok(&w.work, &["commit", "-qam", "two"]);
+    let sha = git_ok(&w.work, &["rev-parse", "HEAD"]);
+    let hold = RefHold::new(&w, "refs/heads/crossing");
+    let (work, aiko) = (w.work.clone(), w.aiko.clone());
+    let push = std::thread::spawn(move || {
+        git_as(
+            &work,
+            "aiko",
+            &aiko,
+            &["push", "-q", "origin", "HEAD:refs/heads/crossing"],
+        )
+    });
+    hold.wait().await;
+    // Only the service ends; its session is not drained.
+    w.server.signal("KILL");
+    while w.server.running() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let releasing = {
+        let log = w.dir.path().join("serve.log");
+        let released = hold.released_path();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("waiting for the Git a stopped service started to end")
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the next start did not wait"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::fs::write(released, "").unwrap();
+        })
+    };
+    let next = Server::start_with(w.dir.path(), &[]);
+    let stopped = std::mem::replace(&mut w.server, next);
+    releasing.join().unwrap();
+    drop(stopped);
+    let _ = push.join();
+    assert_eq!(bare_ref(&w, "refs/heads/crossing"), sha);
+    let after = w.server.ok(&pull, &w.aiko).await;
+    assert_ne!(
+        after["updated_at"], before,
+        "the rescan recorded the push: {after}"
+    );
+}
+
+/// Lock files a killed Git left (no Git runs any more) are removed at start:
+/// the service starts, and the base can be merged.
+#[cfg(unix)]
+#[tokio::test]
+async fn lock_files_a_killed_git_left_are_removed_at_start() {
+    let mut w = World::new().await;
+    let (pull, head, main) = ready_pull(&w).await;
+    w.server.stop();
+    let bare = w.server.data.join("repos/acme/demo.git");
+    for lock in ["HEAD.lock", "refs/heads/main.lock"] {
+        std::fs::write(bare.join(lock), "").unwrap();
+    }
+    w.restart(&[]);
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{pull}/merge"),
+            &w.owner,
+            json!({"expected_head": head, "expected_base": main}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
 }
 
 #[tokio::test]

@@ -306,9 +306,10 @@ took effect. Write files as above, never with a plain `>`.
 
 - Start, restart, stop the agent. A restart also checks for an update at once
   and applies changes to `scripts/serve.sh`. A stop or restart stops the
-  service at once (INT), also while it waits for its running CI jobs: the
-  automatic runner's jobs are interrupted, and queued again in their place,
-  at the service's next start. During an update it also
+  service with INT, also while it waits for its running CI jobs: it waits
+  only for the repository operations already started, and the automatic
+  runner's jobs are interrupted, and queued again in their place, at the
+  service's next start. During an update it also
   waits for the update's running step; a step longer
   than the agent's `ExitTimeOut` (120 seconds, a build for instance) is killed
   then, and the next round runs that update again.
