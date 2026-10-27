@@ -211,6 +211,17 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
 });
 
 for (const host of [false, true]) {
+  it.each([true, false])(`accepts only a service path skip for ${host ? "publication" : "merge"} (service=%s)`, async (service) => {
+    const path_skip = service ? {paths:["src/**"], bases:[{pull:3,base:"main",base_sha:BASE,merge_base:BASE}]} : null;
+    fakeApi(routes(landing({state:"passed",first:{...landing().first!, next:host ? "owner_publish" : "owner_merge"}}), {
+      "GET /api/v1/repos/acme/demo": json(200, {...REPO,upstream:host ? REPO.upstream : null}),
+      [`GET ${P}/checks`]: json(200,{head_sha:HEAD,base_sha:BASE,checks:[{name:"test",status:"completed",conclusion:"skipped",path_skip}],checks_expected:true}),
+    }));
+    renderApp("/acme/demo/-/pulls/3");
+    const action = await screen.findByRole("button",{name:host ? "Publish to GitHub" : dictionaries.en["merge.submit"]});
+    await screen.findByText(service ? "test · Skipped (no changes)" : "test · Failed");
+    if (service) expect(action).toBeEnabled(); else expect(action).toBeDisabled();
+  });
   it.each([
     { why: "not queued", l: null },
     { why: "waiting", l: landing({ state: "waiting", position: 2 }) },

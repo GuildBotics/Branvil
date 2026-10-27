@@ -645,6 +645,7 @@ mod tests {
         fs::write(work.join("Cargo.lock"), "v1").unwrap();
         fs::write(work.join("target/a.o"), "object").unwrap();
         let job = JobDef {
+            paths: Vec::new(),
             name: "t".into(),
             image: "alpine".into(),
             commands: vec!["true".into()],

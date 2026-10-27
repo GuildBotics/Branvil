@@ -365,7 +365,7 @@ impl Git {
         Ok(Err(files))
     }
 
-    /// A head already containing the base needs no new commit. Otherwise,
+    /// When allowed by the caller, a head containing the base needs no new commit. Otherwise,
     /// creates the merge result with base first in its parent list. Identity
     /// is explicit because service Git inherits no author configuration.
     pub async fn gate_commit(
@@ -374,8 +374,10 @@ impl Git {
         base: &str,
         head: &str,
         number: u64,
+        reuse_head: bool,
     ) -> AppResult<GateCommit> {
-        if self.is_ancestor(dir, base, head).await? {
+        let contains_base = self.is_ancestor(dir, base, head).await?;
+        if contains_base && reuse_head {
             let tree = self
                 .run_ok(Some(dir), &["rev-parse", &format!("{head}^{{tree}}")])
                 .await?;
@@ -384,9 +386,14 @@ impl Git {
                 tree,
             });
         }
-        let tree = match self.merge_tree(dir, base, head).await? {
-            Ok(tree) => tree,
-            Err(files) => return Ok(GateCommit::Conflicts { files }),
+        let tree = if contains_base {
+            self.run_ok(Some(dir), &["rev-parse", &format!("{head}^{{tree}}")])
+                .await?
+        } else {
+            match self.merge_tree(dir, base, head).await? {
+                Ok(tree) => tree,
+                Err(files) => return Ok(GateCommit::Conflicts { files }),
+            }
         };
         let out = self
             .run_env(
@@ -763,12 +770,32 @@ mod tests {
         let initial = commit_file(&git, &work, "conflicted file\n.txt", "initial\n").await;
         let dir = work.join(".git");
         let head = commit_file(&git, &work, "feature.txt", "feature\n").await;
-        let GateCommit::Ready { sha, .. } =
-            git.gate_commit(&dir, &initial, &head, 7).await.unwrap()
+        let GateCommit::Ready { sha, .. } = git
+            .gate_commit(&dir, &initial, &head, 7, true)
+            .await
+            .unwrap()
         else {
             panic!("fast-forward head conflicts");
         };
         assert_eq!(sha, head, "an up-to-date head creates no commit");
+        let GateCommit::Ready { sha: forced, tree } = git
+            .gate_commit(&dir, &initial, &head, 7, false)
+            .await
+            .unwrap()
+        else {
+            panic!("forced gate conflicts")
+        };
+        assert_ne!(forced, head);
+        assert_eq!(
+            tree,
+            git.run_ok(Some(&dir), &["rev-parse", &format!("{head}^{{tree}}")])
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            git.commit_info(&dir, &forced).await.unwrap().unwrap().3,
+            vec![initial.clone(), head.clone()]
+        );
         git.run_ok(Some(&dir), &["update-ref", "refs/heads/main", &initial])
             .await
             .unwrap();
@@ -779,7 +806,8 @@ mod tests {
         .await
         .unwrap();
         let base = commit_file(&git, &work, "main.txt", "main\n").await;
-        let GateCommit::Ready { sha, tree } = git.gate_commit(&dir, &base, &head, 7).await.unwrap()
+        let GateCommit::Ready { sha, tree } =
+            git.gate_commit(&dir, &base, &head, 7, true).await.unwrap()
         else {
             panic!("independent changes conflict");
         };
@@ -821,7 +849,7 @@ mod tests {
         .unwrap();
         let head = commit_file(&git, &work, "conflicted file\n.txt", "head\n").await;
         assert_eq!(
-            git.gate_commit(&dir, &base, &head, 7).await.unwrap(),
+            git.gate_commit(&dir, &base, &head, 7, true).await.unwrap(),
             GateCommit::Conflicts {
                 files: vec!["conflicted file\n.txt".into()]
             }

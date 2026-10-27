@@ -4,7 +4,7 @@ Branvil runs a small CI of its own: a pipeline file in the repository, a
 persistent queue in the service, and a runner process that executes each job
 in a throwaway microVM. Its results are the checks of `GET
 /api/v1/repos/{repo}/pulls/{n}/checks` and the merge gate (every required check
-must have succeeded on the exact head).
+must have succeeded on the gate; the head also accepts service path skips).
 
 ```
 git push ─▶ branvil serve ─ register run (pipeline from the commit) ─────────▶ redb queue
@@ -22,6 +22,7 @@ version = 1                       # optional; only 1 exists
 name = "test"                     # [A-Za-z0-9_.-]{1,64}, not "pipeline", unique
 image = "docker.io/library/alpine:3.22"   # [registry/]name[:tag], no digest
 commands = ["./scripts/test.sh", "make lint"]   # 1-64 commands, each run by /bin/sh -c
+paths = ["src/**", "tests/*.rs", "Cargo.lock"]  # optional; empty/omitted runs every change
 timeout_secs = 600                # optional, 1-86400; default the runner's time limit
 artifacts = [{ name = "report", paths = ["out/report/", "coverage.xml"] }]   # up to 16
 cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # optional
@@ -36,6 +37,12 @@ cache = { paths = ["target"], key_files = ["Cargo.lock"] }                    # 
 - Jobs of one run are queued together; a runner runs queued jobs, of any
   run, up to `ci.executor.max_jobs` at once, each in a microVM of its own
   (there are no dependencies between jobs).
+- `paths` selects PR-head jobs using Git's pathspec glob rules (up to 32
+  relative paths of at most 512 bytes; no `:`, `\\`, NUL, empty, `.` or `..`
+  components). `**` matches recursively; `*` does not cross directories.
+  Matching is Git's `diff-tree -r --quiet --no-renames` from merge-base to
+  head, including deletions and both sides of renames. Empty `paths` runs
+  every time. Changing `paths` changes the job definition used for reuse.
 - Validation is strict: an unknown key (`cpus` and `memory_mib` included,
   with a reason of their own: they are the runner's), a value out of range, a
   path that is absolute or contains `..`, an image reference that is not
@@ -109,15 +116,39 @@ What a job's commands find, as on common CI services:
 
 ## Trust: where the pipeline comes from
 
-Every commit runs its own pipeline: a tip of the default branch and the head
+Every commit runs its own pipeline: a tip of a protected branch and the head
 of an open pull request alike read `.branvil/ci.toml` from that commit. A pull
 request that changes the pipeline runs the changed pipeline as its checks, so
 a mistake in it shows before the merge. The first pull request in each
 repository/base landing queue also checks the combination of base and head.
-When head contains base, its existing run is the gate. Otherwise Branvil
+PR-head jobs with `paths` run if any matching file changed since the
+merge-base with the current base tip of any open PR sharing that head SHA.
+A changed `.branvil/ci.toml`, a missing base, or no merge-base runs all jobs.
+The run saves each PR's base name, tip and merge-base and its skipped job
+names. Re-registration updates this snapshot when PRs or base tips change;
+unchanged inputs do not create new attempts. Queue admission after waiting
+uses the saved selection and counts only jobs that actually run. Protected
+branches and gates always run every job; a protected registration of a SHA
+that had path skips queues those jobs too.
+
+Service path skips are completed `skipped` attempts with `path_skip`
+metadata and a `[branvil] skipped: no file matching paths changed since …`
+log line naming the PR/base/merge-base snapshot. They satisfy required head
+checks, never supply reusable results or duration estimates, and a manual
+retry executes the job. A runner's `skipped` has no `path_skip` and does not
+satisfy a required check.
+
+When head contains base and its selection skips no jobs, its existing run is
+the gate. Otherwise Branvil
 creates a commit with parents `[base, head]` and runs that commit's pipeline
 through `refs/branvil/gate/<number>`. A conflict becomes a failed `gate` check;
-CI jobs appear as `gate/<job>` on the pull request. Approvals still apply to
+CI jobs appear as `gate/<job>` on the pull request. An up-to-date head with
+path skips gets a gate with the head's tree and parents `[base, head]`. If
+that tree already equals the base's, it leaves as `already_in_base`.
+Gate checks require actual success; jobs
+that really succeeded on head can be reused for the identical tree. The PR
+stays in its queue while the skipped head jobs execute at the gate.
+Approvals still apply to
 the original head. Gate checks, including retries after leaving the queue,
 remain visible only while the entry's `head_sha` matches the pull request
 checks response's `head_sha`, regardless of the entry's state. Once the head
@@ -190,7 +221,7 @@ shows its head's, a commit's page that commit's, and a repository's page its def
 
 | Attempt status | Conclusion (when completed) |
 | --- | --- |
-| `queued` → `in_progress` → `completed` | `success`, `failure` (a command exited non-zero), `timed_out`, `cancelled`, `startup_failure` (the commands never started), `skipped` (accepted from a runner, not produced by this one) |
+| `queued` → `in_progress` → `completed` | `success`, `failure` (a command exited non-zero), `timed_out`, `cancelled`, `startup_failure` (the commands never started), `skipped` (a service path decision, or accepted from a runner; this runner does not produce it) |
 
 What registers a run:
 

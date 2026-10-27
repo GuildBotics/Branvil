@@ -322,7 +322,7 @@ async fn eligibility(
         checks
             .checks
             .iter()
-            .any(|c| c.name == *name && c.succeeded())
+            .any(|c| c.name == *name && c.head_satisfied())
     }) {
         return Ok(Some(reason(
             "head_checks",
@@ -845,6 +845,7 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
                             &e.base_sha,
                             &e.head_sha,
                             e.number,
+                            !app.ci.needs_gate_commit(repo, &e.head_sha).await?,
                         )
                         .await?
                 }
@@ -1082,6 +1083,7 @@ mod tests {
                     queue::register(
                         w,
                         queue::Registration {
+                            selection: None,
                             repo: repo.id.clone(),
                             repo_path: repo.path.clone(),
                             sha: sha.into(),
@@ -1090,6 +1092,7 @@ mod tests {
                             protected: false,
                             pipeline: queue::PipelineState::Jobs {
                                 jobs: vec![JobDef {
+                                    paths: Vec::new(),
                                     name: "test".into(),
                                     image: "alpine".into(),
                                     commands: vec!["true".into()],

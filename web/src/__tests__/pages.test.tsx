@@ -19,6 +19,28 @@ const SHELL = {
   "GET /api/v1/members": page([]),
 };
 
+it.each(["en", "ja"] as const)("explains service path skips in the check and attempt (%s)", async (lang) => {
+  const sha = "d".repeat(40), base = "b".repeat(40), mergeBase = "c".repeat(40);
+  const path_skip = {paths:["src/**", "tests/*.rs"], bases:[{pull:3,base:"main",base_sha:base,merge_base:mergeBase}]};
+  fakeApi({...SHELL,
+    [`GET /api/v1/repos/acme/demo/commits/${sha}`]:json(200,{sha,message:"Documentation",author:"Test",authored_at:"2026-10-27T00:00:00Z",parents:[base]}),
+    [`GET /api/v1/repos/acme/demo/commits/${sha}/checks`]:json(200,{sha,checks_expected:true,checks:[{name:"test",status:"completed",conclusion:"skipped",path_skip,attempt_id:"att_skip",attempt:1}]}),
+    "GET /api/v1/repos/acme/demo/jobs/att_skip":json(200,{id:"att_skip",purpose:"check",job:"test",attempt:1,sha,status:"completed",conclusion:"skipped",path_skip,artifact_names:[],details:null}),
+    "GET /api/v1/repos/acme/demo/jobs/att_skip/log":json(200,{log:"[branvil] skipped: no file matching paths changed since merge-base",log_bytes:70,truncated:false}),
+  });
+  const user = userEvent.setup();
+  renderApp(`/acme/demo/-/commits/${sha}`,lang);
+  const label = lang === "ja" ? "省略（変更なし）" : "Skipped (no changes)";
+  expect(await screen.findByText(label)).toBeInTheDocument();
+  expect(screen.getByText(/src\/\*\*, tests\/\*\.rs/)).toBeInTheDocument();
+  expect(screen.getByTitle(mergeBase).closest("a")).toHaveAttribute("href",`/acme/demo/-/commits/${mergeBase}`);
+  await user.click(screen.getByRole("button",{name:lang === "ja" ? "チェック test を開く" : "Open check test"}));
+  const drawer = await screen.findByRole("dialog");
+  expect(await within(drawer).findByText(/src\/\*\*, tests\/\*\.rs/)).toBeInTheDocument();
+  expect(within(drawer).getByText(label)).toBeInTheDocument();
+  expect(within(drawer).getByRole("button",{name:lang === "ja" ? "再実行" : "Retry"})).toBeEnabled();
+});
+
 /** The page's change stream, opened and dropped by the test. */
 class FakeEventSource {
   static readonly CONNECTING = 0;

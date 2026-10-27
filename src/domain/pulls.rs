@@ -1786,7 +1786,7 @@ pub async fn check_landable(
             !checks
                 .checks
                 .iter()
-                .any(|c| &c.name == *name && c.succeeded())
+                .any(|c| &c.name == *name && c.head_satisfied())
         })
         .map(String::as_str)
         .collect();
