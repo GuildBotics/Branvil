@@ -336,6 +336,9 @@ export const ja: Record<MessageKey, string> = {
   "repo.create": "リポジトリを作成",
 
   "settings.sections": "設定の項目",
+  "settings.display": "表示",
+  "settings.displayHelp": "表示設定はこのブラウザに保存されます。",
+  "settings.showBoard": "サイドメニューにタスクボードを表示する",
   "settings.repositories": "リポジトリ",
   "settings.members": "メンバー",
   "settings.conflict": "フォームを開いた後に他の人が変更したため、保存していません。",

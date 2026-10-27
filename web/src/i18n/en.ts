@@ -334,6 +334,9 @@ export const en = {
   "repo.create": "Create repository",
 
   "settings.sections": "Settings sections",
+  "settings.display": "Display",
+  "settings.displayHelp": "Display preferences are saved in this browser.",
+  "settings.showBoard": "Show the task board in the sidebar",
   "settings.repositories": "Repositories",
   "settings.members": "Members",
   "settings.conflict": "Someone else changed this since the form was filled; nothing was saved.",

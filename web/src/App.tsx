@@ -12,6 +12,7 @@ import { useChangeStream } from "./query/events";
 import { useSession } from "./query/hooks";
 import { Link, navigate, usePathname } from "./router/Router";
 import { href, parseRoute, type Route } from "./router/routes";
+import { useStored } from "./storage";
 import { theme } from "./theme";
 import { AuthorizeView } from "./views/AuthorizeView";
 import { BoardView } from "./views/BoardView";
@@ -66,24 +67,40 @@ function SignedIn({ route }: { route: AppRoute }) {
   const client = useQueryClient();
   const streamLost = useChangeStream(client, true);
   const current = useCurrentWorkspace(route);
+  const [storedBoard, setStoredBoard] = useStored("branvil.sidebar.showBoard");
+  const showBoard = storedBoard !== "false";
   return (
     <main className="shell">
-      <Sidebar route={route} workspace={current.name} workspaces={current.names} />
+      <Sidebar route={route} workspace={current.name} workspaces={current.names} showBoard={showBoard} />
       <section className="workspace">
         <AlertBand streamLost={streamLost} />
-        <RouteView route={route} workspace={current.name} workspaces={current.names} />
+        <RouteView
+          route={route}
+          workspace={current.name}
+          workspaces={current.names}
+          showBoard={showBoard}
+          setShowBoard={(value) => setStoredBoard(String(value))}
+        />
       </section>
     </main>
   );
 }
 
-function RouteView({ route, workspace, workspaces }: { route: AppRoute; workspace: string | null; workspaces: string[] | null }) {
+function RouteView({ route, workspace, workspaces, showBoard, setShowBoard }: {
+  route: AppRoute;
+  workspace: string | null;
+  workspaces: string[] | null;
+  showBoard: boolean;
+  setShowBoard: (value: boolean) => void;
+}) {
   const t = useT();
   switch (route.name) {
     case "home":
       return <Home workspace={workspace} workspaces={workspaces} />;
     case "settings":
-      return <SettingsView section={route.section} workspace={workspace} repo={route.repo ?? null} />;
+      return (
+        <SettingsView section={route.section} workspace={workspace} repo={route.repo ?? null} showBoard={showBoard} setShowBoard={setShowBoard} />
+      );
     case "workspace":
       return (
         <TicketDrawer key={route.workspace}>

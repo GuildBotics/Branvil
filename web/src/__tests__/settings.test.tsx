@@ -35,6 +35,50 @@ async function addPills(user: ReturnType<typeof userEvent.setup>, label: string 
 }
 
 describe("settings", () => {
+  it.each(["en", "ja"] as const)("updates the sidebar immediately and remembers the display preference (%s)", async (language) => {
+    fakeApi({
+      ...SHELL,
+      "GET /api/v1/session": json(200, { ...SESSION, me: { ...ME, kind: "agent" } }),
+      "GET /api/v1/members": page([]),
+    });
+    const user = userEvent.setup();
+    const labels = language === "ja"
+      ? { main: "メイン", display: "表示", flow: "タスクフロー", board: "タスクボード", toggle: "サイドメニューにタスクボードを表示する" }
+      : { main: "Main", display: "Display", flow: "Task flow", board: "Task board", toggle: "Show the task board in the sidebar" };
+    const first = renderApp("/-/settings/members", language);
+    const nav = await screen.findByRole("navigation", { name: labels.main });
+    await within(nav).findByRole("link", { name: labels.board });
+    expect(within(nav).getAllByRole("link").slice(0, 2).map((link) => link.textContent)).toEqual([labels.flow, labels.board]);
+    await user.click(await screen.findByRole("link", { name: labels.display }));
+    const toggle = await screen.findByRole("switch", { name: labels.toggle });
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    expect(within(nav).queryByRole("link", { name: labels.board })).not.toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: labels.flow })).toHaveAttribute("href", "/acme/-/relations");
+    first.unmount();
+
+    const second = renderApp("/-/settings/display", language);
+    const restored = await screen.findByRole("switch", { name: labels.toggle });
+    expect(restored).not.toBeChecked();
+    const restoredNav = screen.getByRole("navigation", { name: labels.main });
+    await within(restoredNav).findByRole("link", { name: labels.flow });
+    expect(within(restoredNav).queryByRole("link", { name: labels.board })).not.toBeInTheDocument();
+    await user.click(restored);
+    expect(within(restoredNav).getByRole("link", { name: labels.board })).toHaveAttribute("href", "/acme");
+    second.unmount();
+
+    renderApp("/-/settings/display", language);
+    expect(await screen.findByRole("switch", { name: labels.toggle })).toBeChecked();
+  });
+
+  it("offers display settings before any workspace exists", async () => {
+    fakeApi({ ...SHELL, "GET /api/v1/workspaces": page([]) });
+    renderApp("/-/settings/display");
+    expect(await screen.findByRole("switch", { name: "Show the task board in the sidebar" })).toBeChecked();
+    const sections = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(sections).getByRole("link", { name: "Display" })).toHaveAttribute("aria-current", "page");
+  });
+
   it("shows the workspace's repositories apart from Branvil's members", async () => {
     fakeApi({
       ...SHELL,

@@ -46,10 +46,12 @@ export function Sidebar({
   route,
   workspace,
   workspaces,
+  showBoard,
 }: {
   route: Route;
   workspace: string | null;
   workspaces: string[] | null;
+  showBoard: boolean;
 }) {
   const { t, lang, setLang } = useI18n();
   const [creating, setCreating] = useState(false);
@@ -86,12 +88,14 @@ export function Sidebar({
       <nav className="nav" aria-label={t("nav.main")}>
         {workspace && (
           <>
-            <NavItem to={href.workspace(workspace)} active={page === "board"} icon={<SquareKanban size={18} />}>
-              {t("nav.board")}
-            </NavItem>
             <NavItem to={href.relations(workspace)} active={page === "relations"} icon={<Workflow size={18} />}>
               {t("nav.relations")}
             </NavItem>
+            {showBoard && (
+              <NavItem to={href.workspace(workspace)} active={page === "board"} icon={<SquareKanban size={18} />}>
+                {t("nav.board")}
+              </NavItem>
+            )}
             <NavItem to={href.pulls(workspace)} active={page === "pulls"} icon={<GitPullRequest size={18} />}>
               {t("nav.pulls")}
             </NavItem>
