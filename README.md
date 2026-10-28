@@ -155,8 +155,9 @@ in each repository/base queue gets a gate: the head itself when it contains
 the base, otherwise a merge commit of base and head whose required checks
 must succeed. The head and its approvals stay unchanged. The next pull request
 waits until the first merges or leaves the queue, including while GitHub's
-merge is pending. The pull request's landing card and the repository's landing
-queue show the order and what the first is waiting for. Keeping a pull
+merge is pending. A pull request's page shows where it is on its way into the
+base and whose turn it is; the repository's landing queue shows the order and
+what the first is waiting for. Keeping a pull
 request a draft holds it. A runner uses only the runner API.
 
 Under Settings → Members → a member → Reviewers, the owner chooses who is

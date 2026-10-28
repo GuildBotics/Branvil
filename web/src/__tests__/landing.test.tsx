@@ -39,11 +39,19 @@ function routes(l: Landing | null, extra: Parameters<typeof fakeApi>[0] = {}) {
   };
 }
 
+const STOP: Record<LandingNext, string> = {
+  gate: "gate", publishing: "host", owner_publish: "host", host_checks: "host", host_closed: "host", owner_fix_auto: "host",
+  owner_merge_host: "merge", auto_merge: "merge", owner_merge: "merge", following: "base", owner_fix_following: "base",
+};
+const stops = (journey: HTMLElement, state?: string) => [...journey.querySelectorAll<HTMLElement>(state ? `[data-stop][data-state="${state}"]` : "[data-stop]")].map((e) => e.dataset.stop);
+const badges = (journey: HTMLElement) => [...journey.querySelectorAll(".mantine-Badge-root")].map((e) => e.textContent);
+const checksLoaded = async () => within(await screen.findByRole("region", { name: "Checks" })).findByTitle(HEAD);
 const NEXT: LandingNext[] = ["gate", "publishing", "owner_publish", "host_checks", "owner_merge_host", "following", "owner_fix_following", "host_closed", "owner_fix_auto", "auto_merge", "owner_merge"];
 const entry = (next: LandingNext, extra: Partial<Landing> = {}) => landing({ first: { ...landing().first!, next, next_detail: "Diagnostic detail" }, ...extra });
 
 describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
   const words = dictionaries[lang];
+  const journeyName = () => words["landing.journey"].replace("{base}", "main");
   const label = (next: LandingNext, base = "main") => words[`landing.next.${next}`].replaceAll("{host}", "GitHub").replaceAll("{base}", base);
   it.each(NEXT)("places the leader for %s and links only human actions", async (next) => {
     fakeApi(routes(entry(next)));
@@ -70,15 +78,12 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
     expect(queue.querySelector('[data-stage="transit"] [data-pr="3"]')).toBeInTheDocument();
     expect(queue.querySelector('[data-stage="base"]')).toHaveTextContent("release");
   });
-  it.each([true, false].flatMap((host) => ["repo", "pull"].map((view) => ({host, view}))))("keeps the base name outside its marker ($view, upstream=$host)", async ({host, view}) => {
+  it.each([true, false])("keeps the base name outside its marker (upstream=%s)", async (host) => {
     const base = "release/next";
     const l = entry(host ? "owner_merge_host" : "owner_merge", {base});
-    fakeApi(routes(l, {
-      "GET /api/v1/repos/acme/demo": json(200, {...REPO, upstream:host ? REPO.upstream : null}),
-      [`GET ${P}`]: json(200, pull({base, landing:l, approvals:1})),
-    }));
-    renderApp(view === "repo" ? "/acme/demo" : "/acme/demo/-/pulls/3", lang);
-    const region = await screen.findByRole("region", {name:words[view === "repo" ? "landing.queue" : "landing.gate"]});
+    fakeApi(routes(l, {"GET /api/v1/repos/acme/demo": json(200, {...REPO, upstream:host ? REPO.upstream : null})}));
+    renderApp("/acme/demo", lang);
+    const region = await screen.findByRole("region", {name:words["landing.queue"]});
     await waitFor(() => expect(region.querySelector('[data-stage="base"]')).toBeInTheDocument());
     const stop = region.querySelector('[data-stage="base"]') as HTMLElement;
     expect(stop.querySelector(".landing-marker")).not.toHaveTextContent(base);
@@ -124,27 +129,76 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
     expect(within(queue).queryByText("Service English")!==null).toBe(code==="publish_stopped");
     if(code==="already_in_base") expect(within(queue).getByText(words["landing.closePull"])).toBeInTheDocument();
   });
-  it("highlights this PR and shows every head check result", async () => {
-    fakeApi(routes(entry("owner_merge_host"),{
+  it.each(NEXT)("places this pull request at the stop %s names and links only host actions", async (next) => {
+    fakeApi(routes(entry(next)));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(label(next))).toBeInTheDocument();
+    expect(within(journey).getByText("Diagnostic detail")).toBeInTheDocument();
+    const stop = journey.querySelector('[aria-current="step"]') as HTMLElement;
+    expect(stop).toHaveAttribute("data-stop", STOP[next]);
+    expect(stop).toHaveAttribute("data-state", next.startsWith("owner_") || next === "host_closed" ? "turn" : "now");
+    expect(stops(journey)).toEqual(["conditions", "queue", "gate", "host", "merge", "base"]);
+    expect(stops(journey, "done")).toEqual(stops(journey).slice(0, stops(journey).indexOf(STOP[next])));
+    const links = within(journey).queryAllByRole("link");
+    expect(links.map((a) => a.getAttribute("href"))).toEqual(["owner_merge_host", "host_closed"].includes(next) ? ["https://example.test/pulls/3"] : []);
+  });
+  it.each(["auto_merge", "owner_merge", "owner_fix_auto"] as const)("merges here without an upstream (%s)", async (next) => {
+    fakeApi(routes(entry(next), { "GET /api/v1/repos/acme/demo": json(200, { ...REPO, upstream: null }) }));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    await waitFor(() => expect(journey.querySelector('[aria-current="step"]')).toHaveAttribute("data-stop", "merge"));
+    expect(stops(journey)).toEqual(["conditions", "queue", "gate", "merge", "base"]);
+  });
+  it("names only what the head still needs to join the queue", async () => {
+    fakeApi(routes(null, {
       "GET /api/v1/repos/acme/demo":json(200,{...REPO,required_checks:["ok","fail","run","absent"]}),
+      [`GET ${P}`]: json(200, pull({ landing: null, approvals: 0, draft: true })),
       [`GET ${P}/checks`]:json(200,{head_sha:HEAD,checks:[{name:"ok",status:"completed",conclusion:"success"},{name:"fail",status:"completed",conclusion:"failure"},{name:"run",status:"queued"}]}),
     }));
     renderApp("/acme/demo/-/pulls/3",lang);
-    const gate=await screen.findByRole("region",{name:words["landing.gate"]});
-    expect(gate.querySelector('.landing-pr-highlight[data-pr="3"]')).toBeInTheDocument();
-    const checks=screen.getByRole("region",{name:words["landing.headChecks"]});
-    for(const [name,status] of [["ok","success"],["fail","failure"],["run","running"],["absent","missing"]] as const) expect(await within(checks).findByText(`${name} · ${words[`landing.check.${status}`]}`)).toBeInTheDocument();
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(words["landing.missing"])).toBeInTheDocument();
+    await within(journey).findByText(`fail · ${words["landing.check.failure"]}`);
+    expect(badges(journey)).toEqual([words["pull.draft"], `fail · ${words["landing.check.failure"]}`, `run · ${words["landing.check.running"]}`, `absent · ${words["landing.check.missing"]}`, words["merge.approvals"].replace("{count}", "0").replace("{required}", "1")]);
+    expect(journey.querySelector('[aria-current="step"]')).toHaveAttribute("data-state", "turn");
+    expect(within(journey).getByText(words["landing.notQueued"])).toBeInTheDocument();
   });
-  it("keeps a distant waiting PR visible and emphasizes only that PR", async () => {
-    const leader = entry("host_checks", {number:1, first:{...entry("host_checks").first!,number:1}});
-    const waiting = [2,4,5,3].map((n,i)=>landing({number:n,title:`Title ${n}`,state:"waiting",position:i+2,first:leader.first}));
-    const current = waiting.at(-1)!;
-    fakeApi(routes(current,{"GET /api/v1/repos/acme/demo/landing":json(200,{items:[leader,...waiting]})}));
+  it("waits for CI without handing the turn to a person", async () => {
+    fakeApi(routes(null, {[`GET ${P}/checks`]:json(200,{head_sha:HEAD,checks:[{name:"test",status:"queued"}]})}));
     renderApp("/acme/demo/-/pulls/3",lang);
-    const gate = await screen.findByRole("region",{name:words["landing.gate"]});
-    await waitFor(()=>expect(gate.querySelector('.landing-pr-highlight[data-pr="3"]')).toBeInTheDocument());
-    expect(within(gate).getByText("Title 3")).toBeInTheDocument();
-    expect(within(gate).queryByText("Title 2")).not.toBeInTheDocument();
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(`test · ${words["landing.check.running"]}`)).toBeInTheDocument();
+    expect(within(journey).getByText(words["landing.missing"])).toBeInTheDocument();
+    expect(journey.querySelector('[aria-current="step"]')).toHaveAttribute("data-state", "now");
+  });
+  it("says what is in place when nothing visible is missing", async () => {
+    fakeApi(routes(null));
+    renderApp("/acme/demo/-/pulls/3",lang);
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(words["landing.notInQueue"])).toBeInTheDocument();
+    expect(journey.querySelector('[aria-current="step"]')).toHaveAttribute("data-state", "now");
+    expect(badges(journey)).toEqual([]);
+    expect(within(journey).getByText(words["landing.headReady"])).toBeInTheDocument();
+  });
+  it("waits at its place in the queue", async () => {
+    const leader = entry("host_checks", {number:1, first:{...entry("host_checks").first!,number:1}});
+    fakeApi(routes(landing({state:"waiting", position:4, first:leader.first})));
+    renderApp("/acme/demo/-/pulls/3",lang);
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(words["landing.waitingAt"].replace("{position}", "4"))).toBeInTheDocument();
+    const stop = journey.querySelector('[aria-current="step"]') as HTMLElement;
+    expect(stop).toHaveAttribute("data-stop", "queue");
+    expect(stop).toHaveTextContent("4");
+    expect(within(journey).getByText(words["landing.waitFor"].replace("{first}", "1"))).toBeInTheDocument();
+  });
+  it("counts the pull requests waiting behind the leader", async () => {
+    const leader = entry("owner_merge_host");
+    const items = [leader, ...[4,5].map((n) => landing({ number: n, state: "waiting", position: n-2, first: leader.first })), landing({ number: 6, state: "left", position: null, first: null }), landing({ number: 7, base: "release" })];
+    fakeApi(routes(leader, { "GET /api/v1/repos/acme/demo/landing": json(200, { items }) }));
+    renderApp("/acme/demo/-/pulls/3",lang);
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(words["landing.behind"].replace("{count}", "2"))).toBeInTheDocument();
   });
   it("keeps the recorded clock and its label when only the next action changes", async () => {
     vi.useFakeTimers({toFake:["Date","setInterval","clearInterval"]});
@@ -185,28 +239,57 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
     expect(await screen.findByRole("img",{name:"Branvil"})).toBeInTheDocument();
   });
   it("shows checking for a mismatched head",async()=>{
-    fakeApi(routes(entry("gate"),{[`GET ${P}/checks`]:json(200,{head_sha:BASE,checks:[{name:"test",status:"completed",conclusion:"success"}]})}));
+    fakeApi(routes(null,{[`GET ${P}/checks`]:json(200,{head_sha:BASE,checks:[{name:"test",status:"completed",conclusion:"success"}]})}));
     renderApp("/acme/demo/-/pulls/3",lang);
-    const checks=await screen.findByRole("region",{name:words["landing.headChecks"]});
-    expect(await within(checks).findByText(`test · ${words["landing.checking"]}`)).toBeInTheDocument();
+    const journey=await screen.findByRole("region",{name:journeyName()});
+    expect(await within(journey).findByText(`test · ${words["landing.checking"]}`)).toBeInTheDocument();
   });
-  it.each(["conflict", "gate_failed", "gating", "passed"] as const)("hides an old %s gate after the head moves", async (state) => {
+  it.each(["conflict", "gate_failed", "gating", "passed"] as const)("forgets an old %s gate after the head moves", async (state) => {
     const l = landing({head_sha: BASE, gate: BASE, state: state === "conflict" || state === "gate_failed" ? "left" : state, reason: {code:state, message:"Old failure", jobs:["old-job"], files:["old-file.rs"]}});
-    fakeApi(routes(l, {[`GET ${P}/checks`]:json(200,{head_sha:BASE,checks:[{name:"gate/old-job",status:"completed",conclusion:"failure",attempt_id:"old-attempt"}]})}));
+    fakeApi(routes(l));
     renderApp("/acme/demo/-/pulls/3", lang);
-    const gate = await screen.findByRole("region", {name:words["landing.gate"]});
-    expect(await within(gate).findByText(words["landing.headChanged"])).toBeInTheDocument();
-    expect(within(gate).queryByText(/old-job|old-file|Old failure/)).not.toBeInTheDocument();
-    expect(within(gate).queryByText(words["landing.retryGate"])).not.toBeInTheDocument();
-    expect(within(gate).queryByRole("link")).not.toBeInTheDocument();
-    expect(gate.querySelector(".landing-line")).not.toBeInTheDocument();
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(words["landing.notInQueue"])).toBeInTheDocument();
+    expect(journey.querySelector('[aria-current="step"]')).toHaveAttribute("data-stop", "conditions");
+    expect(within(journey).queryByText(/old-job|old-file|Old failure/)).not.toBeInTheDocument();
+    expect(within(journey).queryByText(words["landing.retryGate"])).not.toBeInTheDocument();
   });
-  it.each([HEAD, BASE])("only shows gate job links from the PR head (%s)", async (checksHead) => {
-    fakeApi(routes(landing({state:"left",first:null,position:null,reason:{code:"gate_failed",message:"",jobs:["build"],files:[]}}), {[`GET ${P}/checks`]:json(200,{head_sha:checksHead,checks:[{name:"gate/build",status:"completed",conclusion:"failure",attempt_id:"gate-attempt"}]})}));
+  it.each([
+    ["conflict", "gate"], ["gate_failed", "gate"], ["already_in_base", "gate"], ["host_failed", "host"], ["publish_stopped", "host"],
+    ["head_checks", "conditions"], ["approvals", "conditions"], ["empty_head", "conditions"], ["publish_requirements", "conditions"],
+  ] as const)("marks where it left the queue (%s)", async (code, stop) => {
+    fakeApi(routes(landing({state:"left",first:null,position:null,reason:{code,message:"Service English",jobs:["build"],files:[]}})));
     renderApp("/acme/demo/-/pulls/3", lang);
-    const gate = await screen.findByRole("region", {name:words["landing.gate"]});
-    expect(await within(gate).findByText(words["landing.retryGate"])).toBeInTheDocument();
-    await waitFor(() => expect(within(gate).queryByRole("link", {name:"gate/build"}) !== null).toBe(checksHead === HEAD));
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(words["landing.leftWith"].replace("{reason}", words[`landing.reason.${code}`]))).toBeInTheDocument();
+    const current = journey.querySelector('[aria-current="step"]') as HTMLElement;
+    expect(current).toHaveAttribute("data-stop", stop);
+    expect(current).toHaveAttribute("data-state", "failed");
+    expect(within(journey).getByText(words["landing.failedJobs"].replace("{jobs}", "build"))).toBeInTheDocument();
+  });
+  it("still names what is missing after leaving for it", async () => {
+    fakeApi(routes(null, {[`GET ${P}`]: json(200, pull({ approvals: 0, landing: landing({state:"left",first:null,position:null,reason:{code:"approvals",message:"",jobs:[],files:[]}}) }))}));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(words["merge.approvals"].replace("{count}", "0").replace("{required}", "1"))).toBeInTheDocument();
+    expect(journey.querySelector('[aria-current="step"]')).toHaveAttribute("data-state", "failed");
+    expect(within(journey).getByText(words["landing.rejoin"])).toBeInTheDocument();
+  });
+  it("shows the gate's progress on the pull request page", async () => {
+    fakeApi(routes(entry("gate", { state: "gating" }), {
+      "GET /api/v1/repos/acme/demo": json(200, { ...REPO, required_checks: ["test", "lint", "build"] }),
+      [`GET ${P}/checks`]: json(200, { head_sha: HEAD, checks: [{ name: "gate/test", status: "completed", conclusion: "failure" }, { name: "gate/lint", status: "in_progress" }] }),
+    }));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText("1/3")).toBeInTheDocument();
+  });
+  it.each(["draft", "base_moved"] as const)("collects requirements again after leaving for %s", async (code) => {
+    fakeApi(routes(landing({state:"left",first:null,position:null,reason:{code,message:"",jobs:[],files:[]}})));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(words["landing.notInQueue"])).toBeInTheDocument();
+    expect(journey.querySelector('[aria-current="step"]')).toHaveAttribute("data-stop", "conditions");
   });
 });
 
@@ -219,7 +302,7 @@ for (const host of [false, true]) {
     }));
     renderApp("/acme/demo/-/pulls/3");
     const action = await screen.findByRole("button",{name:host ? "Publish to GitHub" : dictionaries.en["merge.submit"]});
-    await screen.findByText(service ? "test · Skipped (no changes)" : "test · Failed");
+    await checksLoaded();
     if (service) expect(action).toBeEnabled(); else expect(action).toBeDisabled();
   });
   it.each([
@@ -234,8 +317,7 @@ for (const host of [false, true]) {
     fakeApi(routes(l, { "GET /api/v1/repos/acme/demo": json(200, { ...REPO, upstream: host ? REPO.upstream : null }) }));
     renderApp("/acme/demo/-/pulls/3");
     const action = host ? "Publish to GitHub" : dictionaries.en["merge.submit"];
-    await screen.findByRole("region", { name: dictionaries.en["landing.gate"] });
-    await waitFor(() => expect(screen.queryByText(/Required checks not yet successful/)).not.toBeInTheDocument());
+    await checksLoaded();
     expect(screen.getByRole("button", { name: action })).toBeDisabled();
   });
 }
@@ -268,12 +350,12 @@ describe.each(["en", "ja"] as const)("resuming stopped publication (%s)", (lang)
     const again = await screen.findByRole("button", { name: words["publish.again"].replace("{host}", "GitHub") });
     expect(again).toBeDisabled();
     expect(screen.queryByRole("button", { name: words["landing.resume"] })).not.toBeInTheDocument();
-    expect(screen.getByText(words["landing.position"].replace("{position}", "2"))).toBeInTheDocument();
+    expect(screen.getByText(words["landing.waitingAt"].replace("{position}", "2"))).toBeInTheDocument();
     expect(confirm).not.toHaveBeenCalled();
     expect(fake.calls("POST", `${P}/publish`)).toHaveLength(0);
     current = { ...current, landing: landing({ resume_publish: true, state: "gating" }) };
     act(() => applyChange({ kind: "pull", path: "acme/demo", id: "3" }, client));
-    const gate = screen.getByRole("region", { name: words["landing.gate"] });
+    const gate = screen.getByRole("region", { name: words["landing.journey"].replace("{base}", "main") });
     expect((await within(gate).findAllByText(words["landing.next.gate"]))[0]).toBeInTheDocument();
     expect(again).toBeDisabled();
     current = { ...current, landing: landing({ resume_publish: true, first: { ...landing().first!, next: "owner_publish" } }) };

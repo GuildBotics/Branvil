@@ -17,6 +17,7 @@ import { CheckDrawer, ChecksCard, drawerTarget } from "./pull/Checks";
 import { Conversation } from "./pull/Conversation";
 import { FilesDrawer } from "./pull/FilesDrawer";
 import { MergeCard, PublishCard } from "./pull/Landing";
+import { LandingJourney } from "./pull/LandingStatus";
 import { Tickets } from "./pull/Tickets";
 
 export function PullView({ repo, number, openJob }: { repo: string; number: number; openJob?: string }) {
@@ -110,6 +111,7 @@ export function PullView({ repo, number, openJob }: { repo: string; number: numb
         }
       />
       {reviewer.isError && <ErrorMessage error={reviewer.error} />}
+      {pr.state === "open" && repository.data && <LandingJourney pull={pr} repo={repository.data} />}
 
       <Post head={<PostHead author={pr.author} kind={kindOf(pr.author)} at={pr.created_at} />}>
         <section aria-label={t("pull.description")}>

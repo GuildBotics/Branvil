@@ -1526,6 +1526,19 @@ pre {
 }
 
 /* One continuous path; each node keeps its explanation below the line. */
+.journey { list-style: none; margin: 0; padding: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+.journey-stop { position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0 2px; font-size: 12px; text-align: center; overflow-wrap: anywhere; color: var(--mantine-color-dimmed); }
+@media (max-width: 36em) { .journey-stop { font-size: 11px; letter-spacing: -0.02em; } }
+.journey-stop:not(:last-child)::after { content: ""; position: absolute; top: 13px; left: calc(50% + 16px); right: calc(-50% + 16px); height: 2px; background: var(--mantine-color-default-border); }
+.journey-stop[data-state="done"]::after { background: var(--color-success); }
+.journey-dot { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--mantine-color-default-border); background: var(--mantine-color-body); font-size: 12px; font-weight: 700; }
+.journey-stop[data-state="done"] .journey-dot { color: var(--color-success-text); background: var(--color-success-bg); border-color: var(--color-success-border); }
+.journey-stop[data-state="now"] { color: var(--mantine-color-text); font-weight: 700; }
+.journey-stop[data-state="now"] .journey-dot { color: var(--color-brand); border-color: var(--color-brand); }
+.journey-stop[data-state="turn"] { color: var(--color-warning-text); font-weight: 700; }
+.journey-stop[data-state="turn"] .journey-dot { background: var(--color-warning-bg); border-color: var(--color-warning); }
+.journey-stop[data-state="failed"] { color: var(--color-danger-text); font-weight: 700; }
+.journey-stop[data-state="failed"] .journey-dot { background: var(--color-danger-bg); border-color: var(--color-danger); }
 .landing-line { display: flex; align-items: stretch; gap: 0; margin: 16px 0; min-width: 0; }
 .landing-stop { flex: 1; min-width: 0; position: relative; padding: 0 8px 12px; text-align: center; overflow-wrap: anywhere; }
 .landing-stop::before { content: ""; position: absolute; top: 20px; left: 0; right: 0; height: 2px; background: var(--mantine-color-default-border); }
@@ -1535,7 +1548,6 @@ pre {
 .landing-square { border-radius: 4px; min-width: 40px; }
 .landing-place { border-radius: 8px; max-width: 100%; }
 .landing-pr { position: relative; min-width: 0; }
-.landing-pr-highlight .landing-dot { border-color: var(--mantine-primary-color-filled); font-weight: 700; box-shadow: 0 0 0 3px var(--mantine-primary-color-light); }
 .landing-waiters { display: flex; align-items: flex-start; justify-content: flex-end; gap: 6px; }
 .landing-waiters > div { flex: 1; min-width: 0; }
 .landing-marker { position: relative; min-height: 40px; }
