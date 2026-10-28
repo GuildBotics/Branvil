@@ -1046,9 +1046,12 @@ Each automatic gate pass can notify the webhook once its next action is
   named `<provider>` without `attempt_id` stands for them: `queued`, `null`,
   with `details` "GitHub may still add checks of this commit". The host may
   add them until Branvil reads the host after `[upstream]
-  checks_registration_secs` (300 by default) passed since its push or the
+  checks_registration_secs` (60 by default) passed since its push or the
   host pull request's creation, edit by Branvil, or reopening (some checks
-  being there does not mean they are all), and while a GitHub Actions
+  being there does not mean they are all). The poller wakes at that deadline
+  to read the host without waiting for the next regular poll; a failed read
+  leaves the wait in place and is retried at the regular interval. The host
+  may also add checks while a GitHub Actions
   workflow run of the head, or another app's check suite of it that has check
   runs, has not finished (a workflow run creates a job's check run only once
   it starts the job: after the jobs it needs, its concurrency group, or an

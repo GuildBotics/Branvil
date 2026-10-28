@@ -34,8 +34,8 @@ pub struct UpstreamConfig {
     pub poll_active_secs: u64,
     /// Seconds between polls otherwise.
     pub poll_idle_secs: u64,
-    /// Seconds after a push within which the host's having no checks of the
-    /// head means they are not registered yet.
+    /// Seconds after a push or pull request event within which the host may
+    /// still register checks of the head.
     pub checks_registration_secs: u64,
     pub github: GitHubConfig,
 }
@@ -45,7 +45,7 @@ impl Default for UpstreamConfig {
         Self {
             poll_active_secs: 60,
             poll_idle_secs: 900,
-            checks_registration_secs: 300,
+            checks_registration_secs: 60,
             github: GitHubConfig::default(),
         }
     }

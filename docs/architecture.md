@@ -364,7 +364,10 @@ repository lock or a transaction.
   otherwise (the default branch only, so merges of other people's pull requests
   arrive). Publishing, `POST /api/v1/repos/{repo}/upstream/refresh` (the GUI's
   "Check now"), a push to a published branch, and an edit of a published pull
-  request wake it at once. `[upstream]` in `branvil.toml` sets both intervals.
+  request wake it at once. The next registration deadline of a live pull
+  request also wakes it, even with longer regular intervals. An expired
+  deadline whose read failed is retried at the regular interval, so it
+  cannot cause a busy loop. `[upstream]` in `branvil.toml` sets both intervals.
 - **The default branch.** When the host's tip differs from Branvil's: `git
   fetch` it into the hidden `refs/branvil/upstream/<branch>`, then, under the
   repository lock, fast-forward Branvil's branch (`update-ref` with the
@@ -532,9 +535,9 @@ registers its checks some time after a push or an event of the pull request
 a workflow run creates a job's check run only once it starts the job (after the
 jobs it needs, its concurrency group, or an approval), so the checks read are
 all there are only when both hold: the poller has read the host after
-`[upstream] checks_registration_secs` passed since the last of them
-(`Published.checks_registered_by`, cleared by that read; a failed read clears
-nothing), and at that read every GitHub Actions workflow run of the head had
+`[upstream] checks_registration_secs` (60 s by default) passed since the last
+event (`Published.checks_registered_by`, cleared by that read; a failed read
+clears nothing), and at that read every GitHub Actions workflow run of the head had
 finished, and so had every other app's check suite of it that has check runs
 (`Published.checks_settled`; how the host says so is the provider's). This includes a
 new gate for an already published head. `Landing.notified_at` records a `2xx`

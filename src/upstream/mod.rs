@@ -399,18 +399,49 @@ pub async fn compose(at: Place<'_>, p: &Pull) -> AppResult<(String, String)> {
 pub fn start(app: Shared) {
     tokio::spawn(async move {
         loop {
+            let started = util::now();
             let active = poll_all(&app).await;
             let secs = if active {
                 app.upstream.config.poll_active_secs
             } else {
                 app.upstream.config.poll_idle_secs
             };
+            let mut wait = Duration::from_secs(secs.max(1));
+            match app.store.read(move |r| registration_due(r, &started)).await {
+                Ok(Some(by)) => {
+                    if let Ok(by) = chrono::DateTime::parse_from_rfc3339(&by) {
+                        let by = by.with_timezone(&chrono::Utc);
+                        wait = wait.min((by - chrono::Utc::now()).to_std().unwrap_or_default());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("upstream: {e}"),
+            }
             tokio::select! {
                 _ = app.upstream.wake.notified() => {}
-                _ = tokio::time::sleep(Duration::from_secs(secs.max(1))) => {}
+                _ = tokio::time::sleep(wait) => {}
             }
         }
     });
+}
+
+/// The next registration deadline of a live pull request. An expired
+/// deadline has already had its poll: if reading failed, retry at the usual
+/// interval rather than spinning. One that expired during this poll still
+/// needs a read after it, so compare with the poll's start, not its end.
+fn registration_due(r: &redb::ReadTransaction, started: &str) -> AppResult<Option<String>> {
+    let mut next = None;
+    for repo in upstream_repos(r)? {
+        for p in live_pulls(r, &repo.id)? {
+            if let Some(by) = p.upstream.and_then(|x| x.checks_registered_by)
+                && by.as_str() > started
+                && next.as_ref().is_none_or(|n| &by < n)
+            {
+                next = Some(by);
+            }
+        }
+    }
+    Ok(next)
 }
 
 /// Polls every repository with an upstream; true while any published pull
