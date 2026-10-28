@@ -20,6 +20,7 @@
     "dompurify": "3.4.17",
     "lucide-react": "1.30.0",
     "marked": "18.0.14",
+    "mermaid": "12.2.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
