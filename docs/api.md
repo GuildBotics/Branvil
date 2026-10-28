@@ -1048,9 +1048,14 @@ Each automatic gate pass can notify the webhook once its next action is
   add them until Branvil reads the host after `[upstream]
   checks_registration_secs` (300 by default) passed since its push or the
   host pull request's creation, edit by Branvil, or reopening (some checks
-  being there does not mean they are all), and while a check suite of the head that has check runs has not
-  finished (a workflow run creates a job's check run only once the jobs it
-  needs are done).
+  being there does not mean they are all), and while a GitHub Actions
+  workflow run of the head, or another app's check suite of it that has check
+  runs, has not finished (a workflow run creates a job's check run only once
+  it starts the job: after the jobs it needs, its concurrency group, or an
+  approval). A suite without check runs of an app other than GitHub Actions
+  is not waited for: such an app may never report. A workflow run that
+  failed without a check run (an invalid workflow file) is listed as a failed
+  check named after the workflow, with no log.
 
 `GET /api/v1/repos/{repo}/commits/{sha}/checks` →
 `{"sha": "...", "checks": [...], "checks_expected": true, "run_registered": true}`: the checks of any

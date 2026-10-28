@@ -1308,6 +1308,39 @@ async fn the_upgrade_puts_publications_past_the_registration_of_their_host_check
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_run_that_failed_without_a_job_is_a_failed_check() {
+    let (w, gh) = followed().await;
+    with_aiko_account(&w).await;
+    let head = w.push_change("feat", "f.txt", "one\n");
+    let n = w.open_pull("feat", json!([])).await["number"]
+        .as_u64()
+        .unwrap();
+    let (st, v) = publish(&w, n).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // An invalid workflow file: GitHub ends its run before any job.
+    gh.workflow_run(&head, 6, "completed", Some("startup_failure"));
+    gh.workflow_run(&head, 7, "completed", Some("success"));
+    refresh(&w).await;
+    let checks = w
+        .server
+        .ok(&format!("{}/pulls/{n}/checks", w.repo_path()), &w.aiko)
+        .await;
+    let failed: Vec<_> = checks["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"].as_str().unwrap().starts_with("github/"))
+        .collect();
+    assert_eq!(failed.len(), 1, "{checks}");
+    assert_eq!(failed[0]["name"], "github/ci-6");
+    assert_eq!(failed[0]["conclusion"], "startup_failure");
+    assert_eq!(
+        failed[0]["details_url"],
+        "https://github.test/actions/runs/6"
+    );
+}
+
 async fn set_required_checks(w: &World, checks: Value) {
     let (_, repo) = w.server.get(&w.repo_path(), &w.owner).await;
     let (st, v) = w

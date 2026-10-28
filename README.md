@@ -396,7 +396,11 @@ Branvil polls GitHub with conditional requests (an unchanged answer is a free
 otherwise, and at once after publishing or "Check now". GitHub registers the
 checks of a pushed head a little later, so a head waits for more checks until
 `checks_registration_secs` after the push (or the pull request's creation,
-edit, or reopening there) and while a workflow run of it still has jobs to start.
+edit, or reopening there) and while a workflow run of it has not finished.
+The reading account needs, for a GitHub App, Repository permissions →
+**Checks: Read-only** and **Actions: Read-only** (the workflow runs and the
+jobs' logs); for a token, the same permissions (fine-grained) or the `repo`
+scope (classic).
 Settings in `branvil.toml`:
 
 ```toml

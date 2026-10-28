@@ -429,9 +429,8 @@ pub struct Published {
     /// push or the pull request's creation there). Cleared by the first read
     /// after that time: the checks that read finds are all there are.
     pub checks_registered_by: Option<String>,
-    /// Whether every check suite of `pushed` (a workflow run, say) that has
-    /// check runs had finished at the last read: one with jobs still to start
-    /// has more to come.
+    /// Whether the host had no more checks of `pushed` to come at the last
+    /// read (`Host::checks`: on GitHub, every workflow run finished).
     pub checks_settled: bool,
     pub published_at: String,
     /// The last failure; the next poll retries.
@@ -501,7 +500,7 @@ impl Published {
     }
 
     /// Whether the host may still add checks of `pushed`: it may still
-    /// register them, or a run of them has jobs still to start.
+    /// register them, or a run of them has not finished.
     pub fn checks_to_come(&self) -> bool {
         self.checks_registered_by.is_some() || !self.checks_settled
     }

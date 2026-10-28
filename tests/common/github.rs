@@ -108,6 +108,8 @@ pub struct State_ {
     pub checks: HashMap<String, Vec<Value>>,
     /// commit → check suites (GitHub's JSON)
     pub suites: HashMap<String, Vec<Value>>,
+    /// commit → GitHub Actions workflow runs (GitHub's JSON)
+    pub workflow_runs: HashMap<String, Vec<Value>>,
     /// check run id → log text
     pub logs: HashMap<u64, String>,
     /// (method, path, login) of every request
@@ -566,6 +568,26 @@ async fn check_suites(
     )
 }
 
+async fn workflow_runs(
+    State((state, _)): State<S>,
+    UrlPath((owner, name)): UrlPath<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let mut st = state.lock().unwrap();
+    let path = format!("/repos/{owner}/{name}/actions/runs");
+    if record(&mut st, "GET", &path, &headers).is_none() {
+        return unauthorized();
+    }
+    let sha = q.get("head_sha").cloned().unwrap_or_default();
+    let runs = st.workflow_runs.get(&sha).cloned().unwrap_or_default();
+    conditional(
+        &mut st,
+        &headers,
+        json!({"total_count": runs.len(), "workflow_runs": runs}),
+    )
+}
+
 async fn job_log(
     State((state, _)): State<S>,
     UrlPath((owner, name, id)): UrlPath<(String, String, u64)>,
@@ -725,6 +747,7 @@ impl FakeGitHub {
                 "/repos/{owner}/{name}/commits/{sha}/check-suites",
                 get(check_suites),
             )
+            .route("/repos/{owner}/{name}/actions/runs", get(workflow_runs))
             .route("/repos/{owner}/{name}/actions/jobs/{id}/logs", get(job_log))
             .route("/repos/{owner}/{name}/dependabot/alerts", get(alerts_list))
             .route(
@@ -999,6 +1022,19 @@ impl FakeGitHub {
         let suites = st.suites.entry(sha.into()).or_default();
         suites.retain(|s| s["id"] != id);
         suites.push(json!({"id": id, "status": status, "latest_check_runs_count": runs}));
+    }
+
+    /// Sets GitHub Actions workflow run `id` of `sha`, named `ci-<id>`, to
+    /// `status` and `conclusion`.
+    pub fn workflow_run(&self, sha: &str, id: u64, status: &str, conclusion: Option<&str>) {
+        let mut st = self.state.lock().unwrap();
+        let runs = st.workflow_runs.entry(sha.into()).or_default();
+        runs.retain(|r| r["id"] != id);
+        runs.push(json!({
+            "id": id, "name": format!("ci-{id}"), "head_sha": sha, "status": status,
+            "conclusion": conclusion, "check_suite_id": 1000 + id,
+            "html_url": format!("https://github.test/actions/runs/{id}"),
+        }));
     }
 
     /// Starts check run `id` of `sha`, which has not finished yet.

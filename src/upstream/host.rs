@@ -303,8 +303,8 @@ impl Host {
         each!(self, h => h.change_pull(who, repository, number, change).await)
     }
 
-    /// The check runs of `sha`, and whether every run of them (a suite: a
-    /// workflow run, say) that has checks finished.
+    /// The checks of `sha`, and whether the host has no more of it to come
+    /// (none of its runs of checks is still going).
     pub async fn checks(
         &self,
         who: As<'_>,

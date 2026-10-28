@@ -519,6 +519,18 @@ async fn the_webhook_is_told_only_once_every_host_check_of_the_head_succeeded() 
     assert!(hook.received().is_empty());
     gh.check(&head, 72, "pr-after", "success", "ok\n");
     gh.suite(&head, 2, "completed", 2);
+    // A workflow waits in its concurrency group: no job, no check run yet.
+    gh.workflow_run(&head, 3, "pending", None);
+    gh.suite(&head, 3, "queued", 0);
+    waits_for_host_checks(&w, &other, n, "a workflow still to start").await;
+    gh.workflow_run(&head, 3, "in_progress", None);
+    gh.suite(&head, 3, "in_progress", 1);
+    gh.running(&head, 74, "waited");
+    waits_for_host_checks(&w, &other, n, "the workflow started").await;
+    assert!(hook.received().is_empty());
+    gh.check(&head, 74, "waited", "success", "ok\n");
+    gh.suite(&head, 3, "completed", 1);
+    gh.workflow_run(&head, 3, "completed", Some("success"));
     refresh(&w).await;
     eventually("the notice", || async {
         pull(&w, n).await["landing"]["notified_at"].is_string()

@@ -529,13 +529,14 @@ host check of it succeeded), the owner's webhook receives `{"text": …}` saying
 the gate passed and the pull request is ready to merge there. The host
 registers its checks some time after a push or an event of the pull request
 (its creation, an edit Branvil sends, its reopening), and
-a workflow run creates a job's check run only once the jobs it needs are done,
-so the checks read are all there are only when both hold: the poller has read
-the host after `[upstream] checks_registration_secs` passed since the last of
-them
+a workflow run creates a job's check run only once it starts the job (after the
+jobs it needs, its concurrency group, or an approval), so the checks read are
+all there are only when both hold: the poller has read the host after
+`[upstream] checks_registration_secs` passed since the last of them
 (`Published.checks_registered_by`, cleared by that read; a failed read clears
-nothing), and every check suite of the head that has check runs had finished
-at that read (`Published.checks_settled`). This includes a
+nothing), and at that read every GitHub Actions workflow run of the head had
+finished, and so had every other app's check suite of it that has check runs
+(`Published.checks_settled`; how the host says so is the provider's). This includes a
 new gate for an already published head. `Landing.notified_at` records a `2xx`
 answer for that gate; a later pass has its own notification. Pending notices
 are retried even if automatic landing is later turned off. The URL is kept in
