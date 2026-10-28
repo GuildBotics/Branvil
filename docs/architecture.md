@@ -613,7 +613,15 @@ column's tickets in progress first, then ready, new, and done, each lane in the
 board's order, a ticket pushed down, that order kept, to stand level with the
 topmost ticket it waits for,
 children inside their parent once it is opened, lines drawn in SVG over a CSS
-layout, the new tickets without relations in one frame that looks like an open
+layout; text, assignee, and label filters hide nonmatching tickets and their
+lines, keeping only matching tickets and their ancestors (shown faintly for
+context), automatically opening those ancestors and the frame of new tickets
+to reveal matches; opening or closing frames during filtering is temporary,
+and clearing the filters restores the usual expansion state;
+successfully creating a ticket clears those filters so its card can be
+revealed, including when its relation is refused; cancelling or a failed
+creation keeps the filters;
+the new tickets without relations in one frame that looks like an open
 parent's, its header in another colour, laid out where a new ticket would be;
 only a ticket without relations (shown or not) is new: dragging a card onto
 another makes it a child and a line drawn from a card's handle makes the other

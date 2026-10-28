@@ -41,12 +41,11 @@ interface Props {
   people: Person[];
   loadChecks: Set<string>;
   filter: CardFilter;
-  open: ReadonlySet<string>;
   /** The ticket whose lane is being changed. */
   moving: string | null;
   /** Whether relations may be changed (false while the tickets shown are incomplete or a change is being written). */
   editable: boolean;
-  onToggle: (ref: string) => void;
+  onToggle: (ref: string, open: boolean) => void;
   onLane: (card: Card, lane: Lane) => void;
   /** Puts a card in its lane just before or after another ticket. */
   onPlace: (card: Card, at: Place) => void;
@@ -61,7 +60,7 @@ interface Props {
 
 const edgeKey = (e: GraphEdge) => `${e.from}>${e.to}`;
 
-export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, moving, editable, onToggle, onLane, onPlace, onEdit, onAdd, reveal, onRevealed, freshOpen, onFreshOpen }: Props) {
+export function Figure({ graph, cards, lanes, people, loadChecks, filter, moving, editable, onToggle, onLane, onPlace, onEdit, onAdd, reveal, onRevealed, freshOpen, onFreshOpen }: Props) {
   const t = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -277,7 +276,7 @@ export function Figure({ graph, cards, lanes, people, loadChecks, filter, open, 
     <div className="rel-level">
       {l.map((column, i) => (
         <div className="rel-column" key={i}>
-          {column.map((n) => ("fresh" in n ? freshFrame(n.fresh) : anchor(n.card, n.inner, n.hasChildren ? open.has(n.ref) : undefined)))}
+          {column.map((n) => ("fresh" in n ? freshFrame(n.fresh) : anchor(n.card, n.inner, n.hasChildren ? n.inner !== null : undefined)))}
         </div>
       ))}
     </div>

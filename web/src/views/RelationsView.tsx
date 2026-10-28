@@ -12,7 +12,7 @@ import { useStored } from "../storage";
 import { CardFilters } from "./board/CardFilters";
 import { ciUrlsOf, moveRefusal, type Notice } from "./board/CardView";
 import { NewTicketModal, useTicketRepos } from "./board/NewTicket";
-import type { CardFilter } from "./board/ordering";
+import { hasFilter, type CardFilter } from "./board/ordering";
 import { readied, type Change, type Edit } from "./relations/edits";
 import { Figure } from "./relations/Figure";
 import type { Addition } from "./relations/RelationCard";
@@ -63,6 +63,12 @@ export function RelationsView({ workspace }: { workspace: string }) {
   const [opened, keepOpened] = useStored(`branvil.relations.open.${workspace}`);
   const open = useMemo(() => openParents(opened), [opened]);
   const [filter, setFilter] = useState<CardFilter>({ assignee: "", label: "", text: "" });
+  const filtering = hasFilter(filter);
+  const [filteredExpansion, setFilteredExpansion] = useState<{ parents: Map<string, boolean>; fresh?: boolean }>({ parents: new Map() });
+  const onFilter = (next: CardFilter) => {
+    setFilter(next);
+    setFilteredExpansion({ parents: new Map() });
+  };
   const [notice, setNotice] = useState<Said | null>(null);
   /** The new ticket being made: unrelated, or related to a card. */
   const [adding, setAdding] = useState<{ to?: Card; as?: Addition } | null>(null);
@@ -82,7 +88,10 @@ export function RelationsView({ workspace }: { workspace: string }) {
   const shown = required.data ?? openCards.data;
   const complete = required.data !== undefined;
   const cards = useMemo(() => shown?.items ?? [], [shown]);
-  const graph = useMemo(() => buildGraph(cards, { includeClosed, open }), [cards, includeClosed, open]);
+  const graph = useMemo(
+    () => buildGraph(cards, { includeClosed, open, filter, openOverrides: filteredExpansion.parents }),
+    [cards, includeClosed, open, filter, filteredExpansion.parents],
+  );
   const lanes = useMemo(() => boardQuery.data?.lanes ?? [], [boardQuery.data]);
   const people = usePeople();
   // Checks are loaded for the pull requests of the cards the figure shows.
@@ -130,6 +139,9 @@ export function RelationsView({ workspace }: { workspace: string }) {
     if (closed.length > 0) keepOpened(JSON.stringify([...open, ...closed]));
   }, [reveal, cards, open, keepOpened]);
   const onCreated = (ticket: Ticket) => {
+    // Creation leaves filtering so the new card can be revealed, even if it
+    // does not match. All creation paths share this successful callback.
+    onFilter({ assignee: "", label: "", text: "" });
     const made = ticketRef(ticket);
     const to = adding?.to;
     if (!to) {
@@ -153,13 +165,22 @@ export function RelationsView({ workspace }: { workspace: string }) {
     }
   };
   const onToggle = useCallback(
-    (ref: string) => {
+    (ref: string, show: boolean) => {
+      if (filtering) {
+        setFilteredExpansion((prev) => ({ ...prev, parents: new Map(prev.parents).set(ref, show) }));
+        return;
+      }
       const next = new Set(open);
-      if (!next.delete(ref)) next.add(ref);
+      if (show) next.add(ref);
+      else next.delete(ref);
       keepOpened(JSON.stringify([...next]));
     },
-    [open, keepOpened],
+    [filtering, open, keepOpened],
   );
+  const onFreshOpen = useCallback((show: boolean) => {
+    if (filtering) setFilteredExpansion((prev) => ({ ...prev, fresh: show }));
+    else setFreshOpen(show);
+  }, [filtering]);
 
   if (boardQuery.isPending) return <Loading />;
   if (boardQuery.isError) return <ErrorMessage error={boardQuery.error} />;
@@ -183,7 +204,7 @@ export function RelationsView({ workspace }: { workspace: string }) {
         cards={cards}
         people={people}
         filter={filter}
-        onFilter={setFilter}
+        onFilter={onFilter}
         includeClosed={includeClosed}
         onIncludeClosed={(include) => showClosed(String(include))}
         status={required.isFetching && shown && t("common.refreshing")}
@@ -224,7 +245,6 @@ export function RelationsView({ workspace }: { workspace: string }) {
           people={people}
           loadChecks={ciUrls}
           filter={filter}
-          open={open}
           moving={move.isPending && move.variables ? ticketRef(move.variables.card) : null}
           editable={complete && !relate.isPending}
           onToggle={onToggle}
@@ -234,8 +254,8 @@ export function RelationsView({ workspace }: { workspace: string }) {
           onAdd={onAdd}
           reveal={reveal}
           onRevealed={onRevealed}
-          freshOpen={freshOpen}
-          onFreshOpen={setFreshOpen}
+          freshOpen={filtering ? (filteredExpansion.fresh ?? true) : freshOpen}
+          onFreshOpen={onFreshOpen}
         />
       )}
       <NewTicketModal

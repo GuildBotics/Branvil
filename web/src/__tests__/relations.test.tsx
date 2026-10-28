@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Card, TicketRef } from "../api/types";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
-import { pickFromMenu } from "../test/mantine";
+import { choose, pickFromMenu } from "../test/mantine";
 import { card } from "./fixtures";
 
 const WORKSPACE = { name: "acme", lanes: ["new", "ready", "in_progress", "done"] };
@@ -432,13 +432,77 @@ describe("relations", () => {
     await waitFor(() => expect(fake.calls("PUT", "/api/v1/repos/acme/demo/tickets/4/assignee")[0]?.body).toEqual({ name: "aiko" }));
   });
 
-  it("shows the cards the filters do not match faintly instead of hiding them", async () => {
+  it("hides unrelated tickets and lines, shows no matches, and restores the figure after clearing the filter", async () => {
     const user = userEvent.setup();
     fakeApi(routes());
     await shown();
     await user.type(screen.getByRole("textbox", { name: "Text" }), "Title of 4");
-    await waitFor(() => expect(article("1")).toHaveClass("dim"));
+    expect(screen.getAllByRole("article")).toEqual([article("4")]);
     expect(article("4")).not.toHaveClass("dim");
+    expect(edge("4", "1")).toBeNull();
+    const input = screen.getByRole("textbox", { name: "Text" });
+    await user.type(input, " absent");
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    expect(screen.getByText("No tickets to show.")).toBeInTheDocument();
+    await user.clear(input);
+    expect(article("1")).toBeInTheDocument();
+    expect(article("5")).toBeInTheDocument();
+    expect(edge("4", "1")).toHaveClass("dashed");
+  });
+
+  it.each([false, true])("reveals a matching grandchild, permits folding, and restores saved expansion (%s)", async (savedOpen) => {
+    const user = userEvent.setup();
+    const saved = JSON.stringify(savedOpen ? ["acme/demo#1"] : []);
+    window.localStorage.setItem("branvil.relations.open.acme", saved);
+    fakeApi(routes({ open: [...CARDS.map((c) => c.key === "2" ? { ...c, children: [ref("6")] } : c), card("6", "ready", { parent: ref("2") })] }));
+    await shown();
+    const input = screen.getByRole("textbox", { name: "Text" });
+    await user.type(input, "Title of 6");
+    expect(screen.getAllByRole("article")).toEqual([article("1"), article("2"), article("6")]);
+    expect(article("1")).toHaveClass("dim");
+    expect(article("2")).toHaveClass("dim");
+    expect(article("6")).not.toHaveClass("dim");
+    expect(anchor("6").parentElement?.closest("[data-ticket]")).toBe(anchor("2"));
+    await user.click(within(article("2")).getByRole("button", { name: "Close child tickets" }));
+    expect(screen.queryByRole("article", { name: /^acme\/demo#6 / })).not.toBeInTheDocument();
+    await user.click(within(article("2")).getByRole("button", { name: "Open child tickets" }));
+    expect(article("6")).toBeInTheDocument();
+    expect(window.localStorage.getItem("branvil.relations.open.acme")).toBe(saved);
+    await user.clear(input);
+    expect(within(article("1")).getByRole("button", { expanded: savedOpen })).toBeInTheDocument();
+    expect(screen.queryByRole("article", { name: /^acme\/demo#6 / })).not.toBeInTheDocument();
+    expect(article("4")).toBeInTheDocument();
+    expect(article("5")).toBeInTheDocument();
+  });
+
+  it("automatically opens and filters new tickets, permits folding, and restores their previous state", async () => {
+    const user = userEvent.setup();
+    fakeApi(routes({ open: [...CARDS, card("6", "new"), card("7", "new")] }));
+    await shown();
+    const input = screen.getByRole("textbox", { name: "Text" });
+    await user.type(input, "Title of 6");
+    const frame = screen.getByRole("group", { name: "New tickets (1)" });
+    expect(within(frame).getByRole("article")).toBe(article("6"));
+    await user.click(within(frame).getByRole("button", { name: "Close child tickets" }));
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    // A new filter opens the frame again.
+    await user.clear(input);
+    await user.type(input, "Title of 7");
+    expect(article("7")).toBeInTheDocument();
+    await user.clear(input);
+    expect(within(screen.getByRole("group", { name: "New tickets (2)" })).getByRole("button", { expanded: false })).toBeInTheDocument();
+  });
+
+  it("reveals descendants for assignee and label filters, with all filters combined", async () => {
+    const user = userEvent.setup();
+    fakeApi(routes({ open: CARDS.map((c) => c.key === "2" ? { ...c, assignee: { name: "owner", assigned_at: "2026-10-14T10:00:00Z" }, labels: ["bug"] } : c) }));
+    await shown();
+    await choose(user, "Assignee", "owner");
+    expect(screen.getAllByRole("article")).toEqual([article("1"), article("2")]);
+    await choose(user, "Label", "bug");
+    expect(article("2")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Text" }), "Title of 3");
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
   });
 
   it("shows a failure to read the closed tickets it needs, offers to retry, and relates nothing until they are read", async () => {
@@ -635,6 +699,92 @@ describe("relations: order and new tickets", () => {
     expect(within(freshFrame()).getByRole("article", { name: /^acme\/demo#9 / })).toBeInTheDocument();
   });
 
+  // Every creation entry, including inserting a parent between a ticket and its parent.
+  it.each([
+    { item: "Add ticket", on: "6" },
+    { item: "Add parent ticket", on: "2" },
+    { item: "Add parent ticket", on: "5" },
+    { item: "Add child ticket", on: "2" },
+    { item: "Add next ticket", on: "2" },
+  ])("clears all filters after successful $item on #$on and reveals the new ticket", async ({ item, on }) => {
+    const user = userEvent.setup();
+    const seed = OTHERS.map((c) => c.key === on ? { ...c, assignee: { name: "owner", assigned_at: "2026-10-14T10:00:00Z" }, labels: ["bug"] } : c);
+    const source = seed.find((c) => c.key === on)!;
+    const made = card("9", item === "Add ticket" ? "new" : "ready");
+    const parent = item === "Add parent ticket";
+    const child = item === "Add child ticket";
+    const next = item === "Add next ticket";
+    const after = [
+      ...seed.map((c) => {
+        if (c.key === on) return { ...c, ...(parent ? { parent: ref("9") } : child ? { children: [...c.children, ref("9")] } : next ? { blocks: [...c.blocks, ref("9")] } : {}) };
+        if (parent && c.key === source.parent?.key) return { ...c, children: [...c.children.filter((r) => r.key !== on), ref("9")] };
+        return c;
+      }),
+      { ...made, parent: parent ? source.parent : child ? ref(on) : null, children: parent ? [ref(on)] : [], blocked_by: next ? [ref(on)] : [] },
+    ];
+    let created = false;
+    let related = false;
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    fakeApi(withRepo({
+      "GET /api/v1/workspaces/acme/board/cards": () => json(200, { items: created ? related ? after : [...seed, made] : seed, next_cursor: null }),
+      "POST /api/v1/repos/acme/demo/tickets": () => {
+        created = true;
+        return json(201, made);
+      },
+      "PATCH /api/v1/repos/acme/demo/tickets/9": () => {
+        if (!parent) related = true;
+        return json(200, made);
+      },
+      [`PATCH /api/v1/repos/acme/demo/tickets/${on}`]: () => {
+        related = true;
+        return json(200, source);
+      },
+    }));
+    await shown();
+    await choose(user, "Assignee", "owner");
+    await choose(user, "Label", "bug");
+    await user.type(screen.getByRole("textbox", { name: "Text" }), `Title of ${on}`);
+    if (item === "Add ticket") {
+      // A temporary fold must not prevent revealing a new card in the same frame.
+      await user.click(within(freshFrame()).getByRole("button", { name: "Close child tickets" }));
+      await user.click(screen.getByRole("button", { name: item }));
+    }
+    else await pickFromMenu(user, `Actions of acme/demo#${on}`, item, article(on));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Different title");
+    await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
+
+    expect(await screen.findByRole("article", { name: /^acme\/demo#9 / })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Text" })).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "Assignee" })).toHaveValue("Assignee: Any");
+    expect(screen.getByRole("combobox", { name: "Label" })).toHaveValue("Label: Any");
+    // The reveal is consumed once at its final location, not left pending until filters change.
+    await waitFor(() => expect(scroll.mock.instances.filter((el) => (el as Element).getAttribute("data-ticket") === "acme/demo#9")).toHaveLength(1));
+    if (parent || child) expect(anchor("9").parentElement?.closest("[data-ticket]")).toBe(parent && !source.parent ? null : anchor(parent ? source.parent!.key : on));
+    await user.type(screen.getByRole("textbox", { name: "Text" }), "no match");
+    await user.clear(screen.getByRole("textbox", { name: "Text" }));
+    expect(scroll.mock.instances.filter((el) => (el as Element).getAttribute("data-ticket") === "acme/demo#9")).toHaveLength(1);
+  });
+
+  it("keeps filters and saved expansion when creation is cancelled or fails", async () => {
+    const user = userEvent.setup();
+    const fake = fakeApi(withRepo({ "POST /api/v1/repos/acme/demo/tickets": apiError(409, "conflict", "Creation refused.") }));
+    await shown();
+    await user.type(screen.getByRole("textbox", { name: "Text" }), "Title of 2");
+    await pickFromMenu(user, "Actions of acme/demo#2", "Add child ticket", article("2"));
+    let dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("textbox", { name: "Text" })).toHaveValue("Title of 2");
+    expect(fake.calls("POST", "/api/v1/repos/acme/demo/tickets")).toHaveLength(0);
+    await pickFromMenu(user, "Actions of acme/demo#2", "Add child ticket", article("2"));
+    dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Different title");
+    await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Creation refused.");
+    expect(screen.getByRole("textbox", { name: "Text" })).toHaveValue("Title of 2");
+    expect(window.localStorage.getItem("branvil.relations.open.acme")).toBeNull();
+  });
+
   it("brings a new child into view only once the cards are read with its parent, opening the parent", async () => {
     const user = userEvent.setup();
     const made = card("9", "ready");
@@ -691,12 +841,14 @@ describe("relations: order and new tickets", () => {
       }),
     );
     await shown();
+    await user.type(screen.getByRole("textbox", { name: "Text" }), "Title of 4");
     await pickFromMenu(user, "Actions of acme/demo#4", "Add child ticket", article("4"));
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Related");
     await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Refused.");
     expect(await screen.findByRole("article", { name: /^acme\/demo#9 / })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Text" })).toHaveValue("");
     // Nothing is moved after the refused relation.
     expect(fake.requests.some((r) => r.method === "PUT")).toBe(false);
   });
