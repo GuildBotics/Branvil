@@ -1,17 +1,24 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { MantineProvider } from "@mantine/core";
+import DOMPurify from "dompurify";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Markdown, renderMarkdown } from "../components/Markdown";
 import { I18nProvider, dictionaries } from "../i18n";
 import { keys } from "../query/keys";
 import { applyChange } from "../query/events";
 import { fakeApi, json, apiError } from "../test/fakeApi";
 import examples from "../../../tests/fixtures/markdown-references.json";
+import { drawDiagram } from "../components/diagram";
+
+// Mermaid needs a layout engine to measure text, which jsdom does not have.
+vi.mock("../components/diagram", () => ({ drawDiagram: vi.fn() }));
 
 const endpoint = "/api/v1/repos/acme/demo/markdown";
 
 function markdownView(source: string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
-  const view = (text: string) => <QueryClientProvider client={client}><I18nProvider initial="ja"><Markdown repo="acme/demo" source={text} /></I18nProvider></QueryClientProvider>;
+  const view = (text: string) => <MantineProvider env="test"><QueryClientProvider client={client}><I18nProvider initial="ja"><Markdown repo="acme/demo" source={text} /></I18nProvider></QueryClientProvider></MantineProvider>;
   return { ...render(view(source)), client, view };
 }
 
@@ -133,5 +140,88 @@ describe("Markdown rendering", () => {
     expect(container.querySelector("strong")).toHaveTextContent("body");
     expect(container).toHaveTextContent("#1");
     expect(container.querySelector("a")).toBeNull();
+  });
+});
+
+describe("Mermaid diagrams", () => {
+  const diagram = "```mermaid\nflowchart LR\n  A[<b>a</b>] --> B\n```";
+
+  it("keeps a Mermaid block as escaped source, marked for drawing", () => {
+    const html = renderMarkdown(`${diagram}\n\n\`\`\`ts\nconst x = 1;\n\`\`\``);
+    expect(html).toContain('<pre data-mermaid=""><code>flowchart LR\n  A[&lt;b&gt;a&lt;/b&gt;] --&gt; B</code></pre>');
+    expect(html).toContain("<pre><code>const x = 1;");
+  });
+
+  it("shows the drawn diagram with its source one click away", async () => {
+    vi.mocked(drawDiagram).mockResolvedValue({ src: "data:image/svg+xml,<svg/>", alt: "承認の流れ" });
+    fakeApi({ [`POST ${endpoint}`]: json(200, { markdown: diagram }) });
+    const { container } = markdownView(diagram);
+    const image = await screen.findByRole("img", { name: "承認の流れ" });
+    expect(image).toHaveAttribute("src", "data:image/svg+xml,<svg/>");
+    expect(drawDiagram).toHaveBeenCalledWith("flowchart LR\n  A[<b>a</b>] --> B", container.querySelector(".markdown"));
+    expect(container.querySelector("figure details summary")).toHaveTextContent("ソースを表示");
+    expect(container.querySelector("figure details pre")).toHaveTextContent("flowchart LR");
+  });
+
+  it("opens a diagram full size, named 図 when its source gives no title", async () => {
+    vi.mocked(drawDiagram).mockResolvedValue({ src: "data:image/svg+xml,<svg/>", alt: "" });
+    fakeApi({ [`POST ${endpoint}`]: json(200, { markdown: diagram }) });
+    markdownView(diagram);
+    const open = await screen.findByRole("button", { name: "図" });
+    expect(open).toHaveAttribute("title", "原寸で表示: 図");
+    await userEvent.click(open);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("img", { name: "図" })).toHaveAttribute("src", "data:image/svg+xml,<svg/>");
+    await userEvent.click(within(dialog).getByRole("button", { name: "閉じる" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("keeps the link protections when another library adds hooks to the shared DOMPurify", () => {
+    // What Mermaid does once a diagram's labels are HTML.
+    DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+      if (node.tagName === "A") node.setAttribute("target", "_top");
+    });
+    try {
+      const html = renderMarkdown('<a href="https://example.com" target="_top">x</a>');
+      expect(html).toContain('target="_blank"');
+      expect(html).toContain('rel="noopener noreferrer nofollow"');
+    } finally {
+      DOMPurify.removeAllHooks();
+    }
+  });
+
+  it("draws every diagram even when the body imitates a drawn one", async () => {
+    vi.mocked(drawDiagram).mockResolvedValue({ src: "data:image/svg+xml,<svg/>", alt: "" });
+    const body = `<figure data-diagram=""><pre data-mermaid="">graph TD</pre></figure>\n\n${diagram}`;
+    fakeApi({ [`POST ${endpoint}`]: json(200, { markdown: body }) });
+    markdownView(body);
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "図" })).toHaveLength(2));
+  });
+
+  it("redraws in place when the color scheme changes, replacing a failure note without repeating it", async () => {
+    vi.mocked(drawDiagram).mockRejectedValueOnce(new Error("first")).mockResolvedValue({ src: "data:image/svg+xml,<svg/>", alt: "" });
+    fakeApi({ [`POST ${endpoint}`]: json(200, { markdown: diagram }) });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = (scheme: "light" | "dark") => (
+      <MantineProvider env="test" forceColorScheme={scheme}><QueryClientProvider client={client}><I18nProvider initial="ja"><Markdown repo="acme/demo" source={diagram} /></I18nProvider></QueryClientProvider></MantineProvider>
+    );
+    const { container, rerender } = render(view("light"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("first");
+    rerender(view("dark"));
+    await screen.findByRole("button", { name: "図" });
+    expect(screen.queryByRole("alert")).toBeNull();
+    rerender(view("light"));
+    await waitFor(() => expect(drawDiagram).toHaveBeenCalledTimes(3));
+    expect(container.querySelectorAll("figure")).toHaveLength(1);
+    expect(container.querySelectorAll("img")).toHaveLength(1);
+  });
+
+  it("leaves the source in view with Mermaid's reason when the diagram cannot be drawn", async () => {
+    vi.mocked(drawDiagram).mockRejectedValue(new Error("Parse error on line 2"));
+    fakeApi({ [`POST ${endpoint}`]: json(200, { markdown: diagram }) });
+    const { container } = markdownView(diagram);
+    expect(await screen.findByRole("alert")).toHaveTextContent("図を描画できませんでした: Parse error on line 2");
+    expect(container.querySelector("figure")).toBeNull();
+    expect(container.querySelector("pre[data-mermaid]")).toHaveTextContent("flowchart LR");
   });
 });

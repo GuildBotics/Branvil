@@ -428,6 +428,47 @@ a:hover {
   white-space: pre;
 }
 
+.markdown figure[data-diagram] {
+  margin: 0 0 8px;
+}
+
+.markdown figure[data-diagram] button {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+
+.markdown figure[data-diagram] button:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+.markdown figure[data-diagram] img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.diagram-full-size {
+  display: block;
+}
+
+.markdown figure[data-diagram] summary {
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.markdown [data-diagram-error] {
+  color: var(--mantine-color-red-text);
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
 .markdown a {
   color: var(--mantine-color-anchor);
 }

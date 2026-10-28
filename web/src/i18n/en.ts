@@ -3,6 +3,10 @@
 export const en = {
   "markdown.ticket": "Ticket",
   "markdown.pull": "Pull request",
+  "markdown.diagram": "Diagram",
+  "markdown.diagramSource": "Show source",
+  "markdown.diagramFullSize": "Show full size",
+  "markdown.diagramError": "Could not draw the diagram",
   "common.loading": "Loading…",
   "common.refreshing": "Refreshing…",
   "common.retry": "Retry",
