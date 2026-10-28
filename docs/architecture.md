@@ -675,31 +675,39 @@ pages remain available to continue searching.
 The merge refills empty repository pages before selecting the next row, so older
 rows from one repository cannot appear ahead of unread newer rows from another.
 Pull, repository, and upstream events refetch the loaded pages from the start.
-The list shows default-branch CI below the rows in the
-same card. For a selected repository, its tip's jobs are shown directly and open the
-existing job drawer. For all repositories, an initially folded summary counts
-repositories by CI status;
-opening it lists repository links, default branches, status badges and commit
-links. The first 30 repositories are read, with any omission shown. The queries
-stay active while folded and use the same event invalidation as the other pages.
+The page header carries default-branch CI: a summary counts repositories by CI
+status (the selected repository's tip shows its status alone), and opening it
+lists repository links, default branches, status badges and commit links in a
+drawer, or, for a selected repository, its tip's jobs, which open the existing
+job drawer. The first 30 repositories are read, with any omission shown. The
+queries stay active while the drawer is closed and use the same event
+invalidation as the other pages.
 The list sizes state and CI columns to their contents, wraps reviewer avatars,
 and scrolls horizontally within its own frame when the columns need more room.
-The pull request's check list marks required checks. Its merge or publish card
-names required checks that have not succeeded on the displayed head and disables
-the action until they do; while checks are loading or cannot be read, required
-checks remain unsatisfied. With no required checks, the card explains that check
-results do not block either action, but a gate conflict still does. The card
-shows separate head-check, approval, and gate rows. The gate row
-shows its queue position, links to the first pull request and gate jobs, the
-first's state and its start time, or the reason it left and how to return.
-For a stopped publication, the owner returns it to the queue before publishing
-again after the gate passes.
-Pull request lists carry queue-state badges; the repository's landing queue
-lists active entries in order and departed entries with their reasons.
-The card also shows approvals against the repository's required approvals and disables the action
-while they are short; the reviewer badges and that count come from the review
-states the server puts in the pull request. The server rechecks these
-conditions when the action is submitted. When the repository lands
+It names repositories without the workspace prefix.
+Where an open pull request is on its way into its base is decided once
+(`whereabouts` in `web/src/views/pull/LandingStatus.tsx`) from its queue entry,
+the required checks on its head, its approvals and draft state: the stops are
+requirements, queue, gate, the upstream host (with an upstream only), merge and
+base, and at the current stop Branvil, the host or CI is working, a person has
+a turn, or the pull request left the queue there. A queue entry for an older
+head, or a departure the head itself clears (a move, a draft), puts it back at
+the requirements. The list shows this as one badge per open pull request (its
+title names every missing requirement, the departure reason, or who goes
+first); the pull request's page shows it as a card under the header with every
+stop, one line saying the state and whose turn it is, and only what the current
+stop needs: missing requirements, the pull request that enters the gate first,
+gate progress, the host's pull request when the owner acts there, how many wait
+behind, or the reason it left and how to return. Check details stay in the
+check list, which marks required checks.
+The merge or publish card holds only the action. It stays disabled until the
+required checks have succeeded on the displayed head (while checks are loading
+or cannot be read, they remain unsatisfied), the approvals reach the
+repository's required approvals, and the gate has passed at the front of the
+queue; the reviewer badges and that count come from the review states the
+server puts in the pull request. The server rechecks these conditions when the
+action is submitted. For a stopped publication, the owner returns it to the
+queue before publishing again after the gate passes. When the repository lands
 automatically, the card says that it acts by itself, and a pull request it
 published says so.
 While a card is dragged, the box under the pointer scrolls when the pointer is

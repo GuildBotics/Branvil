@@ -7,7 +7,7 @@ import { applyChange, LOST_AFTER_MS } from "../query/events";
 import { pull } from "./fixtures";
 
 const page = (items: unknown[]) => json(200, { items, next_cursor: null });
-const repo = (path: string) => ({ path, default_branch: "main", clone_url: "", url: "", protected_branches: [], required_checks: [], labels: [], upstream: null, revision: 1 });
+const repo = (path: string) => ({ path, default_branch: "main", clone_url: "", url: "", protected_branches: [], required_checks: [], required_approvals: 0, labels: [], upstream: null, revision: 1 });
 
 const SHELL = {
   "GET /api/v1/session": json(200, SESSION),
@@ -107,6 +107,7 @@ describe("pages", () => {
       label: "!1",
       title: "Draft work",
       draft: true,
+      landing: null,
       updated_at: "2026-10-15T10:00:00.000Z",
     });
     const fake = fakeApi({
@@ -124,7 +125,7 @@ describe("pages", () => {
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows.map((r) => r.getAttribute("aria-label"))).toEqual(["acme/web !1 Draft work", "acme/demo !3 Fix login"]);
     expect(rows[1]).toHaveAttribute("href", "/acme/demo/-/pulls/3");
-    expect(within(rows[0] as HTMLElement).getByText("Draft")).toBeInTheDocument();
+    expect(await within(rows[0] as HTMLElement).findByText(/Not queued: Draft/)).toBeInTheDocument();
     expect(within(table).getByRole("columnheader", { name: "Reviewers" })).toBeInTheDocument();
     for (const row of rows) {
       expect(within(row).getByRole("img", { name: "Reviewers: owner (Requested)" })).toBeInTheDocument();
@@ -268,6 +269,7 @@ describe("pages", () => {
       "GET /api/v1/repos/acme/demo/pulls": page([]),
     });
     renderApp("/acme/demo");
+    await userEvent.setup().click(await screen.findByRole("button", { name: /^Checks of trunk/ }));
     const checks = await screen.findByRole("region", { name: "Checks of trunk" });
     expect(await within(checks).findByText("pending")).toBeInTheDocument();
     expect(within(checks).getByText("in progress")).toBeInTheDocument();
@@ -285,10 +287,11 @@ describe("pages", () => {
       "GET /api/v1/repos/acme/demo/pulls": page([]),
     });
     renderApp("/acme/demo");
+    await userEvent.setup().click(await screen.findByRole("button", { name: /^Checks of main/ }));
     expect(await screen.findByText("main has no commits yet.")).toBeInTheDocument();
   });
 
-  it("keeps the default branch checks below the list in the same card, with a collapsed workspace summary", async () => {
+  it("summarizes the default branch checks in the page header, apart from the list, and opens them in a drawer", async () => {
     const tip = "f".repeat(40);
     const fake = fakeApi({
       ...SHELL,
@@ -301,9 +304,9 @@ describe("pages", () => {
     renderApp("/acme/-/pulls");
     const list = await screen.findByRole("table", { name: "Pull requests" });
     await waitFor(() => expect(fake.calls("GET", `/api/v1/repos/acme/demo/commits/${tip}/checks`)).toHaveLength(1));
-    const summary = screen.getByRole("button", { expanded: false });
-    expect(list.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(list.closest(".mantine-Card-root")).toBe(summary.closest(".mantine-Card-root"));
+    const summary = screen.getByRole("button", { name: /Default branch CI/, expanded: false });
+    expect(summary.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(summary.closest(".mantine-Card-root")).toBeNull();
     const user = userEvent.setup();
     await user.click(summary);
     const sha = await screen.findByTitle(tip);

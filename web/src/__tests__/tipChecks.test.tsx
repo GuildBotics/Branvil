@@ -33,8 +33,8 @@ function renderChecks(paths: string[], repo: string | null = null, language: "en
   return client;
 }
 
-describe("default branch CI under the pull list", () => {
-  it("loads and counts all CI states while folded, and distinguishes missing checks, empty repositories and read failures", async () => {
+describe("default branch CI in the pull list header", () => {
+  it("loads and counts all CI states while closed, and distinguishes missing checks, empty repositories and read failures", async () => {
     const paths = ["passing", "failing", "pending", "missing", "none", "empty", "error", "loading"].map((name) => `acme/${name}`);
     fakeApi({
       ...repoRoutes(paths[0]!),
@@ -56,7 +56,6 @@ describe("default branch CI under the pull list", () => {
       for (const label of ["passing 1", "failing 1", "pending 1", "not registered yet 1", "no checks 1", "no commits 1", "could not load 1", "Loading… 1"]) expect(toggle).toHaveTextContent(label);
     });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(toggle).toHaveTextContent("8 repositories");
     expect(screen.queryByRole("link", { name: /^acme\/passing\b/ })).not.toBeInTheDocument();
     await user.click(toggle);
     const section = await screen.findByRole("region", { name: "Default branch CI of acme" });
@@ -68,8 +67,10 @@ describe("default branch CI under the pull list", () => {
     const paths = Array.from({ length: 32 }, (_, i) => `acme/repo-${i}`);
     const fake = fakeApi(Object.assign({}, ...paths.slice(0, 30).map((path) => repoRoutes(path))));
     renderChecks(paths);
-    await waitFor(() => expect(screen.getByRole("button", { name: /Default branch CI/ })).toHaveTextContent("passing 30"));
-    expect(screen.getByText("Checks are loaded for the first 30 repositories; 2 more are omitted.")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: /Default branch CI/ });
+    await waitFor(() => expect(toggle).toHaveTextContent("passing 30"));
+    await userEvent.setup().click(toggle);
+    expect(await screen.findByText("Checks are loaded for the first 30 repositories; 2 more are omitted.")).toBeInTheDocument();
     expect(fake.requests).toHaveLength(90);
     expect(fake.requests.some((request) => /repo-3[01](?:\/|$)/.test(request.path))).toBe(false);
   });
@@ -127,7 +128,7 @@ describe("default branch CI under the pull list", () => {
     expect(fake.calls("GET", `/api/v1/repos/acme/demo/commits/${SHA}/checks`)).toHaveLength(2);
   });
 
-  it("shows the selected repository's jobs and drawer immediately, with a commit link", async () => {
+  it("summarizes the selected repository's tip and opens its jobs and a job's drawer, with a commit link", async () => {
     fakeApi({
       ...repoRoutes("acme/demo"),
       [`GET /api/v1/repos/acme/demo/commits/${SHA}/checks`]: json(200, { sha: SHA, checks_expected: true, checks: [{ ...check(), attempt_id: "hosted-test", details_url: "https://example.test/check" }] }),
@@ -135,10 +136,14 @@ describe("default branch CI under the pull list", () => {
     });
     const user = userEvent.setup();
     renderChecks(["acme/demo"], "acme/demo");
+    const toggle = await screen.findByRole("button", { name: /^Checks of trunk/ });
+    await waitFor(() => expect(toggle).toHaveTextContent("passing"));
+    expect(toggle).not.toHaveTextContent("passing 1");
+    await user.click(toggle);
     const region = await screen.findByRole("region", { name: "Checks of trunk" });
     expect((await within(region).findByTitle(SHA)).closest("a")).toHaveAttribute("href", `/acme/demo/-/commits/${SHA}`);
     await user.click(await within(region).findByRole("button", { name: "Open check test" }));
-    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole("dialog")).toHaveLength(2));
     expect(screen.getByRole("link", { name: "Open on the host" })).toHaveAttribute("href", "https://example.test/check");
     expect(await screen.findByText("test output")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Default branch CI/ })).not.toBeInTheDocument();
@@ -147,6 +152,7 @@ describe("default branch CI under the pull list", () => {
   it("keeps the selected repository's no-tip message and Japanese labels", async () => {
     fakeApi({ ...repoRoutes("acme/demo"), "GET /api/v1/repos/acme/demo/branches/trunk": apiError(404, "not_found", "No branch") });
     renderChecks(["acme/demo"], "acme/demo", "ja");
+    await userEvent.setup().click(await screen.findByRole("button", { name: /^trunk のチェック/ }));
     expect(await screen.findByText("trunk にはまだコミットがありません。")).toBeInTheDocument();
   });
 });

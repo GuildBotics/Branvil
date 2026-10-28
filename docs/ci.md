@@ -217,7 +217,7 @@ of one job (`att_<ULID>`, numbered 1, 2, … per job). An attempt's `purpose`
 is `check` or `cache_refresh`; both purposes share the job's attempt numbers.
 For example, check #1 followed by refresh #2 makes a manual check retry #3.
 Checks show the latest `check` attempt of each job: a pull request's page
-shows its head's, a commit's page that commit's, and a repository's page its default branch's tip
+shows its head's, a commit's page that commit's, and the pull request list's header the default branch tips'
 (`GET …/pulls/{number}/checks`, `GET …/commits/{sha}/checks`).
 
 | Attempt status | Conclusion (when completed) |
