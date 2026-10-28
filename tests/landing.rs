@@ -21,17 +21,6 @@ async fn landing(w: &World, number: u64, state: &str) -> Value {
     }
 }
 
-async fn next_claim(runner: &crate::ci::Runner) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(claim) = runner.claim().await {
-            return claim;
-        }
-        assert!(Instant::now() < deadline, "no queued gate job appeared");
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
-}
-
 async fn merge(w: &World, number: u64, p: &Value) -> Value {
     let (status, merged) = w
         .server
@@ -48,7 +37,7 @@ async fn merge(w: &World, number: u64, p: &Value) -> Value {
 async fn divergent_gate(jobs: &[&str]) -> (World, crate::ci::Runner, Value) {
     let (w, runner, head) = divergent_feature(jobs).await;
     for _ in jobs {
-        let claim = next_claim(&runner).await;
+        let claim = runner.next_claim().await;
         assert_eq!(claim["sha"], head);
         assert_eq!(runner.finish(&claim, "success").await.0, 200);
     }
@@ -191,7 +180,7 @@ async fn advancing_base_preserves_admission_order_and_waiting_timestamps() {
 async fn an_unrelated_base_advance_rebuilds_gating_and_passed_leaders_in_place() {
     for passed in [false, true] {
         let (mut w, runner, mut before) = divergent_gate(&["test"]).await;
-        let old_claim = next_claim(&runner).await;
+        let old_claim = runner.next_claim().await;
         if passed {
             assert_eq!(runner.finish(&old_claim, "success").await.0, 200);
             before = landing(&w, 3, "passed").await;
@@ -199,7 +188,7 @@ async fn an_unrelated_base_advance_rebuilds_gating_and_passed_leaders_in_place()
         crate::ci::sync_main(&w);
         let next_head = w.push_change("next", "next.txt", "next\n");
         w.open_pull("next", json!([])).await;
-        let claim = next_claim(&runner).await;
+        let claim = runner.next_claim().await;
         assert_eq!(claim["sha"], next_head);
         assert_eq!(runner.finish(&claim, "success").await.0, 200);
         let waiting = landing(&w, 4, "waiting").await;
@@ -271,7 +260,7 @@ async fn an_unrelated_base_advance_rebuilds_gating_and_passed_leaders_in_place()
 async fn ctrl_c_during_a_gate_update_waits_for_it() {
     let (mut w, runner, head) = divergent_feature(&["test"]).await;
     let hold = RefHold::new(&w, "refs/branvil/gate/3");
-    let claim = next_claim(&runner).await;
+    let claim = runner.next_claim().await;
     assert_eq!(claim["sha"], head);
     assert_eq!(runner.finish(&claim, "success").await.0, 200);
     hold.wait().await;
@@ -331,7 +320,7 @@ async fn a_stop_signal_during_startup_waits_for_it() {
 async fn failed_gate_refs_are_recovered_and_removed_when_their_inputs_or_pull_close() {
     for change in ["close", "head", "base"] {
         let (mut w, runner, gating) = divergent_gate(&["test"]).await;
-        let claim = next_claim(&runner).await;
+        let claim = runner.next_claim().await;
         assert_eq!(runner.finish(&claim, "failure").await.0, 200);
         landing(&w, 3, "left").await;
         let gate = gating["landing"]["gate"].as_str().unwrap();
@@ -376,7 +365,7 @@ async fn failed_gate_refs_are_recovered_and_removed_when_their_inputs_or_pull_cl
 #[tokio::test]
 async fn retry_requires_cancelled_siblings_and_retains_the_gate_while_waiting_again() {
     let (w, runner, gating) = divergent_gate(&["first", "second"]).await;
-    let failed = next_claim(&runner).await;
+    let failed = runner.next_claim().await;
     assert_eq!(runner.finish(&failed, "failure").await.0, 200);
     let left = landing(&w, 3, "left").await;
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -401,7 +390,7 @@ async fn retry_requires_cancelled_siblings_and_retains_the_gate_while_waiting_ag
         tokio::time::sleep(Duration::from_millis(30)).await;
     };
     retry(&w, &failed).await;
-    let retried = next_claim(&runner).await;
+    let retried = runner.next_claim().await;
     assert_eq!(runner.finish(&retried, "success").await.0, 200);
     let still = landing(&w, 3, "left").await;
     assert_eq!(still["landing"]["sequence"], left["landing"]["sequence"]);
@@ -416,13 +405,13 @@ async fn retry_requires_cancelled_siblings_and_retains_the_gate_while_waiting_ag
     let next = w.push_change("next", "next.txt", "next\n");
     w.open_pull("next", json!([])).await;
     for _ in 0..2 {
-        let claim = next_claim(&runner).await;
+        let claim = runner.next_claim().await;
         assert_eq!(claim["sha"], next);
         assert_eq!(runner.finish(&claim, "success").await.0, 200);
     }
     landing(&w, 4, "passed").await;
     retry(&w, &cancelled).await;
-    let retried = next_claim(&runner).await;
+    let retried = runner.next_claim().await;
     assert_eq!(runner.finish(&retried, "success").await.0, 200);
     let waiting = landing(&w, 3, "waiting").await;
     let gate = gating["landing"]["gate"].as_str().unwrap();
@@ -432,7 +421,7 @@ async fn retry_requires_cancelled_siblings_and_retains_the_gate_while_waiting_ag
     merge(&w, 4, &landing(&w, 4, "passed").await).await;
     let rebuilt = landing(&w, 3, "gating").await;
     for _ in 0..2 {
-        let claim = next_claim(&runner).await;
+        let claim = runner.next_claim().await;
         assert_eq!(claim["sha"], rebuilt["landing"]["gate"]);
         assert_eq!(runner.finish(&claim, "success").await.0, 200);
     }
@@ -667,7 +656,7 @@ async fn failed_gates_wait_for_a_successful_retry_and_passed_gates_recheck_retri
     let (w, runner, gating) = divergent_gate(&["test"]).await;
     let head = &gating["head_sha"];
     let advance = &gating["base_sha"];
-    let claim = next_claim(&runner).await;
+    let claim = runner.next_claim().await;
     assert_eq!(claim["sha"], gating["landing"]["gate"]);
     assert_eq!(runner.finish(&claim, "failure").await.0, 200);
     let left = landing(&w, 3, "left").await;
@@ -706,7 +695,7 @@ async fn failed_gates_wait_for_a_successful_retry_and_passed_gates_recheck_retri
         )
         .await;
     assert_eq!(st, 200, "{result}");
-    let retry = next_claim(&runner).await;
+    let retry = runner.next_claim().await;
     assert_eq!(runner.finish(&retry, "success").await.0, 200);
     let passed = landing(&w, 3, "passed").await;
     assert_eq!(passed["landing"]["gate"], gating["landing"]["gate"]);
@@ -744,7 +733,7 @@ async fn failed_gates_wait_for_a_successful_retry_and_passed_gates_recheck_retri
         )
         .await;
     assert_eq!(st, 409, "{denied}");
-    let retry = next_claim(&runner).await;
+    let retry = runner.next_claim().await;
     assert_eq!(runner.finish(&retry, "failure").await.0, 200);
     assert_eq!(
         landing(&w, 3, "left").await["landing"]["reason"]["code"],
