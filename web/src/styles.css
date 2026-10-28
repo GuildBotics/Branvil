@@ -657,7 +657,8 @@ pre {
   font-weight: 600;
   line-height: 1.4;
   margin: 0;
-  padding-right: 18px;
+  /* A word longer than the card (a test's name) breaks instead of widening it. */
+  overflow-wrap: anywhere;
 }
 
 .card .title a {
@@ -670,6 +671,11 @@ pre {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* The card's first row keeps clear of its menu in the top right corner. */
+.card-head {
+  padding-right: 18px;
 }
 
 .card-who {

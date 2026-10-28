@@ -148,6 +148,36 @@ export function CopyUrlItem({ url }: { url: string }) {
   );
 }
 
+/**
+ * Turns a ticket's own "interactive" on or off from either card menu. A ticket
+ * interactive through an ancestor shows it checked and cannot turn it off.
+ * The menu stays open until the change is written, and keeps a refusal visible.
+ */
+export function InteractiveItem({ card }: { card: Card }) {
+  const t = useT();
+  const client = useQueryClient();
+  const close = useMenuContext().closeDropdownImmediately;
+  const toggle = useMutation({
+    mutationFn: () => api.tickets.update(card.repository, card.key, { interactive: !card.interactive }),
+    onSuccess: close,
+    // Descendants inherit it, so every card is read again.
+    onSettled: () => void client.invalidateQueries({ queryKey: ["board"] }),
+  });
+  return (
+    <>
+      <Menu.Item
+        leftSection={<CheckSlot on={card.interactive || card.interactive_ancestor !== null} />}
+        closeMenuOnClick={false}
+        disabled={toggle.isPending || card.interactive_ancestor !== null}
+        onClick={() => toggle.mutate()}
+      >
+        {t("ticket.interactive")}
+      </Menu.Item>
+      {toggle.isError && <Menu.Label><ErrorMessage error={toggle.error} /></Menu.Label>}
+    </>
+  );
+}
+
 /** Last action of either card menu. Keep a refusal visible until it is closed. */
 export function DeleteCardItem({ card }: { card: Card }) {
   const t = useT();
@@ -226,7 +256,7 @@ export function CardView({
 
   return (
     <article className={["card", busy && "busy", className].filter(Boolean).join(" ")} aria-busy={busy} aria-label={`${ref} ${card.title}`}>
-      <div className="card-row">
+      <div className="card-row card-head">
         {lead}
         <TicketLink repo={card.repository} ticketKey={card.key} className="key">
           {ref}
@@ -345,6 +375,7 @@ function CardMenu({
           {t("board.down")}
         </Menu.Item>
         <Menu.Divider />
+        <InteractiveItem card={card} />
         <CopyUrlItem url={card.url} />
         <DeleteCardItem card={card} />
       </LazyMenu>

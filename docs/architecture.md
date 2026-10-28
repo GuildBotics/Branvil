@@ -633,13 +633,15 @@ and component overrides copied into `web/src/styles.css` (kept identical), so
 it can sit beside or inside Desktop. Its pages: a sidebar (the workspace, its
 task board, task flow and pull requests, settings), the task board (lanes as tall as the window, a
 ticket added at the foot of a lane, a card marked when a blocker is open,
-its lane and assignee changed from the card, the ticket's URL copied from
-the card's menu, which says that it copied and then closes),
+its lane and assignee changed from the card, the ticket made interactive or
+not and its URL copied from the card's menu, which says that it copied and
+then closes),
 the task flow (the board's cards laid out left to right by their blockers, a
 column's tickets in progress first, then ready, new, and done, each lane in the
 board's order, a ticket pushed down, that order kept, to stand level with the
 topmost ticket it waits for,
-children inside their parent once it is opened, lines drawn in SVG over a CSS
+children inside their parent once it is opened, a parent coloured as one even
+while none of its children is shown, lines drawn in SVG over a CSS
 layout; text, assignee, and label filters hide nonmatching tickets and their
 lines, keeping only matching tickets and their ancestors (shown faintly for
 context), automatically opening those ancestors and the frame of new tickets
@@ -658,8 +660,9 @@ ready; the undo of a change of relations also puts them back in new; one
 without relations dropped onto the frame is made new; near the top or bottom
 of a card of its own lane a card is put there on the board; a ticket added
 from the header is new, one added from a card's menu as its parent, child, or
-next ticket ready (that menu also copies the ticket's URL and says that it
-copied), and either is scrolled to once shown;
+next ticket ready (that menu also makes the ticket interactive or not, and
+copies the ticket's URL and says that it copied), and either is scrolled to
+once shown;
 `web/src/views/relations/`), a ticket (body and comments, with comments editable
 and permanently deletable by their author or the owner after confirmation; its lane, labels,
 upstream issue, relations to other tickets, and assignee; from the board and
