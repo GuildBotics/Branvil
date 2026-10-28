@@ -25,7 +25,7 @@ import { RelationsView } from "./views/RelationsView";
 import { SettingsView } from "./views/SettingsView";
 import { TicketView } from "./views/TicketView";
 import { TicketDrawer } from "./views/ticket/TicketDrawer";
-import { useCurrentWorkspace } from "./workspace";
+import { useCurrentWorkspace, workspaceStart } from "./workspace";
 
 export function App({ client, language, test }: { client: QueryClient; language?: "en" | "ja"; test?: boolean }) {
   return (
@@ -96,7 +96,7 @@ function RouteView({ route, workspace, workspaces, showBoard, setShowBoard }: {
   const t = useT();
   switch (route.name) {
     case "home":
-      return <Home workspace={workspace} workspaces={workspaces} />;
+      return <Home workspace={workspace} workspaces={workspaces} showBoard={showBoard} />;
     case "settings":
       return (
         <SettingsView section={route.section} workspace={workspace} repo={route.repo ?? null} showBoard={showBoard} setShowBoard={setShowBoard} />
@@ -138,13 +138,13 @@ function RouteView({ route, workspace, workspaces, showBoard, setShowBoard }: {
   }
 }
 
-/** `/` opens the shown workspace's board; with no workspace yet, offers to create one. */
-function Home({ workspace, workspaces }: { workspace: string | null; workspaces: string[] | null }) {
+/** `/` opens the shown workspace's first page; with no workspace yet, offers to create one. */
+function Home({ workspace, workspaces, showBoard }: { workspace: string | null; workspaces: string[] | null; showBoard: boolean }) {
   const t = useT();
   const [creating, setCreating] = useState(false);
   useEffect(() => {
-    if (workspace) navigate(href.workspace(workspace), { replace: true });
-  }, [workspace]);
+    if (workspace) navigate(workspaceStart(workspace, showBoard), { replace: true });
+  }, [workspace, showBoard]);
   if (workspaces === null || workspace) return <Loading />;
   return (
     <Stack gap="lg" align="flex-start">
@@ -153,7 +153,7 @@ function Home({ workspace, workspaces }: { workspace: string | null; workspaces:
         {t("workspace.noneHelp")}
       </Text>
       <Button onClick={() => setCreating(true)}>{t("workspace.new")}</Button>
-      <NewWorkspaceModal opened={creating} onClose={() => setCreating(false)} />
+      <NewWorkspaceModal opened={creating} onClose={() => setCreating(false)} showBoard={showBoard} />
     </Stack>
   );
 }
