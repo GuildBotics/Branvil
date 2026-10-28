@@ -467,6 +467,64 @@ fn registration_over(w: &mut World) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_registration_deadline_polls_without_waiting_for_the_regular_interval() {
+    let (mut w, gh) = followed().await;
+    // Both regular intervals are an hour. Only the registration deadline
+    // can poll the already-finished checks in time to send this notice.
+    let config = w.server.data.join("branvil.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace(
+            "checks_registration_secs = 0",
+            "checks_registration_secs = 5",
+        ),
+    )
+    .unwrap();
+    w.restart(&[]);
+    let hook = Hook::start(&w, &[]).await;
+    with_aiko_account(&w).await;
+    settings(&w, json!({"auto_land": true})).await;
+    let mut n = None;
+    for (i, content) in ["one\n", "two\n"].iter().enumerate() {
+        let event = std::time::Instant::now();
+        let head = w.push_change("feat", "f.txt", content);
+        gh.check(&head, 70, "fast", "success", "ok\n");
+        gh.workflow_run(&head, 1, "completed", Some("success"));
+        let number = match n {
+            Some(n) => n,
+            None => {
+                let created = number(&w.open_pull("feat", json!([])).await);
+                n = Some(created);
+                created
+            }
+        };
+        eventually("the head's publish", || async {
+            let p = pull(&w, number).await;
+            p["upstream"]["pushed"] == head && p["upstream"]["number"].is_u64()
+        })
+        .await;
+        assert!(check_names(&w, number).await.contains(&json!("github")));
+        assert_eq!(hook.received().len(), i);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            eventually("the deadline's notice", || async {
+                let received = hook.received().len();
+                if event.elapsed() < std::time::Duration::from_secs(5) {
+                    assert_eq!(received, i, "not before registration ends");
+                }
+                received == i + 1
+            })
+            .await;
+        })
+        .await
+        .expect("the deadline must not wait for the regular poll");
+        let p = pull(&w, number).await;
+        assert_eq!(p["landing"]["first"]["next"], "owner_merge_host", "{p}");
+        assert!(!check_names(&w, number).await.contains(&json!("github")));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_webhook_is_told_only_once_every_host_check_of_the_head_succeeded() {
     let (mut w, gh) = followed().await;
     // GitHub takes its time to register the checks of a new head.

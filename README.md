@@ -404,6 +404,9 @@ otherwise, and at once after publishing or "Check now". GitHub registers the
 checks of a pushed head a little later, so a head waits for more checks until
 `checks_registration_secs` after the push (or the pull request's creation,
 edit, or reopening there) and while a workflow run of it has not finished.
+The registration wait defaults to 60 s. The poller also wakes at its deadline
+to read GitHub, without waiting for the next regular poll; only a successful
+read ends the registration wait.
 The reading account needs, for a GitHub App, Repository permissions →
 **Checks: Read-only** and **Actions: Read-only** (the workflow runs and the
 jobs' logs); for a token, the same permissions (fine-grained) or the `repo`
@@ -414,7 +417,7 @@ Settings in `branvil.toml`:
 [upstream]
 poll_active_secs = 60
 poll_idle_secs = 900
-checks_registration_secs = 300
+checks_registration_secs = 60
 ```
 
 Notes:
