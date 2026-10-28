@@ -318,16 +318,9 @@ async fn paths_land(auto: bool) {
     );
     let actual = runner.claim().await.unwrap();
     assert_eq!(runner.finish(&actual, "success").await.0, 200);
-    eventually("a separate gate with all selected skips queued", || async {
-        checks(&w, n).await["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c["name"] == "gate/rust")
-    })
-    .await;
     let mut seen = Vec::new();
-    while let Some(c) = runner.claim().await {
+    let mut next = Some(runner.next_claim().await);
+    while let Some(c) = next {
         assert_ne!(c["sha"], head, "head remains satisfied throughout gating");
         let name = c["job"]["name"].as_str().unwrap().to_string();
         if name == "always" {
@@ -340,6 +333,7 @@ async fn paths_land(auto: bool) {
         }
         seen.push(name);
         assert_eq!(check(&checks(&w, n).await, "rust")["conclusion"], "skipped");
+        next = runner.claim().await;
     }
     seen.sort();
     assert_eq!(seen, ["always", "rust", "web"]);
@@ -706,6 +700,42 @@ async fn cache_refresh_never_changes_main_checks_or_required_readiness() {
     assert_eq!(records(&db, "ci_attempts"), before_attempts);
 }
 
+#[tokio::test]
+async fn next_claim_retries_empty_responses_until_a_job_is_registered() {
+    use axum::{Json, Router, response::IntoResponse, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = requests.clone();
+    let app = Router::new().route(
+        "/api/v1/runner/claim",
+        post(move || {
+            let count = count.clone();
+            async move {
+                if count.fetch_add(1, Ordering::SeqCst) < 2 {
+                    StatusCode::NO_CONTENT.into_response()
+                } else {
+                    Json(json!({"attempt_id":"registered"})).into_response()
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let runner = Runner {
+        url: format!("http://{}", listener.local_addr().unwrap()),
+        token: "scripted-runner".into(),
+        http: reqwest::Client::new(),
+    };
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let claim = runner.next_claim().await;
+    server.abort();
+    assert_eq!(claim["attempt_id"], "registered");
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+}
+
 /// A scripted runner talking to the runner API.
 pub(crate) struct Runner {
     url: String,
@@ -739,6 +769,21 @@ impl Runner {
             StatusCode::NO_CONTENT => None,
             StatusCode::OK => Some(resp.json().await.unwrap()),
             other => panic!("claim: {other} {}", resp.text().await.unwrap()),
+        }
+    }
+
+    /// Waits for asynchronously registered work; an empty queue is not EOF.
+    pub(crate) async fn next_claim(&self) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(claim) = self.claim().await {
+                return claim;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no queued job appeared"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
     }
 
