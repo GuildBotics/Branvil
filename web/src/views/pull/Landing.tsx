@@ -10,70 +10,15 @@ import * as api from "../../api/endpoints";
 import type { PullRequest, Repository, Upstream } from "../../api/types";
 import { ErrorMessage, Notice, Refusal, Sha, StateBadge } from "../../components/common";
 import { useT, type Translate } from "../../i18n";
-import { useChecks, usePublishPreview } from "../../query/hooks";
+import { usePublishPreview } from "../../query/hooks";
 import { keys } from "../../query/keys";
-import { GateStage, gatePassed } from "./LandingStatus";
+import { gatePassed, useMissingChecks } from "./LandingStatus";
 
 function refusalOf(t: Translate, err: unknown, notReady: "merge.notMergeable" | "publish.notReady" | "landing.notReady"): string {
   if (isApiError(err, "head_moved")) return t("merge.headMoved");
   if (isApiError(err, "base_moved")) return t("merge.baseMoved");
   if (isApiError(err, "not_mergeable")) return t(notReady, { message: err.message });
   return err instanceof Error ? err.message : String(err);
-}
-
-/** Match check_landable: real success or a service path selection on this head. */
-function useMissingChecks(pull: PullRequest, requiredChecks: string[]): string[] {
-  const checks = useChecks(pull.repository, pull.number, requiredChecks.length > 0);
-  const current = !checks.isError && checks.data?.head_sha === pull.head_sha ? checks.data : undefined;
-  return requiredChecks.filter((name) => !current?.checks.some((c) => c.name === name && c.status === "completed" && (c.conclusion === "success" || (c.conclusion === "skipped" && !!c.path_skip))));
-}
-
-function RequiredChecks({ pull, checks, missing }: { pull: PullRequest; checks: string[]; missing: string[] }) {
-  const query = useChecks(pull.repository, pull.number, checks.length > 0);
-  const current = !query.isError && query.data?.head_sha === pull.head_sha ? query.data : undefined;
-  const t = useT();
-  return (
-    <Stack gap={4}>
-      <Text size="sm">{checks.length ? t("merge.requiredChecks", { checks: checks.join(", ") }) : t("merge.noRequiredChecks")}</Text>
-      {checks.map((name) => {
-        const check = current?.checks.find((c) => c.name === name);
-        const state = !current ? "checking" : !check ? "check.missing" : check.status !== "completed" ? "check.running" : check.conclusion === "skipped" && check.path_skip ? "check.pathsSkipped" : check.conclusion === "success" ? "check.success" : "check.failure";
-        return <Text key={name} size="sm">{name} · {t(`landing.${state}`)}</Text>;
-      })}
-      {missing.length > 0 && (
-        <Text size="sm" c="var(--color-warning-text)">
-          {t("merge.checksNotSucceeded", { checks: missing.join(", ") })}
-        </Text>
-      )}
-    </Stack>
-  );
-}
-
-/** The pull request's approvals (the server's count, as check_landable counts them) against those required. */
-function Approvals({ pull, required }: { pull: PullRequest; required: number }) {
-  const t = useT();
-  return (
-    <Text size="sm" c={pull.approvals < required ? "var(--color-warning-text)" : undefined}>
-      {required ? t("merge.approvals", { count: pull.approvals, required }) : t("merge.noRequiredApprovals")}
-    </Text>
-  );
-}
-
-function LandingStages({ pull, repo, missing }: { pull: PullRequest; repo: Repository; missing: string[] }) {
-  const t = useT();
-  return (
-    <>
-      <Stack gap={4} component="section" aria-label={t("landing.headChecks")}>
-        <Text size="sm" fw={700}>{t("landing.headChecks")}</Text>
-        <RequiredChecks pull={pull} checks={repo.required_checks} missing={missing} />
-      </Stack>
-      <Stack gap={4} component="section" aria-label={t("landing.approvals")}>
-        <Text size="sm" fw={700}>{t("landing.approvals")}</Text>
-        <Approvals pull={pull} required={repo.required_approvals} />
-      </Stack>
-      <GateStage pull={pull} repository={repo} />
-    </>
-  );
 }
 
 /** A repository without an upstream merges here (fast-forward). */
@@ -113,7 +58,6 @@ export function MergeCard({ pull, repo }: { pull: PullRequest; repo: Repository 
             {t("merge.draft")}
           </Text>
         )}
-        <LandingStages pull={pull} repo={repo} missing={missing} />
         <Group justify="flex-end">
           <Button leftSection={<GitMerge size={16} />} disabled={merge.isPending || pull.draft || !pull.head_sha || !pull.base_sha || blocked} onClick={() => merge.mutate()}>
             {merge.isPending ? t("merge.merging") : t("merge.submit")}
@@ -243,7 +187,6 @@ export function PublishCard({ pull, repo, upstream }: { pull: PullRequest; repo:
             {t("publish.draft")}
           </Text>
         )}
-        <LandingStages pull={pull} repo={repo} missing={missing} />
         {!editing && (
           <Group justify="space-between">
             <Button size="xs" variant="default" leftSection={<Pencil size={14} />} onClick={() => setEditing(true)}>

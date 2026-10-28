@@ -1,7 +1,7 @@
-import { Anchor, Group, Stack, Text } from "@mantine/core";
-import { GitBranch } from "lucide-react";
-import type { Landing, LandingFirst, PullRequest, Repository } from "../../api/types";
-import { ErrorMessage, Loading, Sha, StateBadge, type Tone } from "../../components/common";
+import { Anchor, Badge, Card, Group, Progress, Stack, Text } from "@mantine/core";
+import { Check, Cloud, GitBranch, GitMerge, Hourglass, ListChecks, ShieldCheck, X, type LucideIcon } from "lucide-react";
+import type { Landing, LandingFirst, LandingNext, PullRequest, Repository } from "../../api/types";
+import { StateBadge, type Tone } from "../../components/common";
 import { useT, type MessageKey } from "../../i18n";
 import { useChecks, useLanding } from "../../query/hooks";
 import { Link } from "../../router/Router";
@@ -35,41 +35,65 @@ export function LandingLeader({ repo, first, host, base }: { repo: string; first
       {human && (atHost && first.host_url ? (
         <Anchor href={first.host_url} target="_blank" rel="noopener noreferrer" size="sm">{t("landing.action")}</Anchor>
       ) : <Link to={href.pull(repo, first.number)}>{t("landing.action")}</Link>)}
-      <Text size="xs" c="dimmed">
-        {t("landing.elapsed")}{" "}
-        <RunTime startedAt={first.state_at} />
-      </Text>
+      <Elapsed first={first} />
     </Stack>
   );
 }
 
+function Elapsed({ first }: { first: LandingFirst }) {
+  const t = useT();
+  return (
+    <Text size="xs" c="dimmed">
+      {t("landing.elapsed")}{" "}
+      <RunTime startedAt={first.state_at} />
+    </Text>
+  );
+}
+
 const REASONS = ["merged", "closed", "draft", "conflict", "gate_failed", "host_failed", "publish_stopped", "already_in_base", "head_moved", "base_moved", "empty_head", "publish_requirements", "head_checks", "approvals"] as const;
+const reasonKey = (code: string): MessageKey => REASONS.includes(code as typeof REASONS[number]) ? `landing.reason.${code}` as MessageKey : "landing.reason.unknown";
+
 export function LandingReason({ landing }: { landing: Landing }) {
   const t = useT();
   const reason = landing.reason;
   if (!reason) return null;
   const tone = reasonTone(reason.code);
-  const key = REASONS.includes(reason.code as typeof REASONS[number]) ? `landing.reason.${reason.code}` as MessageKey : "landing.reason.unknown";
-  const recovery = reason.code === "gate_failed" ? "landing.retryGate" : reason.code === "host_failed" ? "landing.retryHost" : reason.code === "publish_stopped" ? "landing.publishAgain" : ["already_in_base", "empty_head"].includes(reason.code) ? "landing.closePull" : moved(reason.code) ? "landing.waitRejoin" : "landing.rejoin";
   return (
     <Stack gap={4} style={{ overflowWrap: "anywhere" }}>
-      <Text size="sm" c={tone === "neutral" ? "dimmed" : `var(--color-${tone}-text)`}>{t(key)}</Text>
-      {reason.code === "publish_stopped" && <Text size="sm">{reason.message}</Text>}
-      {reason.jobs.length > 0 && <Text size="sm">{t("landing.failedJobs", { jobs: reason.jobs.join(", ") })}</Text>}
-      {reason.files.length > 0 && <Text size="sm">{t("landing.conflicts", { files: reason.files.join(", ") })}</Text>}
-      {reason.code !== "merged" && <Text size="sm" c="dimmed">{t(recovery)}</Text>}
+      <Text size="sm" c={tone === "neutral" ? "dimmed" : `var(--color-${tone}-text)`}>{t(reasonKey(reason.code))}</Text>
+      <ReasonDetail landing={landing} />
     </Stack>
   );
 }
 
-function GateProgress({ repo, leader, required }: { repo: string; leader: Landing; required: string[] }) {
-  const checks = useChecks(repo, leader.number, true);
-  const completed = required.filter((name) => checks.data?.head_sha === leader.head_sha && checks.data.checks.some((c) => c.name === `gate/${name}` && c.status === "completed")).length;
-  return <Text size="xs">{completed}/{required.length}</Text>;
+/** What the departure left behind and how to rejoin, under its reason. */
+function ReasonDetail({ landing }: { landing: Landing }) {
+  const t = useT();
+  const reason = landing.reason;
+  if (!reason) return null;
+  const recovery = reason.code === "gate_failed" ? "landing.retryGate" : reason.code === "host_failed" ? "landing.retryHost" : reason.code === "publish_stopped" ? "landing.publishAgain" : ["already_in_base", "empty_head"].includes(reason.code) ? "landing.closePull" : moved(reason.code) ? "landing.waitRejoin" : "landing.rejoin";
+  return (
+    <>
+      {reason.code === "publish_stopped" && <Text size="sm">{reason.message}</Text>}
+      {reason.jobs.length > 0 && <Text size="sm">{t("landing.failedJobs", { jobs: reason.jobs.join(", ") })}</Text>}
+      {reason.files.length > 0 && <Text size="sm">{t("landing.conflicts", { files: reason.files.join(", ") })}</Text>}
+      {reason.code !== "merged" && <Text size="sm" c="dimmed">{t(recovery)}</Text>}
+    </>
+  );
 }
 
-/** The repository and PR pages share the same path and leader placement. */
-export function QueueLine({ repo, entries, repository, highlight }: { repo: string; entries: Landing[]; repository: Repository; highlight?: number }) {
+/** Required gate jobs completed on the leader's head. */
+function useGateDone(repo: string, leader: { number: number; head_sha: string }, required: string[]): number {
+  const checks = useChecks(repo, leader.number, true);
+  return required.filter((name) => checks.data?.head_sha === leader.head_sha && checks.data.checks.some((c) => c.name === `gate/${name}` && c.status === "completed")).length;
+}
+
+function GateProgress({ repo, leader, required }: { repo: string; leader: Landing; required: string[] }) {
+  return <Text size="xs">{useGateDone(repo, leader, required)}/{required.length}</Text>;
+}
+
+/** The repository page's queue: who waits, where the leader is, and the way to the base. */
+export function QueueLine({ repo, entries, repository }: { repo: string; entries: Landing[]; repository: Repository }) {
   const t = useT();
   const active = entries.filter((e) => e.state !== "left").sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const leader = active.find((entry) => entry.position === 1);
@@ -77,15 +101,12 @@ export function QueueLine({ repo, entries, repository, highlight }: { repo: stri
   const first = leader.first;
   const host = repository.upstream?.host ?? "";
   const waiting = active.slice(1);
-  const shown = waiting.slice(0, 3);
-  const selected = waiting.find((entry) => entry.number === highlight);
-  if (selected && !shown.includes(selected)) shown[2] = selected;
-  shown.sort((a, b) => (b.position ?? 0) - (a.position ?? 0));
+  const shown = waiting.slice(0, 3).sort((a, b) => (b.position ?? 0) - (a.position ?? 0));
   const place = first.next === "gate" ? "gate" : host && !["publishing", "owner_publish"].includes(first.next) ? "host" : "transit";
   const node = (entry: Landing) => (
-    <div className={`landing-pr${entry.number === highlight ? " landing-pr-highlight" : ""}`} data-pr={entry.number}>
+    <div className="landing-pr" data-pr={entry.number}>
       <span className="landing-dot">!{entry.number}</span>
-      {(highlight == null || entry.number === highlight) && <Text size="sm" fw={600}>{entry.title}</Text>}
+      <Text size="sm" fw={600}>{entry.title}</Text>
     </div>
   );
   const leaderAt = (slot: string) => place === slot ? <LandingLeader repo={repo} first={first} host={host} base={leader.base} /> : null;
@@ -117,27 +138,133 @@ export function QueueLine({ repo, entries, repository, highlight }: { repo: stri
   );
 }
 
-/** The same queue path, emphasizing the pull request being read. */
-export function GateStage({ pull, repository }: { pull: PullRequest; repository: Repository }) {
+export type CheckState = "checking" | "check.missing" | "check.running" | "check.pathsSkipped" | "check.success" | "check.failure";
+const satisfied = (state: CheckState) => state === "check.success" || state === "check.pathsSkipped";
+
+/** Each required check on this head, as check_landable reads it: real success or a service path selection. */
+export function useRequiredChecks(pull: PullRequest, required: string[]): { name: string; state: CheckState }[] {
+  const query = useChecks(pull.repository, pull.number, required.length > 0);
+  const current = !query.isError && query.data?.head_sha === pull.head_sha ? query.data : undefined;
+  return required.map((name) => {
+    const c = current?.checks.find((check) => check.name === name);
+    const state: CheckState = !current ? "checking" : !c ? "check.missing" : c.status !== "completed" ? "check.running" : c.conclusion === "success" ? "check.success" : c.conclusion === "skipped" && c.path_skip ? "check.pathsSkipped" : "check.failure";
+    return { name, state };
+  });
+}
+
+export const useMissingChecks = (pull: PullRequest, required: string[]): string[] =>
+  useRequiredChecks(pull, required).filter((c) => !satisfied(c.state)).map((c) => c.name);
+
+/** The stops on a pull request's way into its base; the host's only with an upstream. */
+export type Stop = "conditions" | "queue" | "gate" | "host" | "merge" | "base";
+/** At the current stop: Branvil (or the host) is working, a person has a turn, or the pull request left the queue there. */
+export type Mark = "now" | "turn" | "failed";
+
+const NEXT_STOP: Record<LandingNext, Stop> = {
+  gate: "gate", publishing: "host", owner_publish: "host", host_checks: "host", host_closed: "host", owner_fix_auto: "host",
+  owner_merge_host: "merge", auto_merge: "merge", owner_merge: "merge", following: "base", owner_fix_following: "base",
+};
+const REASON_STOP: Partial<Record<string, Stop>> = { conflict: "gate", gate_failed: "gate", already_in_base: "gate", host_failed: "host", publish_stopped: "host" };
+
+/**
+ * Where the pull request is on its way into the base. A queue entry for an
+ * older head, or one that left for a reason the head itself clears (a move, a
+ * draft), means the pull request is collecting what it needs to join again.
+ */
+export function whereabouts(pull: PullRequest, repo: Repository, personNeeded: boolean): { stops: Stop[]; at: Stop; mark: Mark; landing: Landing | null } {
+  const stops: Stop[] = repo.upstream ? ["conditions", "queue", "gate", "host", "merge", "base"] : ["conditions", "queue", "gate", "merge", "base"];
+  const l = pull.landing?.head_sha === pull.head_sha ? pull.landing : null;
+  if (!l || (l.state === "left" && reasonTone(l.reason?.code) === "neutral")) return { stops, at: "conditions", mark: personNeeded ? "turn" : "now", landing: null };
+  if (l.state === "left") return { stops, at: REASON_STOP[l.reason?.code ?? ""] ?? "conditions", mark: "failed", landing: l };
+  if (l.position !== 1 || !l.first) return { stops, at: "queue", mark: "now", landing: l };
+  const at = NEXT_STOP[l.first.next];
+  return { stops, at: at === "host" && !repo.upstream ? "merge" : at, mark: humanTurn(l.first) ? "turn" : "now", landing: l };
+}
+
+const ICONS: Record<Stop, LucideIcon> = { conditions: ListChecks, queue: Hourglass, gate: ShieldCheck, host: Cloud, merge: GitMerge, base: GitBranch };
+const MARK_COLOR: Record<Mark, string> = { now: "var(--color-brand)", turn: "var(--color-warning-text)", failed: "var(--color-danger-text)" };
+
+/** The pull request page's answer to "where is this pull request, and whose turn is it". */
+export function LandingJourney({ pull, repo }: { pull: PullRequest; repo: Repository }) {
   const t = useT();
-  const landing = pull.landing;
+  const checks = useRequiredChecks(pull, repo.required_checks);
   const queue = useLanding(pull.repository);
-  const checks = useChecks(pull.repository, pull.number, landing?.state === "gating" || landing?.state === "left");
-  const gateChecks = checks.data?.head_sha === pull.head_sha ? checks.data.checks.filter((c) => c.name.startsWith("gate/")) : [];
-  const entries = queue.data?.items.filter((e) => e.base === pull.base && e.number !== pull.number) ?? [];
-  if (landing) entries.push(landing);
+  // What the head still lacks to join; a person must act on all but a check CI is still producing.
+  const unmet = [
+    ...(pull.draft ? [{ text: t("pull.draft"), person: true }] : []),
+    ...checks.filter((c) => !satisfied(c.state)).map((c) => ({ text: `${c.name} · ${t(`landing.${c.state}`)}`, person: c.state === "check.failure" })),
+    ...(pull.approvals < repo.required_approvals ? [{ text: t("merge.approvals", { count: pull.approvals, required: repo.required_approvals }), person: true }] : []),
+  ];
+  const { stops, at, mark, landing } = whereabouts(pull, repo, unmet.some((u) => u.person));
+  const host = repo.upstream?.host ?? "";
+  const first = landing?.position === 1 ? landing.first : null;
+  const behind = first ? (queue.data?.items.filter((e) => e.base === pull.base && e.state !== "left" && e.number !== pull.number).length ?? 0) : 0;
+  const headline = mark === "failed" ? t("landing.leftWith", { reason: t(reasonKey(landing?.reason?.code ?? "")) })
+    : at === "conditions" ? t(unmet.length ? "landing.missing" : "landing.notInQueue")
+    : first ? t(`landing.next.${first.next}`, { host, base: pull.base })
+    : t("landing.waitingAt", { position: landing?.position ?? "—" });
+  const name = (stop: Stop) => stop === "host" ? host : stop === "base" ? pull.base : stop === "gate" ? t("landing.checkpoint") : t(`landing.stop.${stop}`);
+  const reached = stops.indexOf(at);
+  const Icon = mark === "failed" ? X : ICONS[at];
   return (
-    <Stack gap={6} component="section" aria-label={t("landing.gate")} style={{ overflowWrap: "anywhere" }}>
-      <Text size="sm" fw={700}>{t("landing.gate")}</Text>
-      {!landing ? <Text size="sm" c="dimmed">{t("landing.notQueued")}</Text> : landing.head_sha !== pull.head_sha ? <Text size="sm" c="dimmed">{t("landing.headChanged")}</Text> : (
-        <>
-          <Group gap="xs"><LandingBadge landing={landing} host={repository.upstream?.host} />{landing.gate && <Sha repo={pull.repository} value={landing.gate} />}</Group>
-          {queue.isError ? <ErrorMessage error={queue.error} /> : queue.isPending ? <Loading /> : <QueueLine repo={pull.repository} entries={entries} repository={repository} highlight={pull.number} />}
-          {gateChecks.map((c) => c.attempt_id ? <Link key={c.name} to={href.job(pull.repository, c.attempt_id)}>{c.name}</Link> : <Text key={c.name} size="sm">{c.name}</Text>)}
-          {landing.state === "left" && <LandingReason landing={landing} />}
-        </>
-      )}
-    </Stack>
+    <Card p="lg" component="section" aria-label={t("landing.journey", { base: pull.base })}>
+      <Stack gap="md">
+        <Group gap="xs" wrap="nowrap">
+          <Icon size={18} color={MARK_COLOR[mark]} aria-hidden="true" />
+          <Text fw={700} c={mark === "now" ? undefined : MARK_COLOR[mark]}>{headline}</Text>
+        </Group>
+        <ol className="journey">
+          {stops.map((stop, i) => {
+            const state = i < reached ? "done" : i === reached ? mark : "todo";
+            const StopIcon = state === "done" ? Check : state === "failed" ? X : ICONS[stop];
+            return (
+              <li key={stop} className="journey-stop" data-stop={stop} data-state={state} aria-current={i === reached ? "step" : undefined}>
+                <span className="journey-dot" aria-hidden="true">{stop === "queue" && i === reached ? landing?.position : <StopIcon size={14} />}</span>
+                <span>{name(stop)}</span>
+              </li>
+            );
+          })}
+        </ol>
+        <Stack gap={6} style={{ overflowWrap: "anywhere" }}>
+          {at === "conditions" && unmet.length > 0 && (
+            <Group gap={6}>
+              {unmet.map((u) => (
+                <Badge key={u.text} color={u.person ? "warning" : "neutral"} variant="light" size="sm" h="auto" styles={{ label: { whiteSpace: "normal", overflowWrap: "anywhere" } }}>
+                  {u.text}
+                </Badge>
+              ))}
+            </Group>
+          )}
+          {mark === "failed" && landing ? (
+            <ReasonDetail landing={landing} />
+          ) : at === "conditions" ? (
+            <Text size="sm" c="dimmed">{t(unmet.length ? "landing.notQueued" : "landing.headReady")}</Text>
+          ) : !first ? (
+            landing?.first && <Text size="sm" c="dimmed">{t("landing.waitFor", { first: landing.first.number })}</Text>
+          ) : (
+            <>
+              {first.next === "gate" && <GateBar pull={pull} required={repo.required_checks} />}
+              {first.next_detail && <Text size="sm">{first.next_detail}</Text>}
+              {["owner_merge_host", "host_closed"].includes(first.next) && first.host_url && (
+                <Anchor href={first.host_url} target="_blank" rel="noopener noreferrer" size="sm">{t("landing.action")}</Anchor>
+              )}
+              {behind > 0 && <Text size="sm" c="dimmed">{t("landing.behind", { count: behind })}</Text>}
+              <Elapsed first={first} />
+            </>
+          )}
+        </Stack>
+      </Stack>
+    </Card>
+  );
+}
+
+function GateBar({ pull, required }: { pull: PullRequest; required: string[] }) {
+  const done = useGateDone(pull.repository, pull, required);
+  return (
+    <Group gap="xs" wrap="nowrap">
+      <Progress value={required.length ? (done / required.length) * 100 : 0} size="sm" w={120} aria-hidden="true" />
+      <Text size="sm">{done}/{required.length}</Text>
+    </Group>
   );
 }
 

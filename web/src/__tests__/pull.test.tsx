@@ -554,8 +554,9 @@ describe("pull request review", () => {
     );
     const user = userEvent.setup();
     renderApp("/acme/demo/-/pulls/3");
-    expect(await screen.findByText("Required checks: test")).toBeInTheDocument();
-    await user.click(await screen.findByRole("button", { name: "Merge (fast-forward)" }));
+    const merge = await screen.findByRole("button", { name: "Merge (fast-forward)" });
+    await waitFor(() => expect(merge).toBeEnabled());
+    await user.click(merge);
 
     expect(await screen.findByText("Not mergeable: Required check test did not succeed.")).toBeInTheDocument();
     expect(fake.calls("POST", `${P}/merge`)[0]?.body).toEqual({ expected_head: HEAD, expected_base: BASE });
@@ -616,14 +617,12 @@ describe("pull request review", () => {
       [`GET ${P}/publish`]: json(200, PREVIEW),
     };
 
-    it.each(["en", "ja"] as const)(`${action}: explains that no checks block the action when none are required (%s)`, async (language) => {
+    it.each(["en", "ja"] as const)(`${action}: is enabled when no checks are required (%s)`, async (language) => {
       fakeApi(pullRoutes({
         ...routes,
         "GET /api/v1/repos/acme/demo": json(200, { ...repository, required_checks: [] }),
       }));
       renderApp("/acme/demo/-/pulls/3", language);
-      expect(await screen.findByText(dictionaries[language]["merge.noRequiredChecks"])).toBeInTheDocument();
-      expect(screen.getByText(dictionaries[language]["merge.noRequiredApprovals"])).toBeInTheDocument();
       // The default check fixture fails, but is optional in this repository.
       expect(await screen.findByText(`${dictionaries[language]["ci.reason"]}: exit code 101`)).toBeInTheDocument();
       const label = dictionaries[language][upstream ? "publish.submit" : "merge.submit"].replace("{host}", "GitHub");
@@ -640,7 +639,7 @@ describe("pull request review", () => {
       })),
       { label: "success for another head", checks: [SUCCESS], head_sha: NEW_HEAD },
     ];
-    it.each(unsuccessful)(`${action}: blocks $label and names only the checks still needed`, async ({ checks, head_sha }) => {
+    it.each(unsuccessful)(`${action}: blocks $label`, async ({ checks, head_sha }) => {
       const fake = fakeApi(pullRoutes({
         ...routes,
         "GET /api/v1/repos/acme/demo": json(200, { ...repository, required_checks: ["test", "lint"] }),
@@ -648,8 +647,6 @@ describe("pull request review", () => {
       }));
       const user = userEvent.setup();
       renderApp("/acme/demo/-/pulls/3");
-      const missing = head_sha ? "test, lint" : "test";
-      expect(await screen.findByText(`Required checks not yet successful on this head: ${missing}`)).toBeInTheDocument();
       // Wait for the check read as well, so an initial loading state cannot satisfy this test.
       await within(await screen.findByRole("region", { name: "Checks" })).findByTitle(head_sha ?? HEAD);
       const button = screen.getByRole("button", { name: action });
@@ -663,7 +660,6 @@ describe("pull request review", () => {
       fakeApi(pullRoutes({ ...routes, [`GET ${P}/checks`]: () => new Promise((resolve) => { answer = resolve; }) }));
       renderApp("/acme/demo/-/pulls/3");
       expect(await screen.findByRole("button", { name: action })).toBeDisabled();
-      expect(screen.getByText("Required checks not yet successful on this head: test")).toBeInTheDocument();
       await waitFor(() => expect(answer).toBeTypeOf("function"));
       answer(json(200, CHECKS));
       await waitFor(() => expect(screen.getByRole("button", { name: action })).toBeEnabled());
@@ -674,7 +670,6 @@ describe("pull request review", () => {
       renderApp("/acme/demo/-/pulls/3");
       expect(await screen.findByText(/Cannot read checks\./)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: action })).toBeDisabled();
-      expect(screen.getByText("Required checks not yet successful on this head: test")).toBeInTheDocument();
     });
 
     it(`${action}: enables on success after a check event and ignores optional failures`, async () => {
@@ -691,7 +686,6 @@ describe("pull request review", () => {
       await screen.findByText("Checks are expected for this commit but none are registered yet.");
       applyChange({ kind: "check", path: "acme/demo", id: HEAD }, client);
       await waitFor(() => expect(screen.getByRole("button", { name: action })).toBeEnabled());
-      expect(screen.queryByText(/Required checks not yet successful/)).not.toBeInTheDocument();
     });
 
     // Each filled green check is one approval; requested again or on an older head is not.
@@ -704,7 +698,7 @@ describe("pull request review", () => {
     it.each([
       { approvals: 1, required: 2, enabled: false },
       { approvals: 2, required: 2, enabled: true },
-    ])(`${action}: shows approvals $approvals / $required and is enabled only when they suffice`, async ({ approvals, required, enabled }) => {
+    ])(`${action}: is enabled only when $approvals / $required approvals suffice`, async ({ approvals, required, enabled }) => {
       const reviewStates = approvals === 1 ? [...states] : [...states, { ...states[0], member: "zoe" }];
       const fake = fakeApi(pullRoutes({
         ...routes,
@@ -714,8 +708,7 @@ describe("pull request review", () => {
       }));
       const user = userEvent.setup();
       renderApp("/acme/demo/-/pulls/3");
-      expect(await screen.findByText(`Approvals: ${approvals} / ${required}`)).toBeInTheDocument();
-      const trigger = screen.getByRole("button", { name: /^Reviewers:/ });
+      const trigger = await screen.findByRole("button", { name: /^Reviewers:/ });
       expect(trigger.querySelectorAll(".review-mark.approve:not(.stale)")).toHaveLength(approvals);
       const button = screen.getByRole("button", { name: action });
       await within(await screen.findByRole("region", { name: "Checks" })).findByTitle(HEAD);
@@ -816,7 +809,7 @@ describe("pull request review", () => {
 
   it.each([
     { repository: { ...UPSTREAM_REPOSITORY, auto_land: true }, says: "This repository publishes it to GitHub by itself after it reaches the front of the queue and passes the gate." },
-    { repository: { ...UPSTREAM_REPOSITORY, upstream: null, auto_land: true }, says: "This repository merges it by itself once the conditions below hold." },
+    { repository: { ...UPSTREAM_REPOSITORY, upstream: null, auto_land: true }, says: "This repository merges it by itself once it passes the gate at the front of the queue." },
   ])("says that a repository landing automatically acts by itself: $says", async ({ repository, says }) => {
     fakeApi(
       pullRoutes({
