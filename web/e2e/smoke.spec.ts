@@ -48,7 +48,7 @@ const lane = (page: Page, name: RegExp) => page.getByRole("region", { name });
 
 /** Opens the workspace's board. */
 async function openBoard(page: Page) {
-  await enter(page, `/${env.workspace}`);
+  await enter(page, `/${env.workspace}/-/board`);
   await expect(page.getByRole("heading", { name: /^(Board|ボード)$/ })).toBeVisible();
 }
 
@@ -103,7 +103,7 @@ test("adds a ticket to a lane, drags it, moves it with its menu, and assigns and
   await expect(card.locator(".assignee")).toHaveCount(0);
 
   // A fresh load shows the server's state, not the optimistic one.
-  await page.goto(`/${env.workspace}`);
+  await page.goto(`/${env.workspace}/-/board`);
   await expect(lane(page, /^(Ready|着手可)/).getByText(title)).toBeVisible();
 });
 

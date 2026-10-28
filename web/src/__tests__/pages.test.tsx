@@ -73,7 +73,7 @@ afterEach(() => {
 });
 
 describe("pages", () => {
-  it("opens the first workspace's board, then the one shown last", async () => {
+  it("opens the first workspace's task flow, then the one shown last", async () => {
     fakeApi({
       ...SHELL,
       "GET /api/v1/workspaces/acme": json(200, { name: "acme", lanes: ["new"] }),

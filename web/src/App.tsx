@@ -25,7 +25,7 @@ import { RelationsView } from "./views/RelationsView";
 import { SettingsView } from "./views/SettingsView";
 import { TicketView } from "./views/TicketView";
 import { TicketDrawer } from "./views/ticket/TicketDrawer";
-import { useCurrentWorkspace, workspaceStart } from "./workspace";
+import { useCurrentWorkspace } from "./workspace";
 
 export function App({ client, language, test }: { client: QueryClient; language?: "en" | "ja"; test?: boolean }) {
   return (
@@ -71,7 +71,7 @@ function SignedIn({ route }: { route: AppRoute }) {
   const showBoard = storedBoard !== "false";
   return (
     <main className="shell">
-      <Sidebar route={route} workspace={current.name} workspaces={current.names} showBoard={showBoard} />
+      <Sidebar route={route} workspace={current.name} workspaces={current.names} onWorkspaceChange={current.select} showBoard={showBoard} />
       <section className="workspace">
         <AlertBand streamLost={streamLost} />
         <RouteView
@@ -96,12 +96,12 @@ function RouteView({ route, workspace, workspaces, showBoard, setShowBoard }: {
   const t = useT();
   switch (route.name) {
     case "home":
-      return <Home workspace={workspace} workspaces={workspaces} showBoard={showBoard} />;
+      return <Home workspace={workspace} workspaces={workspaces} />;
     case "settings":
       return (
         <SettingsView section={route.section} workspace={workspace} repo={route.repo ?? null} showBoard={showBoard} setShowBoard={setShowBoard} />
       );
-    case "workspace":
+    case "board":
       return (
         <TicketDrawer key={route.workspace}>
           <BoardView workspace={route.workspace} />
@@ -109,7 +109,7 @@ function RouteView({ route, workspace, workspaces, showBoard, setShowBoard }: {
       );
     case "pulls":
       return <PullsView key={route.workspace} workspace={route.workspace} repo={null} />;
-    case "relations":
+    case "workspace":
       return (
         <TicketDrawer key={route.workspace}>
           <RelationsView workspace={route.workspace} />
@@ -139,12 +139,12 @@ function RouteView({ route, workspace, workspaces, showBoard, setShowBoard }: {
 }
 
 /** `/` opens the shown workspace's first page; with no workspace yet, offers to create one. */
-function Home({ workspace, workspaces, showBoard }: { workspace: string | null; workspaces: string[] | null; showBoard: boolean }) {
+function Home({ workspace, workspaces }: { workspace: string | null; workspaces: string[] | null }) {
   const t = useT();
   const [creating, setCreating] = useState(false);
   useEffect(() => {
-    if (workspace) navigate(workspaceStart(workspace, showBoard), { replace: true });
-  }, [workspace, showBoard]);
+    if (workspace) navigate(href.workspace(workspace), { replace: true });
+  }, [workspace]);
   if (workspaces === null || workspace) return <Loading />;
   return (
     <Stack gap="lg" align="flex-start">
@@ -153,7 +153,7 @@ function Home({ workspace, workspaces, showBoard }: { workspace: string | null; 
         {t("workspace.noneHelp")}
       </Text>
       <Button onClick={() => setCreating(true)}>{t("workspace.new")}</Button>
-      <NewWorkspaceModal opened={creating} onClose={() => setCreating(false)} showBoard={showBoard} />
+      <NewWorkspaceModal opened={creating} onClose={() => setCreating(false)} />
     </Stack>
   );
 }

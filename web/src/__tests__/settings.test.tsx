@@ -54,7 +54,7 @@ describe("settings", () => {
     expect(toggle).toBeChecked();
     await user.click(toggle);
     expect(within(nav).queryByRole("link", { name: labels.board })).not.toBeInTheDocument();
-    expect(within(nav).getByRole("link", { name: labels.flow })).toHaveAttribute("href", "/acme/-/relations");
+    expect(within(nav).getByRole("link", { name: labels.flow })).toHaveAttribute("href", "/acme");
     first.unmount();
 
     const second = renderApp("/-/settings/display", language);
@@ -64,7 +64,7 @@ describe("settings", () => {
     await within(restoredNav).findByRole("link", { name: labels.flow });
     expect(within(restoredNav).queryByRole("link", { name: labels.board })).not.toBeInTheDocument();
     await user.click(restored);
-    expect(within(restoredNav).getByRole("link", { name: labels.board })).toHaveAttribute("href", "/acme");
+    expect(within(restoredNav).getByRole("link", { name: labels.board })).toHaveAttribute("href", "/acme/-/board");
     second.unmount();
 
     renderApp("/-/settings/display", language);
@@ -120,7 +120,7 @@ describe("settings", () => {
     expect(fake.calls("POST", "/api/v1/members")[0]?.body).toEqual({ name: "rin", display_name: "", kind: "runner" });
   });
 
-  it("creates a workspace from the sidebar's switcher and shows its board", async () => {
+  it("creates a workspace from the sidebar's switcher and shows its task flow", async () => {
     const fake = fakeApi({
       ...SHELL,
       "GET /api/v1/repos": page([]),

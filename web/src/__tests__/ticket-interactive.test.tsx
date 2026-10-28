@@ -21,7 +21,7 @@ function routes(cards: () => Card[], extra: Parameters<typeof fakeApi>[0] = {}) 
 
 const ancestor = { url: `${window.location.origin}/acme/demo/-/tickets/9`, repository: "acme/demo", key: "9", title: "Title of 9", state: "open" as const, state_reason: null };
 
-describe.each(["/acme", "/acme/-/relations"])("the interactive item of a card's menu on %s", (page) => {
+describe.each(["/acme/-/board", "/acme"])("the interactive item of a card's menu on %s", (page) => {
   it("turns a ticket's interactive on, closes the menu, and shows the card's badge once read again", async () => {
     let interactive = false;
     const fake = fakeApi(routes(() => [card("1", "ready", { interactive })], {

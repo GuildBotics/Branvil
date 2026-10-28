@@ -5,11 +5,11 @@ import * as api from "../api/endpoints";
 import { useT } from "../i18n";
 import { keys } from "../query/keys";
 import { navigate } from "../router/Router";
-import { workspaceStart } from "../workspace";
+import { href } from "../router/routes";
 import { ErrorMessage } from "./common";
 
 /** Creates a workspace and opens its first page. */
-export function NewWorkspaceModal({ opened, onClose, showBoard }: { opened: boolean; onClose: () => void; showBoard: boolean }) {
+export function NewWorkspaceModal({ opened, onClose }: { opened: boolean; onClose: () => void }) {
   const t = useT();
   const client = useQueryClient();
   const [name, setName] = useState("");
@@ -18,7 +18,7 @@ export function NewWorkspaceModal({ opened, onClose, showBoard }: { opened: bool
     onSuccess: (w) => {
       setName("");
       onClose();
-      navigate(workspaceStart(w.name, showBoard));
+      navigate(href.workspace(w.name));
     },
     onSettled: () => void client.invalidateQueries({ queryKey: keys.workspaces() }),
   });

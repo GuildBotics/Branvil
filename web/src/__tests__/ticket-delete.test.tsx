@@ -19,7 +19,7 @@ function routes(extra: Parameters<typeof fakeApi>[0] = {}) {
   };
 }
 
-describe.each(["/acme", "/acme/-/relations"])("ticket deletion on %s", (page) => {
+describe.each(["/acme/-/board", "/acme"])("ticket deletion on %s", (page) => {
   it("removes a card when another screen's deletion emits a ticket event", async () => {
     let deleted = false;
     const fake = fakeApi(routes({
