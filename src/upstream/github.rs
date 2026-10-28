@@ -75,6 +75,9 @@ fn number_ok(s: &str) -> Option<u64> {
 /// not tell which.
 const ALERTS_ACCESS: &str = "Check that the reader's account can read the repository's Dependabot alerts: a GitHub App needs Repository permissions → Dependabot alerts: Read-only and access to the repository, with the added permission approved on the installation; a fine-grained token needs the same permission, a classic token the security_events (or repo) scope. Dependabot alerts must also be enabled for the repository.";
 
+/// What a refusal of workflow runs may come from.
+const ACTIONS_ACCESS: &str = "Check that the reader's account can read the repository's GitHub Actions: a GitHub App needs Repository permissions → Actions: Read-only, a fine-grained token the same permission, a classic token the repo scope.";
+
 /// The `after` cursor of the `next` link GitHub sends with a page that has
 /// more, `None` on the last page. The link itself is not followed (GitHub
 /// may spell it otherwise), and a next page without a cursor is a failure,
@@ -621,35 +624,92 @@ impl GitHub {
         Self::pull(&v)
     }
 
+    /// Every item under `key` of the pages of `path` (which ends in `?` or
+    /// `&`).
+    async fn pages(&self, who: As<'_>, path: &str, key: &str) -> HostResult<Vec<Value>> {
+        let mut items = Vec::new();
+        for page in 1.. {
+            let v = self
+                .get_found(who, &format!("{path}per_page=100&page={page}"))
+                .await?;
+            let more = v[key].as_array().cloned().unwrap_or_default();
+            let last = more.len() < 100;
+            items.extend(more);
+            if last {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    /// The check runs of `sha`, and whether no more are to come: every
+    /// GitHub Actions workflow run of it finished (one creates the check run
+    /// of a job only once it starts the job, after the jobs it needs, a
+    /// concurrency group, or an approval), and so did every other app's check
+    /// suite that has check runs (one without any never reports). A workflow
+    /// run that failed without a check run (an invalid workflow file) is a
+    /// failed check of its own.
     pub async fn checks(
         &self,
         who: As<'_>,
         repository: &str,
         sha: &str,
-    ) -> HostResult<Vec<HostCheck>> {
-        let v = self
-            .get_found(
+    ) -> HostResult<(Vec<HostCheck>, bool)> {
+        // Check runs last: one that a workflow run or suite finished after
+        // they were read is among the check runs read.
+        let at = format!("/repos/{repository}/commits/{sha}");
+        let workflows = self
+            .pages(
                 who,
-                &format!("/repos/{repository}/commits/{sha}/check-runs?per_page=100"),
+                &format!("/repos/{repository}/actions/runs?head_sha={sha}&"),
+                "workflow_runs",
             )
+            .await
+            .map_err(|e| match e.status {
+                Some(401 | 403 | 404) => host_error(e.status, format!("{e} {ACTIONS_ACCESS}")),
+                _ => e,
+            })?;
+        let suites = self
+            .pages(who, &format!("{at}/check-suites?"), "check_suites")
             .await?;
-        Ok(v["check_runs"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+        let runs = self
+            .pages(who, &format!("{at}/check-runs?"), "check_runs")
+            .await?;
+        let text = |v: &Value, k: &str| v[k].as_str().map(str::to_string);
+        let mut checks: Vec<HostCheck> = runs
             .iter()
             .filter_map(|c| {
-                let text = |k: &str| c[k].as_str().map(str::to_string);
                 Some(HostCheck {
                     id: c["id"].as_u64()?.to_string(),
-                    name: text("name")?,
-                    status: text("status").unwrap_or_else(|| "queued".into()),
-                    conclusion: text("conclusion"),
-                    url: text("html_url"),
+                    name: text(c, "name")?,
+                    status: text(c, "status").unwrap_or_else(|| "queued".into()),
+                    conclusion: text(c, "conclusion"),
+                    url: text(c, "html_url"),
                     summary: c["output"]["title"].as_str().map(str::to_string),
                 })
             })
-            .collect())
+            .collect();
+        let with_runs: Vec<&Value> = runs.iter().map(|c| &c["check_suite"]["id"]).collect();
+        checks.extend(
+            workflows
+                .iter()
+                .filter(|w| !with_runs.contains(&&w["check_suite_id"]))
+                .map(|w| HostCheck {
+                    id: format!("run-{}", w["id"]),
+                    name: text(w, "name").unwrap_or_else(|| "workflow".into()),
+                    status: text(w, "status").unwrap_or_else(|| "queued".into()),
+                    conclusion: text(w, "conclusion"),
+                    url: text(w, "html_url"),
+                    summary: Some("The workflow run has no job".into()),
+                })
+                .filter(|c| c.status == "completed" && !c.succeeded()),
+        );
+        let settled = workflows.iter().all(|w| w["status"] == "completed")
+            && suites.iter().all(|s| {
+                s["status"] == "completed"
+                    || s["latest_check_runs_count"].as_u64().unwrap_or(0) == 0
+            });
+        Ok((checks, settled))
     }
 
     /// The log of a check run that is a GitHub Actions job (their ids are the

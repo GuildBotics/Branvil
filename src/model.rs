@@ -425,6 +425,13 @@ pub struct Published {
     pub sent_state: String,
     /// The host's check runs of `pushed`.
     pub checks: Vec<HostCheck>,
+    /// Until when the host may still register checks of `pushed` (after a
+    /// push or the pull request's creation there). Cleared by the first read
+    /// after that time: the checks that read finds are all there are.
+    pub checks_registered_by: Option<String>,
+    /// Whether the host had no more checks of `pushed` to come at the last
+    /// read (`Host::checks`: on GitHub, every workflow run finished).
+    pub checks_settled: bool,
     pub published_at: String,
     /// The last failure; the next poll retries.
     pub error: Option<String>,
@@ -445,6 +452,64 @@ pub struct HostCheck {
     pub conclusion: Option<String>,
     pub url: Option<String>,
     pub summary: Option<String>,
+}
+
+impl HostCheck {
+    /// Completed with a conclusion that lets the pull request merge.
+    pub fn succeeded(&self) -> bool {
+        self.status == "completed"
+            && self
+                .conclusion
+                .as_deref()
+                .is_some_and(|v| ["success", "neutral", "skipped"].contains(&v))
+    }
+}
+
+impl Published {
+    /// Gives the host `secs` from now to register checks of `pushed`.
+    pub fn await_checks(&mut self, secs: u64) {
+        self.checks_registered_by = Some(crate::util::format_time(
+            chrono::Utc::now() + chrono::Duration::seconds(secs as i64),
+        ));
+    }
+
+    /// Records that the host's branch is at `head`; the checks of another
+    /// head are not its own.
+    pub fn record_push(&mut self, head: String, registration_secs: u64) {
+        if self.pushed.as_ref() != Some(&head) {
+            self.checks.clear();
+            self.checks_settled = false;
+            self.await_checks(registration_secs);
+        }
+        self.pushed = Some(head);
+    }
+
+    /// Records the host's checks of `pushed` and whether the runs that have
+    /// them all finished, just read. The time given to register them is over
+    /// once a read comes after it.
+    pub fn record_checks(&mut self, (checks, settled): (Vec<HostCheck>, bool)) {
+        if self
+            .checks_registered_by
+            .as_ref()
+            .is_some_and(|by| *by <= crate::util::now())
+        {
+            self.checks_registered_by = None;
+        }
+        self.checks = checks;
+        self.checks_settled = settled;
+    }
+
+    /// Whether the host may still add checks of `pushed`: it may still
+    /// register them, or a run of them has not finished.
+    pub fn checks_to_come(&self) -> bool {
+        self.checks_registered_by.is_some() || !self.checks_settled
+    }
+
+    /// Whether every check of `pushed` on the host succeeded, none being
+    /// still to come.
+    pub fn checks_passed(&self) -> bool {
+        !self.checks_to_come() && self.checks.iter().all(HostCheck::succeeded)
+    }
 }
 
 impl Pull {

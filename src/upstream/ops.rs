@@ -492,6 +492,8 @@ async fn publish_op(
         sent_body: String::new(),
         sent_state: "open".into(),
         checks: Vec::new(),
+        checks_registered_by: None,
+        checks_settled: false,
         published_at: util::now(),
         error: None,
         stopped: None,
@@ -534,10 +536,7 @@ async fn publish_op(
         ))
     };
     if refused.is_none() {
-        if x.pushed.as_deref() != Some(head.as_str()) {
-            x.checks.clear();
-        }
-        x.pushed = Some(head);
+        x.record_push(head, app.upstream.config.checks_registration_secs);
         if x.number.is_none() {
             open_on_host(at, writer, super::login_of(&author, host), &p, &mut x).await;
         }

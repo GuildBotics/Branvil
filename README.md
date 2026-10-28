@@ -381,8 +381,10 @@ outside see. Branvil never pushes the default branch; it follows it.
 
    With **Land automatically** on, Branvil publishes a pull request by itself
    once it meets the conditions. Each time its landing gate passes, Branvil
-   tells a webhook, with links to both pull requests, that it awaits a merge
-   on GitHub. This includes a new gate for an already published head. Under
+   tells a webhook, with links to both pull requests, that it is ready to
+   merge on GitHub once GitHub's checks of its head have succeeded. This
+   includes a new gate for an already published head. When a check on GitHub
+   fails, Branvil says so on its pull request instead. Under
    Settings → Notifications, the owner enters its URL (a Slack Incoming Webhook takes the
    message as it is), which is kept like a credential and never shown again.
 
@@ -397,13 +399,21 @@ scope (classic).
 
 Branvil polls GitHub with conditional requests (an unchanged answer is a free
 `304`): every 60 s while a published pull request is open, every 15 min
-otherwise, and at once after publishing or "Check now". Settings in
-`branvil.toml`:
+otherwise, and at once after publishing or "Check now". GitHub registers the
+checks of a pushed head a little later, so a head waits for more checks until
+`checks_registration_secs` after the push (or the pull request's creation,
+edit, or reopening there) and while a workflow run of it has not finished.
+The reading account needs, for a GitHub App, Repository permissions →
+**Checks: Read-only** and **Actions: Read-only** (the workflow runs and the
+jobs' logs); for a token, the same permissions (fine-grained) or the `repo`
+scope (classic).
+Settings in `branvil.toml`:
 
 ```toml
 [upstream]
 poll_active_secs = 60
 poll_idle_secs = 900
+checks_registration_secs = 300
 ```
 
 Notes:

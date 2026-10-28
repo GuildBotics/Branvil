@@ -15,6 +15,7 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 use crate::ci::{Runner, eventually, pipeline, sync_main};
+use crate::common::github::Refusal;
 use crate::common::*;
 use crate::pulls::review;
 use crate::upstream::{
@@ -426,6 +427,156 @@ async fn a_pull_request_publishes_itself_as_its_author_and_the_webhook_is_told_o
     })
     .await;
     assert_eq!(pull(&w, n).await["state"], "open", "people merge it there");
+}
+
+/// Polls the host, sweeps, and checks that pull request `n` still waits for
+/// its checks there, untold.
+async fn waits_for_host_checks(w: &World, other: &Other, n: u64, what: &str) {
+    refresh(w).await;
+    swept(w, other).await;
+    let p = pull(w, n).await;
+    assert_eq!(p["landing"]["state"], "passed", "{what}: {p}");
+    assert_eq!(p["landing"]["first"]["next"], "host_checks", "{what}: {p}");
+    assert!(p["landing"]["notified_at"].is_null(), "{what}: {p}");
+}
+
+/// The names of pull request `n`'s checks.
+async fn check_names(w: &World, n: u64) -> Vec<Value> {
+    let checks = w
+        .server
+        .ok(&format!("{}/pulls/{n}/checks", w.repo_path()), &w.aiko)
+        .await;
+    checks["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].clone())
+        .collect()
+}
+
+/// Ends the time the host was given to register checks, as if it passed
+/// (the service is restarted to change its record).
+fn registration_over(w: &mut World) {
+    w.server.stop();
+    edit_records(&w.server.data.join("branvil.redb"), "pulls", |p| {
+        if p["upstream"]["checks_registered_by"].is_string() {
+            p["upstream"]["checks_registered_by"] = json!("2000-01-01T00:00:00.000Z");
+        }
+    });
+    w.restart(&[]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_webhook_is_told_only_once_every_host_check_of_the_head_succeeded() {
+    let (mut w, gh) = followed().await;
+    // GitHub takes its time to register the checks of a new head.
+    let config = w.server.data.join("branvil.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let text = text.replace(
+        "checks_registration_secs = 0",
+        "checks_registration_secs = 3600",
+    );
+    std::fs::write(&config, text).unwrap();
+    w.restart(&[]);
+    let hook = Hook::start(&w, &[]).await;
+    let other = other_repo(&w, OTHER, true).await;
+    with_aiko_account(&w).await;
+    settings(&w, json!({"auto_land": true})).await;
+    let head = w.push_change("feat", "f.txt", "one\n");
+    // A check of the push is there before the pull request's own checks; an
+    // app that never reports leaves a suite without any.
+    gh.check(&head, 70, "push-fast", "success", "ok\n");
+    gh.suite(&head, 1, "completed", 1);
+    gh.suite(&head, 9, "queued", 0);
+    let n = number(&w.open_pull("feat", json!([])).await);
+    eventually("the publish", || async {
+        pull(&w, n).await["upstream"]["number"].is_u64()
+    })
+    .await;
+    waits_for_host_checks(&w, &other, n, "more may be registered").await;
+    assert_eq!(
+        check_names(&w, n).await,
+        [json!("github/push-fast"), json!("github")]
+    );
+    // The pull request's checks: one job runs, another waits for it.
+    gh.running(&head, 71, "pr-slow");
+    gh.suite(&head, 2, "in_progress", 1);
+    waits_for_host_checks(&w, &other, n, "running").await;
+    registration_over(&mut w);
+    // A read that fails decides nothing.
+    gh.set(|st| {
+        st.refusal = Some(Refusal {
+            status: 502,
+            headers: vec![],
+            message: "Server Error",
+        })
+    });
+    waits_for_host_checks(&w, &other, n, "a failed read").await;
+    assert!(pull(&w, n).await["upstream"]["error"].is_string());
+    gh.set(|st| st.refusal = None);
+    gh.check(&head, 71, "pr-slow", "success", "ok\n");
+    waits_for_host_checks(&w, &other, n, "a job still to start").await;
+    assert!(hook.received().is_empty());
+    gh.check(&head, 72, "pr-after", "success", "ok\n");
+    gh.suite(&head, 2, "completed", 2);
+    // A workflow waits in its concurrency group: no job, no check run yet.
+    gh.workflow_run(&head, 3, "pending", None);
+    gh.suite(&head, 3, "queued", 0);
+    waits_for_host_checks(&w, &other, n, "a workflow still to start").await;
+    gh.workflow_run(&head, 3, "in_progress", None);
+    gh.suite(&head, 3, "in_progress", 1);
+    gh.running(&head, 74, "waited");
+    waits_for_host_checks(&w, &other, n, "the workflow started").await;
+    assert!(hook.received().is_empty());
+    gh.check(&head, 74, "waited", "success", "ok\n");
+    gh.suite(&head, 3, "completed", 1);
+    gh.workflow_run(&head, 3, "completed", Some("success"));
+    refresh(&w).await;
+    eventually("the notice", || async {
+        pull(&w, n).await["landing"]["notified_at"].is_string()
+    })
+    .await;
+    let received = hook.received();
+    assert_eq!(received.len(), 1, "{received:?}");
+    let text = received[0].1["text"].as_str().unwrap();
+    assert!(
+        text.contains("passed its landing gate and is ready to merge on GitHub"),
+        "{text}"
+    );
+    let p = pull(&w, n).await;
+    assert_eq!(p["landing"]["first"]["next"], "owner_merge_host");
+    assert!(!check_names(&w, n).await.contains(&json!("github")));
+
+    // An edit sent to the host runs the host's checks of edits.
+    let p = pull(&w, n).await;
+    let (st, v) = w
+        .server
+        .patch(
+            &format!("{}/pulls/{n}", w.repo_path()),
+            &w.aiko,
+            json!({"title": "PR feat, edited", "revision": p["revision"]}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    refresh(&w).await;
+    let p = pull(&w, n).await;
+    assert_eq!(p["landing"]["first"]["next"], "host_checks", "{p}");
+    assert_eq!(
+        gh.pull(p["upstream"]["number"].as_u64().unwrap()).title,
+        "PR feat, edited"
+    );
+
+    // A new head the poller sends waits for its own checks again.
+    let next = w.push_change("feat", "f.txt", "two\n");
+    waits_for_host_checks(&w, &other, n, "new head").await;
+    assert_eq!(pull(&w, n).await["upstream"]["pushed"], next);
+    gh.check(&next, 73, "push-fast", "success", "ok\n");
+    registration_over(&mut w);
+    refresh(&w).await;
+    eventually("the new head's notice", || async {
+        hook.received().len() == 2
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

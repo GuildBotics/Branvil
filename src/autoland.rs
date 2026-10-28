@@ -226,7 +226,8 @@ async fn sweep_repo(app: &App, repo: &Repo, webhook_ok: &mut bool) -> AppResult<
 
 // ---------------------------------------------------------------- the webhook
 
-/// Tells the webhook, once per gate pass, that pull request `number` can merge.
+/// Tells the webhook, once per gate pass, that pull request `number` can merge
+/// on the host: its queue's next action is the owner's merge there.
 /// Without a webhook nothing is sent; a failure is kept and tried again.
 /// Returns false when the send failed. A crash between the webhook's answer
 /// and the write of `notified_at` sends it again: at least once.
@@ -248,18 +249,26 @@ async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<bool> {
     let Some(landing) = landing.filter(awaits_notice) else {
         return Ok(true);
     };
-    let Some(x) =
-        crate::landing::published(&repo, &p).filter(|x| x.number.is_some() && x.stopped.is_none())
+    // Only once it is the owner's turn: the head is on the host and the
+    // host's checks of it have finished.
+    let tips = pulls::tips(app, &repo).await?;
+    let head = tips.get(&p.head).map(String::as_str).unwrap_or_default();
+    let following = app.upstream.following(&repo.id);
+    let first = crate::landing::first(&repo, &p, &landing, &following, head);
+    let Some(up) = repo
+        .upstream
+        .as_ref()
+        .filter(|_| first.next == "owner_merge_host")
     else {
         return Ok(true);
     };
     let text = format!(
-        "{} ({} !{number}) passed its landing gate and awaits a merge on {}.\n{}\n{}",
+        "{} ({} !{number}) passed its landing gate and is ready to merge on {}.\n{}\n{}",
         p.title,
         repo.path,
-        app.upstream.host_name(&x.provider),
+        app.upstream.host_name(&up.provider),
         app.pull_url(&repo.path, number),
-        x.url.clone().unwrap_or_default()
+        first.host_url.unwrap_or_default(),
     );
     if !app.autoland.send(&app.layout, &text).await {
         return Ok(false);

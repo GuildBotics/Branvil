@@ -303,12 +303,14 @@ impl Host {
         each!(self, h => h.change_pull(who, repository, number, change).await)
     }
 
+    /// The checks of `sha`, and whether the host has no more of it to come
+    /// (none of its runs of checks is still going).
     pub async fn checks(
         &self,
         who: As<'_>,
         repository: &str,
         sha: &str,
-    ) -> HostResult<Vec<crate::model::HostCheck>> {
+    ) -> HostResult<(Vec<crate::model::HostCheck>, bool)> {
         each!(self, h => h.checks(who, repository, sha).await)
     }
 

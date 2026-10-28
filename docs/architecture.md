@@ -334,9 +334,10 @@ as a Bearer header. Backups do not carry it.
 - `Repo.upstream` (`{provider, repository, reader: {member, chosen}}`) is the
   setting, changed by the owner (`PUT/DELETE /api/v1/repos/{repo}/upstream`).
 - `Pull.upstream` (`{provider, repository, number, url, state, author account,
-  pushed, sent_title, sent_body, sent_state, checks, error, stopped}`): where it
-  was published, the host's pull request, what Branvil last sent to it, and the
-  check runs of the pushed head. It stays tied to the host repository it was
+  pushed, sent_title, sent_body, sent_state, checks, checks_registered_by,
+  checks_settled, error, stopped}`): where it was published, the host's pull
+  request, what Branvil last sent to it, and the check runs of the pushed head
+  with whether the host may still add some. It stays tied to the host repository it was
   published to: changing or removing the repository's upstream is always
   allowed, a pull request published before keeps talking to its own place, and
   publishing it to the new upstream makes a new record.
@@ -489,6 +490,8 @@ sends the original head, and later pushes to a published head are sent as before
 - Gate failures and conflicts add a comment by the reserved author `branvil`.
   It names the base, head, and gate SHAs, failed jobs and log links or conflicting
   files, and how a successful gate retry returns the pull request to the queue.
+  A `host_failed` departure adds one with the head and the failed host checks'
+  links: nothing else tells the author of a failure on the host.
   The GUI gives this author Branvil's icon; it is not a member account.
 
 Gate refs follow the same ref-change boundary as branches. CI registers a run
@@ -520,8 +523,20 @@ failed or stopped publication, another publication is the owner's action.
 already published pull requests.
 
 Each gate that passes with `auto_land` on and an upstream records `notify: true`.
-Once a host pull request exists and sending is not stopped, the owner's webhook
-receives `{"text": …}` saying the gate passed and awaits a merge there. This includes a
+Once the queue's next action is `owner_merge_host` (`landing::first`, the same
+rule the GUI shows: the head is on the host, sending is not stopped, and every
+host check of it succeeded), the owner's webhook receives `{"text": …}` saying
+the gate passed and the pull request is ready to merge there. The host
+registers its checks some time after a push or an event of the pull request
+(its creation, an edit Branvil sends, its reopening), and
+a workflow run creates a job's check run only once it starts the job (after the
+jobs it needs, its concurrency group, or an approval), so the checks read are
+all there are only when both hold: the poller has read the host after
+`[upstream] checks_registration_secs` passed since the last of them
+(`Published.checks_registered_by`, cleared by that read; a failed read clears
+nothing), and at that read every GitHub Actions workflow run of the head had
+finished, and so had every other app's check suite of it that has check runs
+(`Published.checks_settled`; how the host says so is the provider's). This includes a
 new gate for an already published head. `Landing.notified_at` records a `2xx`
 answer for that gate; a later pass has its own notification. Pending notices
 are retried even if automatic landing is later turned off. The URL is kept in

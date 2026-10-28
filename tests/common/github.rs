@@ -106,6 +106,10 @@ pub struct State_ {
     pub pulls: Vec<FakePull>,
     /// commit → check runs (GitHub's JSON)
     pub checks: HashMap<String, Vec<Value>>,
+    /// commit → check suites (GitHub's JSON)
+    pub suites: HashMap<String, Vec<Value>>,
+    /// commit → GitHub Actions workflow runs (GitHub's JSON)
+    pub workflow_runs: HashMap<String, Vec<Value>>,
     /// check run id → log text
     pub logs: HashMap<u64, String>,
     /// (method, path, login) of every request
@@ -546,6 +550,44 @@ async fn check_runs(
     )
 }
 
+async fn check_suites(
+    State((state, _)): State<S>,
+    UrlPath((owner, name, sha)): UrlPath<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut st = state.lock().unwrap();
+    let path = format!("/repos/{owner}/{name}/commits/{sha}/check-suites");
+    if let Some(refused) = refused_read(&mut st, &path, &headers) {
+        return refused;
+    }
+    let suites = st.suites.get(&sha).cloned().unwrap_or_default();
+    conditional(
+        &mut st,
+        &headers,
+        json!({"total_count": suites.len(), "check_suites": suites}),
+    )
+}
+
+async fn workflow_runs(
+    State((state, _)): State<S>,
+    UrlPath((owner, name)): UrlPath<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let mut st = state.lock().unwrap();
+    let path = format!("/repos/{owner}/{name}/actions/runs");
+    if record(&mut st, "GET", &path, &headers).is_none() {
+        return unauthorized();
+    }
+    let sha = q.get("head_sha").cloned().unwrap_or_default();
+    let runs = st.workflow_runs.get(&sha).cloned().unwrap_or_default();
+    conditional(
+        &mut st,
+        &headers,
+        json!({"total_count": runs.len(), "workflow_runs": runs}),
+    )
+}
+
 async fn job_log(
     State((state, _)): State<S>,
     UrlPath((owner, name, id)): UrlPath<(String, String, u64)>,
@@ -701,6 +743,11 @@ impl FakeGitHub {
                 "/repos/{owner}/{name}/commits/{sha}/check-runs",
                 get(check_runs),
             )
+            .route(
+                "/repos/{owner}/{name}/commits/{sha}/check-suites",
+                get(check_suites),
+            )
+            .route("/repos/{owner}/{name}/actions/runs", get(workflow_runs))
             .route("/repos/{owner}/{name}/actions/jobs/{id}/logs", get(job_log))
             .route("/repos/{owner}/{name}/dependabot/alerts", get(alerts_list))
             .route(
@@ -962,17 +1009,51 @@ impl FakeGitHub {
         }));
     }
 
+    /// Completes check run `id` of `sha` (adding it if it is not there).
     pub fn check(&self, sha: &str, id: u64, name: &str, conclusion: &str, log: &str) {
+        self.check_run(sha, id, name, "completed", Some(conclusion));
+        self.state.lock().unwrap().logs.insert(id, log.into());
+    }
+
+    /// Sets check suite `id` of `sha` (a workflow run, say): its status and
+    /// how many check runs it has so far.
+    pub fn suite(&self, sha: &str, id: u64, status: &str, runs: u64) {
         let mut st = self.state.lock().unwrap();
-        st.checks.entry(sha.into()).or_default().push(json!({
+        let suites = st.suites.entry(sha.into()).or_default();
+        suites.retain(|s| s["id"] != id);
+        suites.push(json!({"id": id, "status": status, "latest_check_runs_count": runs}));
+    }
+
+    /// Sets GitHub Actions workflow run `id` of `sha`, named `ci-<id>`, to
+    /// `status` and `conclusion`.
+    pub fn workflow_run(&self, sha: &str, id: u64, status: &str, conclusion: Option<&str>) {
+        let mut st = self.state.lock().unwrap();
+        let runs = st.workflow_runs.entry(sha.into()).or_default();
+        runs.retain(|r| r["id"] != id);
+        runs.push(json!({
+            "id": id, "name": format!("ci-{id}"), "head_sha": sha, "status": status,
+            "conclusion": conclusion, "check_suite_id": 1000 + id,
+            "html_url": format!("https://github.test/actions/runs/{id}"),
+        }));
+    }
+
+    /// Starts check run `id` of `sha`, which has not finished yet.
+    pub fn running(&self, sha: &str, id: u64, name: &str) {
+        self.check_run(sha, id, name, "in_progress", None);
+    }
+
+    fn check_run(&self, sha: &str, id: u64, name: &str, status: &str, conclusion: Option<&str>) {
+        let mut st = self.state.lock().unwrap();
+        let runs = st.checks.entry(sha.into()).or_default();
+        runs.retain(|r| r["id"] != id);
+        runs.push(json!({
             "id": id,
             "name": name,
-            "status": "completed",
+            "status": status,
             "conclusion": conclusion,
             "html_url": format!("https://github.test/runs/{id}"),
-            "output": {"title": format!("{name}: {conclusion}")},
+            "output": {"title": format!("{name}: {}", conclusion.unwrap_or(status))},
         }));
-        st.logs.insert(id, log.into());
     }
 
     /// Requests whose method and path match, with the login that made them.
@@ -1004,6 +1085,8 @@ impl FakeGitHub {
         // The tests poll explicitly (`/upstream/refresh`).
         upstream.insert("poll_active_secs".into(), toml::Value::Integer(3600));
         upstream.insert("poll_idle_secs".into(), toml::Value::Integer(3600));
+        // A head without checks has none, unless a test says otherwise.
+        upstream.insert("checks_registration_secs".into(), toml::Value::Integer(0));
         let mut github = toml::Table::new();
         github.insert("api_url".into(), toml::Value::String(self.url.clone()));
         github.insert(

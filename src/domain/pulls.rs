@@ -1707,6 +1707,17 @@ pub async fn checks(
             details: c.summary.clone(),
             ..Check::default()
         }));
+        if p.state == "open" && published.checks_to_come() {
+            checks.push(Check {
+                name: provider.clone(),
+                status: "queued".into(),
+                details: Some(format!(
+                    "{} may still add checks of this commit",
+                    app.upstream.host_name(provider)
+                )),
+                ..Check::default()
+            });
+        }
     }
     Ok(ChecksView {
         head_sha,
