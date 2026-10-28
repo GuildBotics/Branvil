@@ -8,7 +8,7 @@ import { useState } from "react";
 import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
 import type { PullRequest, Repository, Upstream } from "../../api/types";
-import { ErrorMessage, Notice, Refusal, Sha, StateBadge } from "../../components/common";
+import { ErrorMessage, errorText, Notice, Refusal, Sha, StateBadge } from "../../components/common";
 import { useT, type Translate } from "../../i18n";
 import { usePublishPreview } from "../../query/hooks";
 import { keys } from "../../query/keys";
@@ -18,7 +18,7 @@ function refusalOf(t: Translate, err: unknown, notReady: "merge.notMergeable" | 
   if (isApiError(err, "head_moved")) return t("merge.headMoved");
   if (isApiError(err, "base_moved")) return t("merge.baseMoved");
   if (isApiError(err, "not_mergeable")) return t(notReady, { message: err.message });
-  return err instanceof Error ? err.message : String(err);
+  return errorText(err, t);
 }
 
 /** A repository without an upstream merges here (fast-forward). */

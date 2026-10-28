@@ -131,7 +131,10 @@ repository, and upstream events, including changes in another repository.
   `POST /api/v1/session` for the owner's `branvil_session` cookie (HttpOnly,
   SameSite=Strict). Every non-GET request made with the cookie must carry
   `X-Branvil-CSRF: <csrf>` from the session response; Bearer requests do not
-  need it.
+  need it. A missing or mismatched header is `403 csrf_mismatch`, before the
+  handler runs. The GUI reads `GET /api/v1/session` to refresh its CSRF value
+  and retries that request once with the same body and idempotency key. If
+  the session cannot be refreshed, it asks the user to reload the page.
 - Every request must have a `Host` of the configured base URL's host and port
   (or `localhost`/`127.0.0.1`/`[::1]` with that port). Requests that carry an
   `Origin` must have that same origin. Anything else is `421 misdirected` /
@@ -150,6 +153,7 @@ repository, and upstream events, including changes in another repository.
 | 400 | `label_undefined` | A label the ticket's repository does not define (message lists the defined ones). |
 | 401 | `unauthorized` | No valid token or session. |
 | 403 | `forbidden` | The member's kind may not do this (see "Members"). |
+| 403 | `csrf_mismatch` | A cookie-authenticated write has a missing or mismatched CSRF header. Nothing was written; read the current session and retry once. |
 | 404 | `not_found` | The item, entry, or path is not there. |
 | 409 | `conflict` | A revision or expected value did not match. |
 | 409 | `head_moved` | The pull request head is no longer the `commit` sent. Nothing was written. |

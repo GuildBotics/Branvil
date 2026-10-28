@@ -6,7 +6,7 @@ import { Anvil, Check, Copy, SmilePlus } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { isApiError } from "../api/client";
 import { REACTIONS, type Comment, type MemberKind, type Reaction, type ReactionEntry } from "../api/types";
-import { useI18n, useT } from "../i18n";
+import { useI18n, useT, type Translate } from "../i18n";
 import { useMemberAvatar, useSession } from "../query/hooks";
 import { Link, useFragmentTarget } from "../router/Router";
 import { href } from "../router/routes";
@@ -35,10 +35,15 @@ export function ErrorMessage({ error, optional }: { error: unknown; optional?: b
       </Text>
     );
   }
+  return <Refusal>{errorText(error, t)}</Refusal>;
+}
+
+/** Shared guidance, including the places that embed an error in a notice. */
+export function errorText(error: unknown, t: Translate): string {
+  if (isApiError(error, "session_changed")) return t("common.sessionChanged");
+  if (isApiError(error, "network")) return t("common.networkError");
   const message = error instanceof Error ? error.message : String(error);
-  let text = isApiError(error, "network") ? t("common.networkError") : message;
-  if (isApiError(error, undefined, 403)) text = `${t("common.forbidden")} ${message}`;
-  return <Refusal>{text}</Refusal>;
+  return isApiError(error, undefined, 403) ? `${t("common.forbidden")} ${message}` : message;
 }
 
 /** A refusal or failure the user should read: an alert in GuildBotics' danger tone. */

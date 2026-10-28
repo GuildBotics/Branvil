@@ -6,7 +6,7 @@ import { memo, useEffect, useRef, useState, type ReactElement, type ReactNode } 
 import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
 import { ticketRef, type Card, type Lane, type PullSummary } from "../../api/types";
-import { ErrorMessage, MemberAvatar, StateBadge, type Tone } from "../../components/common";
+import { ErrorMessage, errorText, MemberAvatar, StateBadge, type Tone } from "../../components/common";
 import { CheckSlot, PeopleItems, type Person } from "../../components/PeoplePicker";
 import { type Translate, useT } from "../../i18n";
 import { useChecks, useSession } from "../../query/hooks";
@@ -42,7 +42,7 @@ export function moveRefusal(err: unknown, card: Card, t: Translate): Notice {
   const key = ticketRef(card);
   // A neighbour card that moved meanwhile is answered with 404: also a concurrent change.
   if (isApiError(err, "conflict") || isApiError(err, "not_found")) return { tone: "info", text: t("board.moveConflict", { key }) };
-  return { tone: "error", text: t("board.moveFailed", { key, message: relationRefusal(err, t) ?? (err as Error).message }) };
+  return { tone: "error", text: t("board.moveFailed", { key, message: relationRefusal(err, t) ?? errorText(err, t) }) };
 }
 
 const CI_TONE: Record<CiRollup, Tone> = {
