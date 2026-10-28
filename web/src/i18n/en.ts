@@ -19,7 +19,7 @@ export const en = {
   "common.notProvided": "Not provided",
   "common.notAvailableYet": "Not available yet on this Branvil.",
   "common.forbidden": "You do not have permission.",
-  "common.sessionChanged": "Your session could not be refreshed. Reload the page and try again.",
+  "common.sessionChanged": "This change was not saved. Copy what you entered, then reload the page and try again.",
   "common.networkError": "Branvil is not reachable. Check that the service (or the SSH tunnel) is running.",
 
   "nav.main": "Main",
