@@ -151,7 +151,15 @@ not asked to review again since. The
 author can only comment on their own pull request. With **Land automatically**
 on the same tab, the repository merges (or, with an upstream, publishes once)
 by itself an open pull request that is not a draft as soon as it meets them.
-The queue and gates also run with this setting off. Only the first pull request
+The queue and gates also run with this setting off. A pull request joins its
+base branch's queue only once no statement awaits its author's answer: an
+unresolved thread whose last comment is someone else's, a review with a body
+(an approval may carry a suggestion), or a conversation comment (a machine's
+notice, which carries `meta`, does not count; Branvil's own note of a failed
+gate or host check does). The author answers with a reply in the thread, a
+reaction, or anything said after it; a new statement takes a queued pull request
+out, and the answer puts it at the end of the queue again. Pull requests the
+owner wrote, and those of interactive tickets, never wait for this. Only the first pull request
 in each repository/base queue gets a gate: the head itself when it contains
 the base, otherwise a merge commit of base and head whose required checks
 must succeed. The head and its approvals stay unchanged. The next pull request
@@ -174,6 +182,14 @@ then never takes up the ticket, nor the agent's own pull requests that link
 it; reviewing those pull requests goes on as usual. The descendants of an
 interactive ticket are interactive too, whatever their own switches say; their
 cards' badges name that ticket.
+
+GuildBotics' provider takes the pull requests involving an agent in the order
+`GET /pulls?involves=me` returns them, one at a time, so Branvil puts first
+what waits for least once that agent's work is done: a reviewer's work that
+lets a pull request join the queue, then an author's work on an approved one,
+and on down to approved pull requests that wait on no review
+(`docs/api.md`). Between the same, a reviewer's work goes first: it takes
+less time than an author's, which may need a fix.
 
 ## Git
 

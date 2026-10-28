@@ -445,7 +445,11 @@ on the host is replaced the next time Branvil's changes.
 
 Each repository/base branch has a persistent queue. An open, ready pull request
 joins its end when its head adds changes, its required head checks succeed,
-and its head has enough approvals. With an upstream, the base must also be the
+its head has enough approvals, and no statement awaits its author's answer
+(`domain::pulls::unanswered`, the one place that is decided; the pull
+request's view carries the same list, and the webhook is told nothing while it
+is not empty). GuildBotics' patrol gives the author work on the same
+statements, so they must agree on what answers one. With an upstream, the base must also be the
 default branch and the author must have an account on the host. Admission does
 not change the pull request's revision or activity time. `GET /repos/{repo}/landing`
 and each pull request's `landing` show the queue, its state times, and the base,
@@ -468,7 +472,8 @@ sends the original head, and later pushes to a published head are sent as before
 - A failed required gate job, merge conflict, stopped publication, or failed
   host check on the head used to build the gate removes the first from the
   queue. Closing, marking draft, changing the head or target base branch, or
-  losing the head's checks or approvals also removes it. A temporary publication
+  losing the head's checks or approvals, or a statement that awaits the
+  author's answer, also removes it; the answer puts it at the end again. A temporary publication
   error keeps its place and shows the error while polling retries. A stopped
   publication returns through the
   owner's `POST /repos/{repo}/pulls/{number}/landing/resume`, with expected
@@ -481,7 +486,9 @@ sends the original head, and later pushes to a published head are sent as before
   and any required jobs cancelled on departure. A failed host check can rejoin
   when it succeeds, and other exclusions can rejoin when their reason clears.
   Conflicts require a head or base change. This avoids rerunning an unchanged
-  failed gate on every sweep.
+  failed gate on every sweep. Whether such a failure still stands is decided
+  once (`landing::failure_stands`); the patrol of `GET /pulls?involves=me`
+  counts a pull request held by it as one whose checks failed.
 - Advancing base preserves active entries' admission times and order. Waiting
   entries use the current base when their turn arrives. The first entry gets
   a new gate in the same place when base advances during its gate. For a passed
@@ -494,7 +501,9 @@ sends the original head, and later pushes to a published head are sent as before
   It names the base, head, and gate SHAs, failed jobs and log links or conflicting
   files, and how a successful gate retry returns the pull request to the queue.
   A `host_failed` departure adds one with the head and the failed host checks'
-  links: nothing else tells the author of a failure on the host.
+  links: nothing else tells the author of a failure on the host. These comments
+  carry no `meta`, so they await the author's answer like any other statement:
+  the pull request rejoins once the failure is cleared and the author answered.
   The GUI gives this author Branvil's icon; it is not a member account.
 
 Gate refs follow the same ref-change boundary as branches. CI registers a run
@@ -690,11 +699,13 @@ and scrolls horizontally within its own frame when the columns need more room.
 It names repositories without the workspace prefix.
 Where an open pull request is on its way into its base is decided once
 (`whereabouts` in `web/src/views/pull/LandingStatus.tsx`) from its queue entry,
-the required checks on its head, its approvals and draft state: the stops are
+the required checks on its head, its approvals, the statements awaiting its
+author's answer (each linked on the page) and draft state: the stops are
 requirements, queue, gate, the upstream host (with an upstream only), merge and
 base, and at the current stop Branvil, the host or CI is working, a person has
 a turn, or the pull request left the queue there. A queue entry for an older
-head, or a departure the head itself clears (a move, a draft), puts it back at
+head, or a departure the head or its author clears (a move, a draft, an
+answer), puts it back at
 the requirements. The list shows this as one badge per open pull request (its
 title names every missing requirement, the departure reason, or who goes
 first); the pull request's page shows it as a card under the header with every

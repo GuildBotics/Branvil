@@ -52,6 +52,8 @@ pub struct PullView {
     pub review_states: Vec<ReviewState>,
     /// The members whose review state approves (`ReviewState::approves`).
     pub approvals: u64,
+    /// The statements that wait on the author's answer (`unanswered`).
+    pub unanswered: Vec<Unanswered>,
     pub tickets: Vec<LinkView>,
     pub labels: Vec<String>,
     pub changed_files: u64,
@@ -247,8 +249,16 @@ pub async fn pull_view(app: &App, repo: &Repo, p: &Pull, tips: &Tips) -> AppResu
     let changed = changed_files(app, repo, p, tips).await?;
     let head_sha = head_of(p, tips).unwrap_or_default();
     let review_states = read_review_states(app, p, &head_sha).await?;
+    let url = app.pull_url(&repo.path, p.number);
+    let (p2, url2) = (p.clone(), url.clone());
+    // Only an open pull request can still wait on its author.
+    let unanswered = match p.state.as_str() {
+        "open" => app.store.read(move |r| unanswered(r, &p2, &url2)).await?,
+        _ => Vec::new(),
+    };
     Ok(PullView {
-        url: app.pull_url(&repo.path, p.number),
+        url,
+        unanswered,
         repository: repo.path.clone(),
         number: p.number,
         label: format!("!{}", p.number),
@@ -693,6 +703,97 @@ fn activity_of(r: &impl Rd, p: &Pull, head_sha: &str, pull_url: &str) -> AppResu
     })
 }
 
+/// A statement on a pull request that waits on its author's answer.
+#[derive(Serialize, Debug, Clone)]
+pub struct Unanswered {
+    /// `comment`, `review`, or `thread`.
+    pub kind: &'static str,
+    /// The entry the author answers: the comment, the review, or the
+    /// thread's last comment.
+    pub id: String,
+    pub author: String,
+    pub url: String,
+}
+
+/// The statements on `p` its author has not answered, the one place it is
+/// decided; none while `p` awaits no answer from its author: the owner wrote
+/// it, or it links an interactive ticket of this Branvil (a person works on
+/// it with an agent at hand).
+pub(crate) fn unanswered(r: &impl Rd, p: &Pull, pull_url: &str) -> AppResult<Vec<Unanswered>> {
+    if r.get::<model::Member>(store::MEMBERS, &model::Member::key(&p.author))?
+        .is_some_and(|m| m.kind == model::MemberKind::Owner)
+    {
+        return Ok(Vec::new());
+    }
+    for id in p.tickets.iter().filter_map(|l| l.local.as_ref()) {
+        if let Some(t) = r.get::<model::Ticket>(store::TICKETS, &model::Ticket::key(&id.0, id.1))?
+            && (t.interactive || tickets::interactive_ancestor(r, &t)?.is_some())
+        {
+            return Ok(Vec::new());
+        }
+    }
+    Ok(unanswered_in(&p.author, &activity_of(r, p, "", pull_url)?))
+}
+
+/// The statements of `a` that wait on `author`: an unresolved thread whose
+/// last comment is someone else's, a review with a body (an approval may
+/// carry a suggestion), or a conversation comment without `meta` (one with
+/// it is a machine's notice). The author answers a thread by replying in it
+/// or reacting to its last comment, and a review or comment by reacting to
+/// it or by speaking after it: a comment without `meta`, a review, or an
+/// inline comment.
+fn unanswered_in(author: &str, a: &Activity) -> Vec<Unanswered> {
+    let mine = |name: &str| fold(name) == fold(author);
+    let reacted = |reactions: &[ReactionView]| reactions.iter().any(|x| mine(&x.author));
+    let inline = || {
+        a.threads
+            .iter()
+            .flat_map(|t| &t.comments)
+            .map(|c| &c.comment)
+    };
+    let spoken = a
+        .comments
+        .iter()
+        .filter(|c| c.meta.is_none())
+        .map(|c| (&c.author, &c.created_at))
+        .chain(a.reviews.iter().map(|x| (&x.author, &x.submitted_at)))
+        .chain(inline().map(|c| (&c.author, &c.created_at)))
+        .filter(|(by, _)| mine(by))
+        .map(|(_, at)| at.as_str())
+        .max()
+        .unwrap_or_default();
+    let threads = a
+        .threads
+        .iter()
+        .filter(|t| !t.resolved)
+        .filter_map(|t| t.comments.last())
+        .map(|c| ("thread", &c.comment))
+        .filter(|(_, c)| !mine(&c.author) && !reacted(&c.reactions))
+        .map(|(kind, c)| (kind, &c.id, &c.author, &c.url));
+    let comments = a
+        .comments
+        .iter()
+        .filter(|c| c.meta.is_none() && !mine(&c.author))
+        .filter(|c| c.created_at.as_str() > spoken && !reacted(&c.reactions))
+        .map(|c| ("comment", &c.id, &c.author, &c.url));
+    let reviews = a
+        .reviews
+        .iter()
+        .filter(|x| !x.body.trim().is_empty() && !mine(&x.author))
+        .filter(|x| x.submitted_at.as_str() > spoken && !reacted(&x.reactions))
+        .map(|x| ("review", &x.id, &x.author, &x.url));
+    threads
+        .chain(comments)
+        .chain(reviews)
+        .map(|(kind, id, author, url)| Unanswered {
+            kind,
+            id: id.clone(),
+            author: author.clone(),
+            url: url.clone(),
+        })
+        .collect()
+}
+
 pub async fn activity(
     app: &App,
     caller: &Caller,
@@ -744,6 +845,7 @@ pub async fn patrol(
     caller.require_agent_or_owner()?;
     let me = fold(caller.name());
     let owner = caller.is_owner();
+    let involved_me = me.clone();
     let found: Vec<(Repo, Pull)> = app
         .store
         .read(move |r| {
@@ -760,7 +862,7 @@ pub async fn patrol(
                     involved.push((parts[0].s().to_string(), n));
                 }
             } else {
-                for key in r.prefix_keys(store::IX_INVOLVED, &Key::new().s(&me).bytes())? {
+                for key in r.prefix_keys(store::IX_INVOLVED, &Key::new().s(&involved_me).bytes())? {
                     let parts = store::decode_key(&key, "ssu")
                         .ok_or_else(|| AppError::internal("bad involved index"))?;
                     involved.push((parts[1].s().to_string(), parts[2].u()));
@@ -779,23 +881,27 @@ pub async fn patrol(
             Ok(out)
         })
         .await?;
-    let mut positioned: Vec<(Vec<u8>, (Repo, Pull))> = found
-        .into_iter()
-        .map(|(repo, p)| {
-            (
-                Key::new().s(&p.updated_at).s(&repo.id).u(p.number).bytes(),
-                (repo, p),
-            )
-        })
-        .collect();
-    positioned.sort_by(|a, b| a.0.cmp(&b.0));
-    let (selected, next_cursor) = page.slice(positioned);
-    let mut items = Vec::new();
     let mut tips_cache: BTreeMap<String, Tips> = BTreeMap::new();
-    for (repo, p) in selected {
+    let mut positioned: Vec<(Vec<u8>, (Repo, Pull))> = Vec::new();
+    for (repo, p) in found {
         if !tips_cache.contains_key(&repo.id) {
             tips_cache.insert(repo.id.clone(), tips(app, &repo).await?);
         }
+        let rank = patrol_rank(app, &repo, &p, &me, &tips_cache[&repo.id]).await?;
+        positioned.push((
+            Key::new()
+                .u(rank)
+                .s(&p.updated_at)
+                .s(&repo.id)
+                .u(p.number)
+                .bytes(),
+            (repo, p),
+        ));
+    }
+    positioned.sort_by(|a, b| a.0.cmp(&b.0));
+    let (selected, next_cursor) = page.slice(positioned);
+    let mut items = Vec::new();
+    for (repo, p) in selected {
         let tips = &tips_cache[&repo.id];
         let view = pull_view(app, &repo, &p, tips).await?;
         let head_sha = view.head_sha.clone();
@@ -810,6 +916,56 @@ pub async fn patrol(
         });
     }
     Ok(Page { items, next_cursor })
+}
+
+/// Where `p` stands in `me`'s patrol (`patrol_order`): its author's role or
+/// a reviewer's, whether its head has the approvals it needs, and how its
+/// required checks stand, a failure the queue keeps it out for counting as
+/// failed.
+async fn patrol_rank(app: &App, repo: &Repo, p: &Pull, me: &str, tips: &Tips) -> AppResult<u64> {
+    let head = tips.get(&p.head).cloned().unwrap_or_default();
+    let base = tips.get(&p.base).cloned().unwrap_or_default();
+    let approved = approvals(&read_review_states(app, p, &head).await?) >= repo.required_approvals;
+    let mut checks = crate::landing::head_checks(
+        repo,
+        &if head.is_empty() {
+            Vec::new()
+        } else {
+            app.ci.head_checks(repo, &head).await?.checks
+        },
+    );
+    let (id, number) = (repo.id.clone(), p.number);
+    if let Some(e) = app
+        .store
+        .read(move |r| crate::landing::current(r, &id, number))
+        .await?
+        && crate::landing::failure_stands(app, repo, p, &e, &head, &base).await?
+    {
+        checks = crate::landing::HeadChecks::Failed;
+    }
+    Ok(patrol_order(fold(&p.author) == me, approved, checks))
+}
+
+/// The patrol's order: first what has the least left to wait for once the
+/// member's work is done, and, between the same, a reviewer's work, which
+/// takes less time than an author's that may need a fix.
+fn patrol_order(author: bool, approved: bool, checks: crate::landing::HeadChecks) -> u64 {
+    use crate::landing::HeadChecks::*;
+    match (author, approved, checks) {
+        // Nothing: the approval puts it in the queue.
+        (false, false, Passed) => 1,
+        // An answer leaves the checks; a fix, a review and the checks.
+        (true, true, Passed | Running) => 2,
+        (false, false, Running) => 3,
+        // The rest leave a review and the checks after the author's work.
+        (true, true, Failed) => 4,
+        (true, false, Passed | Running) => 5,
+        (true, false, Failed) => 6,
+        // The author's fix first.
+        (false, false, Failed) => 7,
+        // The pull request does not wait on this reviewer.
+        (false, true, _) => 8,
+    }
 }
 
 // ---------------------------------------------------------------- update
@@ -2241,5 +2397,240 @@ mod tests {
         .expect("reopening must not hold the repository lock while registering CI")
         .unwrap();
         assert_eq!(reopened.state, "open");
+    }
+
+    fn comment(id: &str, author: &str, at: &str, meta: bool, reactors: &[&str]) -> CommentView {
+        CommentView {
+            id: id.into(),
+            author: author.into(),
+            body: "b".into(),
+            mentions: None,
+            meta: meta.then(|| serde_json::json!({"kind": "notice"})),
+            created_at: at.into(),
+            reactions: reactors
+                .iter()
+                .map(|a| ReactionView {
+                    author: a.to_string(),
+                    reaction: "ack".into(),
+                })
+                .collect(),
+            url: format!("u#{id}"),
+        }
+    }
+
+    fn review(id: &str, author: &str, at: &str, body: &str, reactors: &[&str]) -> ReviewView {
+        let c = comment(id, author, at, false, reactors);
+        ReviewView {
+            id: c.id,
+            author: c.author,
+            verdict: "approve".into(),
+            body: body.into(),
+            commit: "c".into(),
+            submitted_at: c.created_at,
+            reply_only: false,
+            reactions: c.reactions,
+            url: c.url,
+        }
+    }
+
+    fn thread(id: &str, resolved: bool, comments: Vec<CommentView>) -> ThreadView {
+        ThreadView {
+            id: id.into(),
+            resolved,
+            outdated: false,
+            path: "f".into(),
+            line: 1,
+            side: "RIGHT".into(),
+            start_line: None,
+            start_side: None,
+            commit: "c".into(),
+            comments: comments
+                .into_iter()
+                .map(|comment| ThreadCommentView {
+                    comment,
+                    reply_to_id: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn ids(a: Activity) -> Vec<String> {
+        unanswered_in("Aiko", &a)
+            .into_iter()
+            .map(|x| x.id)
+            .collect()
+    }
+
+    fn activity(
+        comments: Vec<CommentView>,
+        reviews: Vec<ReviewView>,
+        threads: Vec<ThreadView>,
+    ) -> Activity {
+        Activity {
+            comments,
+            reviews,
+            threads,
+        }
+    }
+
+    #[test]
+    fn statements_wait_until_the_author_answers_each_its_own_way() {
+        let (t1, t2) = ("2026-10-01T00:00:01.000Z", "2026-10-01T00:00:02.000Z");
+        // Each kind of statement, unanswered.
+        assert_eq!(
+            ids(activity(
+                vec![comment("c", "ken", t1, false, &[])],
+                vec![],
+                vec![]
+            )),
+            ["c"]
+        );
+        assert_eq!(
+            ids(activity(
+                vec![],
+                vec![review("r", "ken", t1, "nit", &[])],
+                vec![]
+            )),
+            ["r"],
+            "an approval with a body is a statement"
+        );
+        assert_eq!(
+            ids(activity(
+                vec![],
+                vec![],
+                vec![thread(
+                    "t",
+                    false,
+                    vec![comment("i", "ken", t1, false, &[])]
+                )]
+            )),
+            ["i"],
+            "a thread names its last comment"
+        );
+        // Not statements: a notice, a review without a body, a resolved
+        // thread, and the author's own words (names fold).
+        assert!(
+            ids(activity(
+                vec![
+                    comment("c", "ken", t1, true, &[]),
+                    comment("own", "aiko", t1, false, &[])
+                ],
+                vec![review("r", "ken", t1, " \n", &[])],
+                vec![
+                    thread("t", true, vec![comment("i", "ken", t1, false, &[])]),
+                    thread("u", false, vec![comment("j", "AIKO", t1, false, &[])])
+                ]
+            ))
+            .is_empty()
+        );
+        // A reaction answers each kind.
+        assert!(
+            ids(activity(
+                vec![comment("c", "ken", t1, false, &["aiko"])],
+                vec![review("r", "ken", t1, "nit", &["Aiko"])],
+                vec![thread(
+                    "t",
+                    false,
+                    vec![comment("i", "ken", t1, false, &["aiko"])]
+                )]
+            ))
+            .is_empty()
+        );
+        // A thread is answered by a reply in it, not by a reaction to an
+        // earlier comment or by speaking elsewhere.
+        assert!(
+            ids(activity(
+                vec![],
+                vec![],
+                vec![thread(
+                    "t",
+                    false,
+                    vec![
+                        comment("i", "ken", t1, false, &[]),
+                        comment("j", "aiko", t2, false, &[])
+                    ]
+                )]
+            ))
+            .is_empty()
+        );
+        assert_eq!(
+            ids(activity(
+                vec![comment("later", "aiko", t2, false, &[])],
+                vec![],
+                vec![thread(
+                    "t",
+                    false,
+                    vec![
+                        comment("i", "aiko", t1, false, &[]),
+                        comment("j", "ken", t1, false, &["aiko"]),
+                        comment("k", "ken", t1, false, &[])
+                    ]
+                )]
+            )),
+            ["k"]
+        );
+        // A comment or review is answered by anything the author says after
+        // it: a comment, a review, or an inline comment; not by a notice,
+        // and not by words before it.
+        let statements = || {
+            (
+                vec![comment("c", "ken", t1, false, &[])],
+                vec![review("r", "ken", t1, "nit", &[])],
+            )
+        };
+        let (c, r) = statements();
+        let mut answered = c.clone();
+        answered.push(comment("a", "aiko", t2, false, &[]));
+        assert!(ids(activity(answered, r.clone(), vec![])).is_empty());
+        let mut reviewed = r.clone();
+        reviewed.push(review("a", "aiko", t2, "", &[]));
+        assert!(ids(activity(c.clone(), reviewed, vec![])).is_empty());
+        assert!(
+            ids(activity(
+                c.clone(),
+                r.clone(),
+                vec![thread(
+                    "t",
+                    false,
+                    vec![comment("a", "aiko", t2, false, &[])]
+                )]
+            ))
+            .is_empty()
+        );
+        let mut noticed = c.clone();
+        noticed.push(comment("n", "aiko", t2, true, &[]));
+        assert_eq!(ids(activity(noticed, r.clone(), vec![])), ["c", "r"]);
+        let mut earlier = c.clone();
+        earlier.insert(
+            0,
+            comment("a", "aiko", "2026-10-01T00:00:00.000Z", false, &[]),
+        );
+        assert_eq!(ids(activity(earlier, r, vec![])), ["c", "r"]);
+    }
+
+    #[test]
+    fn the_patrol_orders_by_what_is_left_to_wait_for() {
+        use crate::landing::HeadChecks::*;
+        let rows = [
+            (false, false, Passed, 1),
+            (true, true, Passed, 2),
+            (true, true, Running, 2),
+            (false, false, Running, 3),
+            (true, true, Failed, 4),
+            (true, false, Passed, 5),
+            (true, false, Running, 5),
+            (true, false, Failed, 6),
+            (false, false, Failed, 7),
+            (false, true, Passed, 8),
+            (false, true, Running, 8),
+            (false, true, Failed, 8),
+        ];
+        for (author, approved, checks, rank) in rows {
+            assert_eq!(
+                patrol_order(author, approved, checks),
+                rank,
+                "author {author}, approved {approved}, {checks:?}"
+            );
+        }
     }
 }

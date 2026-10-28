@@ -1,15 +1,15 @@
 import { Anchor, Badge, Card, Group, Progress, Stack, Text } from "@mantine/core";
 import { Check, Cloud, GitBranch, GitMerge, Hourglass, ListChecks, ShieldCheck, X, type LucideIcon } from "lucide-react";
-import type { Landing, LandingFirst, LandingNext, PullRequest, Repository } from "../../api/types";
+import type { Landing, LandingFirst, LandingNext, PullRequest, Repository, Unanswered } from "../../api/types";
 import { useT, type MessageKey, type Translate } from "../../i18n";
 import { useChecks, useLanding } from "../../query/hooks";
 import { RunTime } from "./Checks";
 
 const humanTurn = (first: LandingFirst) => first.next.startsWith("owner_") || first.next === "host_closed";
-/** A departure the head itself clears (a move, a draft, a close) sends the pull request back to collecting what it needs. */
-const cleared = (code?: string) => !code || ["head_moved", "base_moved", "closed", "draft"].includes(code);
+/** A departure the head or its author clears (a move, a draft, a close, an answer) sends the pull request back to collecting what it needs. */
+const cleared = (code?: string) => !code || ["head_moved", "base_moved", "closed", "draft", "unanswered"].includes(code);
 
-const REASONS = ["merged", "closed", "draft", "conflict", "gate_failed", "host_failed", "publish_stopped", "already_in_base", "head_moved", "base_moved", "empty_head", "publish_requirements", "head_checks", "approvals"] as const;
+const REASONS = ["merged", "closed", "draft", "conflict", "gate_failed", "host_failed", "publish_stopped", "already_in_base", "head_moved", "base_moved", "empty_head", "publish_requirements", "head_checks", "approvals", "unanswered"] as const;
 const reasonKey = (code: string): MessageKey => REASONS.includes(code as typeof REASONS[number]) ? `landing.reason.${code}` as MessageKey : "landing.reason.unknown";
 
 /** What the departure left behind and how to rejoin, under its reason. */
@@ -24,6 +24,23 @@ function ReasonDetail({ landing }: { landing: Landing }) {
       {reason.jobs.length > 0 && <Text size="sm">{t("landing.failedJobs", { jobs: reason.jobs.join(", ") })}</Text>}
       {reason.files.length > 0 && <Text size="sm">{t("landing.conflicts", { files: reason.files.join(", ") })}</Text>}
       <Text size="sm" c="dimmed">{t(recovery)}</Text>
+    </>
+  );
+}
+
+/** The statements still waiting on the author, each a link to it on the page. */
+function UnansweredStatements({ items }: { items: Unanswered[] }) {
+  const t = useT();
+  return (
+    <>
+      <Text size="sm" c="dimmed">{t("landing.unansweredHint")}</Text>
+      <Stack gap={2} component="ul" m={0} pl="md">
+        {items.map((u) => (
+          <li key={u.id}>
+            <Anchor href={`#${encodeURIComponent(u.id)}`} size="sm">{t(`landing.statement.${u.kind}`, { author: u.author })}</Anchor>
+          </li>
+        ))}
+      </Stack>
     </>
   );
 }
@@ -90,6 +107,7 @@ function useJourney(pull: PullRequest, repo: Repository, load = true) {
     ...(pull.draft ? [{ text: t("pull.draft"), person: true }] : []),
     ...(load ? checks : []).filter((c) => !satisfied(c.state)).map((c) => ({ text: `${c.name} · ${t(`landing.${c.state}`)}`, person: c.state === "check.failure" })),
     ...(pull.approvals < repo.required_approvals ? [{ text: t("merge.approvals", { count: pull.approvals, required: repo.required_approvals }), person: true }] : []),
+    ...(pull.unanswered.length ? [{ text: t("landing.unanswered"), person: true }] : []),
   ];
   const where = whereabouts(pull, repo, unmet.some((u) => u.person));
   const first = where.landing?.position === 1 ? where.landing.first : null;
@@ -150,6 +168,7 @@ export function LandingJourney({ pull, repo }: { pull: PullRequest; repo: Reposi
               ))}
             </Group>
           )}
+          {pull.unanswered.length > 0 && <UnansweredStatements items={pull.unanswered} />}
           {mark === "failed" && landing ? (
             <ReasonDetail landing={landing} />
           ) : at === "conditions" ? (

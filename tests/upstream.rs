@@ -1027,6 +1027,8 @@ async fn retained_publication_problems_apply_only_to_the_current_upstream() {
                 },
             )
             .await;
+            // The author answers what Branvil said of the failure.
+            w.acknowledge(n).await;
             match destination {
                 "current" => continue,
                 "different" => {

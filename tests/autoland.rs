@@ -702,13 +702,14 @@ async fn a_failed_notice_is_sent_again_and_a_manual_publish_tells_nobody() {
     assert!(!problem.to_string().contains("hook-9f3c"), "{problem}");
     assert!(pull(&w, n).await["landing"]["notified_at"].is_null());
     hook.answers.lock().unwrap().clear();
-    // The next change of the repository sends it again.
+    // The next change of the repository (a notice, which awaits no answer)
+    // sends it again.
     let (st, _) = w
         .server
         .post(
             &format!("{}/pulls/{n}/comments", w.repo_path()),
             &w.ken,
-            json!({"body": "looks good"}),
+            json!({"body": "looks good", "meta": {"kind": "notice"}}),
         )
         .await;
     assert_eq!(st, StatusCode::CREATED);
@@ -800,7 +801,7 @@ async fn a_webhook_set_later_is_told_of_an_automatic_publish_whatever_auto_land(
         .post(
             &format!("{}/pulls/{n}/comments", w.repo_path()),
             &w.ken,
-            json!({"body": "waiting for GitHub"}),
+            json!({"body": "waiting for GitHub", "meta": {"kind": "notice"}}),
         )
         .await;
     assert_eq!(st, StatusCode::CREATED);
@@ -844,7 +845,7 @@ async fn a_changed_upstream_never_notifies_the_old_publication_or_republishes_au
         .post(
             &format!("{}/pulls/{n}/comments", w.repo_path()),
             &w.ken,
-            json!({"body":"The owner will publish to the new destination."}),
+            json!({"body":"The owner will publish to the new destination.", "meta": {"kind": "notice"}}),
         )
         .await;
     assert_eq!(st, StatusCode::CREATED, "{result}");
@@ -988,4 +989,67 @@ async fn an_automatic_missing_credential_is_persisted_and_clears_after_repair() 
     })
     .await;
     assert!(pull(&w, n).await["landing"]["error"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_statement_on_a_published_pull_request_holds_its_notice_until_answered() {
+    let (mut w, _gh) = followed().await;
+    // The host takes its time to register the checks of the head.
+    let config = w.server.data.join("branvil.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace(
+            "checks_registration_secs = 0",
+            "checks_registration_secs = 3600",
+        ),
+    )
+    .unwrap();
+    w.restart(&[]);
+    let hook = Hook::start(&w, &[]).await;
+    let other = other_repo(&w, OTHER, true).await;
+    with_aiko_account(&w).await;
+    settings(&w, json!({"auto_land": true})).await;
+    w.push_change("feat", "f.txt", "one\n");
+    let n = number(&w.open_pull("feat", json!([])).await);
+    eventually("the publish", || async {
+        pull(&w, n).await["upstream"]["number"].is_u64()
+    })
+    .await;
+    waits_for_host_checks(&w, &other, n, "registering").await;
+    let (st, said) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/comments", w.repo_path()),
+            &w.owner,
+            json!({"body": "Please also cover the empty case."}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{said}");
+    eventually("the departure", || async {
+        pull(&w, n).await["landing"]["reason"]["code"] == "unanswered"
+    })
+    .await;
+    // The host's checks are over: still no notice while the author has not
+    // answered.
+    registration_over(&mut w);
+    refresh(&w).await;
+    swept(&w, &other).await;
+    let p = pull(&w, n).await;
+    assert_eq!(p["landing"]["state"], "left", "{p}");
+    assert!(hook.received().is_empty(), "{:?}", hook.received());
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls/{n}/comments", w.repo_path()),
+            &w.aiko,
+            json!({"body": "Covered."}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    eventually("the notice", || async {
+        pull(&w, n).await["landing"]["notified_at"].is_string()
+    })
+    .await;
+    assert_eq!(hook.received().len(), 1);
 }

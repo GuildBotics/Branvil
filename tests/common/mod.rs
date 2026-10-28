@@ -559,6 +559,26 @@ impl World {
         v
     }
 
+    /// aiko, the author of pull request `n`, answers what Branvil said on it
+    /// (a failed gate or host check) with a reaction.
+    pub async fn acknowledge(&self, n: u64) {
+        let at = format!("{}/pulls/{n}", self.repo_path());
+        let activity = self.server.ok(&format!("{at}/activity"), &self.aiko).await;
+        for c in activity["comments"].as_array().unwrap() {
+            if c["author"] == "branvil" {
+                let (st, v) = self
+                    .server
+                    .post(
+                        &format!("{at}/reactions"),
+                        &self.aiko,
+                        json!({"target_id": c["id"], "reaction": "ack"}),
+                    )
+                    .await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+            }
+        }
+    }
+
     pub fn repo_path(&self) -> String {
         format!("/repos/{}", encode(REPO))
     }
