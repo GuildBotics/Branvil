@@ -329,14 +329,15 @@ pub struct NewTicket {
     #[serde(default)]
     pub labels: Vec<String>,
     /// The lane of its workspace's board the ticket goes to the end of.
-    #[serde(default = "first_lane")]
-    pub lane: String,
+    pub lane: Option<String>,
+    #[serde(default)]
+    pub interactive: bool,
+    pub assignee: Option<String>,
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
     /// The issue it stands for on the repository's upstream host.
     pub upstream_issue: Option<String>,
-}
-
-fn first_lane() -> String {
-    LANES[0].into()
 }
 
 fn undefined_labels(repo: &Repo, labels: &[String]) -> AppResult<()> {
@@ -370,7 +371,15 @@ pub async fn create_ticket(
     let repo = repos::visible(app, caller, repo_path).await?;
     domain::check_title(&input.title)?;
     domain::check_text("body", &input.body, domain::MAX_TEXT)?;
-    check_lane(&input.lane)?;
+    let lane = input.lane.clone().unwrap_or_else(|| {
+        if input.parent.is_some() || !input.blocked_by.is_empty() {
+            "ready"
+        } else {
+            "new"
+        }
+        .into()
+    });
+    check_lane(&lane)?;
     let upstream_issue = input
         .upstream_issue
         .as_deref()
@@ -391,6 +400,31 @@ pub async fn create_ticket(
             }
             let number = w.next(&format!("ticket:{}", repo.id))?;
             let now = util::now();
+            let related = |url: &str| related_ticket(w, &base_url, &repo, url);
+            let parent = input.parent.as_deref().map(related).transpose()?;
+            let mut blocked_by = Vec::new();
+            for url in &input.blocked_by {
+                let id = related(url)?;
+                if !blocked_by.contains(&id) {
+                    blocked_by.push(id);
+                }
+            }
+            if lane == "in_progress" && any_open(w, &blocked_by)? {
+                return Err(AppError::new(
+                    StatusCode::CONFLICT,
+                    "blocked",
+                    "Close blocking tickets before starting this ticket.",
+                ));
+            }
+            let assignee = input
+                .assignee
+                .as_deref()
+                .map(|name| domain::member_by_name(w, name))
+                .transpose()?
+                .map(|member| Assignee {
+                    name: member.name,
+                    assigned_at: now.clone(),
+                });
             let t = Ticket {
                 repo: repo.id.clone(),
                 workspace: repo.workspace.clone(),
@@ -401,35 +435,62 @@ pub async fn create_ticket(
                 state: "open".into(),
                 state_reason: None,
                 author,
-                assignee: None,
+                assignee,
                 labels,
-                interactive: false,
+                interactive: input.interactive,
                 upstream_issue,
-                rank: rank_in(
-                    w,
-                    &repo.workspace,
-                    (&repo.id, number),
-                    &input.lane,
-                    None,
-                    None,
-                )?,
-                lane: input.lane,
-                parent: None,
-                blocked_by: Vec::new(),
+                rank: rank_in(w, &repo.workspace, (&repo.id, number), &lane, None, None)?,
+                lane,
+                parent,
+                blocked_by,
                 created_at: now.clone(),
                 updated_at: now,
                 closed_at: None,
                 revision: 1,
             };
             write_ticket(w, None, &t)?;
+            // Check the combined relation graph, as updates do. A parent
+            // that also waits on this ticket would otherwise create a cycle.
+            let id = id_of(&t);
+            for (from, to) in t
+                .parent
+                .iter()
+                .map(|p| (p, &id))
+                .chain(t.blocked_by.iter().map(|b| (&id, b)))
+            {
+                if reaches(w, from, to)? {
+                    return Err(AppError::invalid(
+                        "These relations make tickets wait on each other.",
+                    ));
+                }
+            }
             ticket_view(w, &base_url, &repo, &t)
         })
         .await?;
-    app.events
-        .publish("ticket", &view.repository, view.key.clone());
+    publish_tickets(app, [&view]);
     app.events
         .publish("board", workspace_of(&view.repository), "");
     Ok(view)
+}
+
+/// Resolve a relation within the ticket's workspace before writing it.
+fn related_ticket(r: &impl Rd, base_url: &str, repo: &Repo, url: &str) -> AppResult<TicketId> {
+    let other = match resolve_ticket_url(r, base_url, url) {
+        Some(Ok((_, other))) => other,
+        Some(Err(e)) if e.code != "not_found" => return Err(e),
+        _ => {
+            return Err(AppError::invalid(format!(
+                "{url} is not a ticket of this Branvil."
+            )));
+        }
+    };
+    if other.workspace != repo.workspace {
+        return Err(AppError::invalid(format!(
+            "{url} is not a ticket of workspace {}.",
+            workspace_of(&repo.path)
+        )));
+    }
+    Ok(id_of(&other))
 }
 
 /// The workspace name of a repository path.
@@ -726,24 +787,7 @@ pub async fn update_ticket(
                 t.upstream_issue = issue;
             }
             // Related tickets are of the same workspace, as its board is.
-            let related = |url: &str| -> AppResult<TicketId> {
-                let other = match resolve_ticket_url(w, &base_url, url) {
-                    Some(Ok((_, other))) => other,
-                    Some(Err(e)) if e.code != "not_found" => return Err(e),
-                    _ => {
-                        return Err(AppError::invalid(format!(
-                            "{url} is not a ticket of this Branvil."
-                        )));
-                    }
-                };
-                if other.workspace != t.workspace {
-                    return Err(AppError::invalid(format!(
-                        "{url} is not a ticket of workspace {}.",
-                        workspace_of(&repo.path)
-                    )));
-                }
-                Ok(id_of(&other))
-            };
+            let related = |url: &str| related_ticket(w, &base_url, &repo, url);
             if let Some(parent) = &patch.parent {
                 t.parent = parent.as_deref().map(related).transpose()?;
             }

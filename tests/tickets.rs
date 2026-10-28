@@ -11,6 +11,94 @@ fn tickets_path() -> String {
 }
 
 #[tokio::test]
+async fn creation_commits_assignment_mode_relations_and_lane_together() {
+    let w = World::new().await;
+    let parent = w.ticket("Parent").await;
+    let blocker = w.ticket("Blocker").await;
+    for interactive in [false, true] {
+        for relation in ["none", "parent", "blocker", "both"] {
+            let mut input = json!({"title": "Created complete", "interactive": interactive,
+                                   "assignee": "aiko"});
+            if ["parent", "both"].contains(&relation) {
+                input["parent"] = parent["url"].clone();
+            }
+            if ["blocker", "both"].contains(&relation) {
+                input["blocked_by"] = json!([blocker["url"], blocker["url"]]);
+            }
+            let (status, ticket) = w.server.post(&tickets_path(), &w.aiko, input).await;
+            assert_eq!(status, 201, "{ticket}");
+            assert_eq!(
+                ticket["lane"],
+                if relation == "none" { "new" } else { "ready" }
+            );
+            assert_eq!(ticket["interactive"], interactive);
+            assert_eq!(ticket["assignee"]["name"], "aiko");
+            assert_eq!(ticket["assignee"]["assigned_at"], ticket["created_at"]);
+            assert_eq!(
+                ticket["parent"].is_null(),
+                !["parent", "both"].contains(&relation)
+            );
+            assert_eq!(
+                ticket["blocked_by"].as_array().unwrap().len(),
+                usize::from(["blocker", "both"].contains(&relation))
+            );
+            let path = format!("{}/{}", tickets_path(), ticket["key"].as_str().unwrap());
+            assert_eq!(w.server.get(&path, &w.aiko).await.1, ticket);
+            // The references' indexes were written in the same transaction.
+            if ["parent", "both"].contains(&relation) {
+                let (_, reread) = w
+                    .server
+                    .get(&format!("{}/1", tickets_path()), &w.aiko)
+                    .await;
+                assert!(
+                    reread["children"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c["url"] == ticket["url"])
+                );
+            }
+        }
+    }
+    for lane in ["new", "ready", "in_progress"] {
+        let (status, ticket) = w.server.post(&tickets_path(), &w.aiko,
+            json!({"title": "Explicit", "lane": lane, "interactive": true, "assignee": "alice"})).await;
+        assert_eq!(status, 201, "{ticket}");
+        assert_eq!(ticket["lane"], lane);
+        assert_eq!(ticket["assignee"]["name"], "alice");
+    }
+}
+
+#[tokio::test]
+async fn creation_rejects_invalid_initial_state_without_leaving_a_ticket() {
+    let w = World::new().await;
+    let parent = w.ticket("Parent").await;
+    let bad = [
+        json!({"assignee": "missing"}),
+        json!({"parent": "https://elsewhere/tickets/1"}),
+        json!({"blocked_by": ["https://elsewhere/tickets/1"]}),
+        json!({"lane": "in_progress", "blocked_by": [parent["url"]]}),
+        json!({"parent": parent["url"], "blocked_by": [parent["url"]]}),
+    ];
+    for mut input in bad {
+        input["title"] = json!("Invalid");
+        let (status, answer) = w.server.post(&tickets_path(), &w.aiko, input).await;
+        assert!(
+            status == 400 || status == 404 || status == 409,
+            "{status} {answer}"
+        );
+        assert_eq!(
+            w.server
+                .get(&format!("{}/2", tickets_path()), &w.aiko)
+                .await
+                .0,
+            404
+        );
+    }
+    assert_eq!(w.ticket("Next").await["key"], "2");
+}
+
+#[tokio::test]
 async fn deleting_a_ticket_removes_its_sources_and_indexes_but_keeps_numbers() {
     let mut w = World::new().await;
     let s = &w.server;

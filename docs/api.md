@@ -492,7 +492,7 @@ its own ancestor or blocker, a child blocked by its ancestor, a cycle of
 blockers, …) is refused with `400 invalid`, as is one to a ticket of another
 workspace.
 
-- `POST /api/v1/repos/{repo}/tickets` `{"title","body","labels","lane"?,"upstream_issue"?}` → `201` ticket with the repository's next number, at the end of `lane` of the workspace's board (`new` when `lane` is omitted) in the same transaction. Labels must be defined by the repository (`400 label_undefined`).
+- `POST /api/v1/repos/{repo}/tickets` `{"title","body","labels","lane"?,"interactive"?,"assignee"?,"parent"?,"blocked_by"?,"upstream_issue"?}` → `201` ticket with the repository's next number, at the end of `lane` of the workspace's board (when `lane` is omitted: `ready` with a parent or blockers, `new` otherwise) in the same transaction. Optional `interactive` (default false), `assignee` (member name, including the owner), `parent` (ticket URL), and `blocked_by` (ticket URLs) are committed with the new ticket and its indexes before any event is published. Relations must name tickets of the same workspace and must not create a wait cycle. `in_progress` is refused while a blocker is open (`409 blocked`), as when moving an existing ticket. Invalid assignment or relations roll back the entire creation, including its number. Labels must be defined by the repository (`400 label_undefined`).
 - `GET /api/v1/repos/{repo}/tickets?state=open|closed|all&lane=...&assignee=...&label=...` → items in number order
   (`state` defaults to `open`; `assignee=me` is the requesting member).
 - `GET /api/v1/repos/{repo}/tickets/{number}` → ticket.
