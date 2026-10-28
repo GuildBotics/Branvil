@@ -4,10 +4,15 @@
 
 import { useEffect, useMemo } from "react";
 import { useWorkspaces } from "./query/hooks";
-import type { Route } from "./router/routes";
+import { href, type Route } from "./router/routes";
 import { readStored, writeStored } from "./storage";
 
 const REMEMBERED = "branvil.workspace";
+
+/** The first page to open in a workspace, using the current display preference. */
+export function workspaceStart(workspace: string, showBoard: boolean): string {
+  return showBoard ? href.workspace(workspace) : href.relations(workspace);
+}
 
 /** The workspace a route belongs to, if it names one. */
 export function workspaceOfRoute(route: Route): string | null {

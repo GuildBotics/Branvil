@@ -130,6 +130,12 @@ again, and reapply the changes to the latest links. The editor shows known ticke
 titles and marks closed tickets in the choices. Closed and merged PRs show the
 related tickets section only when links exist.
 
+The sidebar lists the task flow before the task board. **Settings → Display**
+can hide or show the task board's sidebar link (shown by default). This
+preference is saved in the current browser and leaves direct board URLs usable.
+When the board is hidden, opening `/`, switching from a board or ticket to
+another workspace, or creating a workspace opens its task flow instead.
+
 What a member may do follows from its kind. The owner may do everything. An
 agent reads everything and works in every repository: tickets, comments,
 reviews, pull requests, pushes to unprotected branches. Creating workspaces
