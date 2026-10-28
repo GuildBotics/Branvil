@@ -5,12 +5,12 @@ import { useState } from "react";
 import { isApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
 import type { Repository } from "../../api/types";
-import { CopyButton, ErrorMessage, Loading, Notice, Refusal, StateBadge } from "../../components/common";
+import { CopyButton, ErrorMessage, Loading, Notice, Refusal } from "../../components/common";
 import { PanelHeader } from "../../components/PanelHeader";
 import { useT } from "../../i18n";
 import { useRepos } from "../../query/hooks";
 import { keys } from "../../query/keys";
-import { UpstreamTab, upstreamTone } from "./UpstreamTab";
+import { UpstreamTab } from "./UpstreamTab";
 
 /** The shown workspace: its board's repositories, each with its editor; `open` names one whose editor starts open on its CI tab. */
 export function WorkspaceSettings({ workspace, open = null }: { workspace: string; open?: string | null }) {
@@ -52,17 +52,7 @@ export function WorkspaceSettings({ workspace, open = null }: { workspace: strin
             <div key={r.path} role="listitem">
               <div className="setting-row">
                 <FolderGit2 size={18} color="var(--color-text-subtle)" />
-                <span className="setting-row-name">
-                  <strong>{r.path}</strong>{" "}
-                  <Text span size="sm" c="dimmed">
-                    {r.default_branch}
-                  </Text>
-                </span>
-                <Text span size="xs" c="dimmed" className="mono" visibleFrom="md">
-                  …/git/{r.path}.git
-                </Text>
-                <CopyButton value={r.clone_url} label={t("repo.copyCloneUrl")} />
-                {r.upstream && <StateBadge tone={upstreamTone(r)}>{t("settings.upstreamBadge", { repository: r.upstream.repository })}</StateBadge>}
+                <strong className="setting-row-name" style={{ overflowWrap: "anywhere" }}>{r.path}</strong>
                 <Button size="xs" variant="default" onClick={() => setEditing(editing === r.path ? null : r.path)} aria-expanded={editing === r.path}>
                   {t("common.edit")}
                 </Button>

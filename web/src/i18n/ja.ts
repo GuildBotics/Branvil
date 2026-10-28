@@ -571,7 +571,6 @@ export const ja: Record<MessageKey, string> = {
   "settings.addBranch": "ブランチ名を追加",
   "settings.addCheck": "チェック名を追加（例: test）",
   "settings.addLabel": "ラベルを追加",
-  "settings.upstreamBadge": "上流 {repository}",
   "settings.saved": "保存しました。",
   "settings.membersHelp": "オーナー、エージェント、ランナーと、コードホストのアカウントを管理します。",
   "upstream.readerChoose": "メンバーを選ぶ…",

@@ -44,9 +44,6 @@ export function SettingsView({ section, workspace, repo, showBoard, setShowBoard
       <div className="setup-layout">
         <Card p="xs">
           <nav className="setup-nav" aria-label={t("settings.sections")}>
-            <NavItem to={href.settings("display")} active={current === "display"} icon={<Monitor size={18} />}>
-              {t("settings.display")}
-            </NavItem>
             {workspace && (
               <div className="setup-nav-group">
                 <div className="nav-label">{t("settings.workspaceGroup")}</div>
@@ -57,6 +54,9 @@ export function SettingsView({ section, workspace, repo, showBoard, setShowBoard
             )}
             <div className="setup-nav-group">
               <div className="nav-label">{t("settings.branvilGroup")}</div>
+              <NavItem to={href.settings("display")} active={current === "display"} icon={<Monitor size={18} />}>
+                {t("settings.display")}
+              </NavItem>
               <NavItem to={href.settings("members")} active={current === "members"} icon={<Users size={18} />}>
                 {t("settings.members")}
               </NavItem>

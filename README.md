@@ -131,7 +131,8 @@ titles and marks closed tickets in the choices. Closed and merged PRs show the
 related tickets section only when links exist.
 
 The sidebar lists the task flow before the task board. **Settings → Display**
-can hide or show the task board's sidebar link (shown by default). This
+(under **All of Branvil**) can hide or show the task board's sidebar link (shown
+by default). This
 preference is saved in the current browser and leaves direct board URLs usable.
 When the board is hidden, opening `/`, switching from a board or ticket to
 another workspace, or creating a workspace opens its task flow instead.
