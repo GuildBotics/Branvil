@@ -618,6 +618,9 @@ lines, keeping only matching tickets and their ancestors (shown faintly for
 context), automatically opening those ancestors and the frame of new tickets
 to reveal matches; opening or closing frames during filtering is temporary,
 and clearing the filters restores the usual expansion state;
+successfully creating a ticket clears those filters so its card can be
+revealed, including when its relation is refused; cancelling or a failed
+creation keeps the filters;
 the new tickets without relations in one frame that looks like an open
 parent's, its header in another colour, laid out where a new ticket would be;
 only a ticket without relations (shown or not) is new: dragging a card onto

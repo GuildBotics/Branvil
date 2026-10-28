@@ -699,6 +699,92 @@ describe("relations: order and new tickets", () => {
     expect(within(freshFrame()).getByRole("article", { name: /^acme\/demo#9 / })).toBeInTheDocument();
   });
 
+  // Every creation entry, including inserting a parent between a ticket and its parent.
+  it.each([
+    { item: "Add ticket", on: "6" },
+    { item: "Add parent ticket", on: "2" },
+    { item: "Add parent ticket", on: "5" },
+    { item: "Add child ticket", on: "2" },
+    { item: "Add next ticket", on: "2" },
+  ])("clears all filters after successful $item on #$on and reveals the new ticket", async ({ item, on }) => {
+    const user = userEvent.setup();
+    const seed = OTHERS.map((c) => c.key === on ? { ...c, assignee: { name: "owner", assigned_at: "2026-10-14T10:00:00Z" }, labels: ["bug"] } : c);
+    const source = seed.find((c) => c.key === on)!;
+    const made = card("9", item === "Add ticket" ? "new" : "ready");
+    const parent = item === "Add parent ticket";
+    const child = item === "Add child ticket";
+    const next = item === "Add next ticket";
+    const after = [
+      ...seed.map((c) => {
+        if (c.key === on) return { ...c, ...(parent ? { parent: ref("9") } : child ? { children: [...c.children, ref("9")] } : next ? { blocks: [...c.blocks, ref("9")] } : {}) };
+        if (parent && c.key === source.parent?.key) return { ...c, children: [...c.children.filter((r) => r.key !== on), ref("9")] };
+        return c;
+      }),
+      { ...made, parent: parent ? source.parent : child ? ref(on) : null, children: parent ? [ref(on)] : [], blocked_by: next ? [ref(on)] : [] },
+    ];
+    let created = false;
+    let related = false;
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    fakeApi(withRepo({
+      "GET /api/v1/workspaces/acme/board/cards": () => json(200, { items: created ? related ? after : [...seed, made] : seed, next_cursor: null }),
+      "POST /api/v1/repos/acme/demo/tickets": () => {
+        created = true;
+        return json(201, made);
+      },
+      "PATCH /api/v1/repos/acme/demo/tickets/9": () => {
+        if (!parent) related = true;
+        return json(200, made);
+      },
+      [`PATCH /api/v1/repos/acme/demo/tickets/${on}`]: () => {
+        related = true;
+        return json(200, source);
+      },
+    }));
+    await shown();
+    await choose(user, "Assignee", "owner");
+    await choose(user, "Label", "bug");
+    await user.type(screen.getByRole("textbox", { name: "Text" }), `Title of ${on}`);
+    if (item === "Add ticket") {
+      // A temporary fold must not prevent revealing a new card in the same frame.
+      await user.click(within(freshFrame()).getByRole("button", { name: "Close child tickets" }));
+      await user.click(screen.getByRole("button", { name: item }));
+    }
+    else await pickFromMenu(user, `Actions of acme/demo#${on}`, item, article(on));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Different title");
+    await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
+
+    expect(await screen.findByRole("article", { name: /^acme\/demo#9 / })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Text" })).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "Assignee" })).toHaveValue("Assignee: Any");
+    expect(screen.getByRole("combobox", { name: "Label" })).toHaveValue("Label: Any");
+    // The reveal is consumed once at its final location, not left pending until filters change.
+    await waitFor(() => expect(scroll.mock.instances.filter((el) => (el as Element).getAttribute("data-ticket") === "acme/demo#9")).toHaveLength(1));
+    if (parent || child) expect(anchor("9").parentElement?.closest("[data-ticket]")).toBe(parent && !source.parent ? null : anchor(parent ? source.parent!.key : on));
+    await user.type(screen.getByRole("textbox", { name: "Text" }), "no match");
+    await user.clear(screen.getByRole("textbox", { name: "Text" }));
+    expect(scroll.mock.instances.filter((el) => (el as Element).getAttribute("data-ticket") === "acme/demo#9")).toHaveLength(1);
+  });
+
+  it("keeps filters and saved expansion when creation is cancelled or fails", async () => {
+    const user = userEvent.setup();
+    const fake = fakeApi(withRepo({ "POST /api/v1/repos/acme/demo/tickets": apiError(409, "conflict", "Creation refused.") }));
+    await shown();
+    await user.type(screen.getByRole("textbox", { name: "Text" }), "Title of 2");
+    await pickFromMenu(user, "Actions of acme/demo#2", "Add child ticket", article("2"));
+    let dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("textbox", { name: "Text" })).toHaveValue("Title of 2");
+    expect(fake.calls("POST", "/api/v1/repos/acme/demo/tickets")).toHaveLength(0);
+    await pickFromMenu(user, "Actions of acme/demo#2", "Add child ticket", article("2"));
+    dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Different title");
+    await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Creation refused.");
+    expect(screen.getByRole("textbox", { name: "Text" })).toHaveValue("Title of 2");
+    expect(window.localStorage.getItem("branvil.relations.open.acme")).toBeNull();
+  });
+
   it("brings a new child into view only once the cards are read with its parent, opening the parent", async () => {
     const user = userEvent.setup();
     const made = card("9", "ready");
@@ -755,12 +841,14 @@ describe("relations: order and new tickets", () => {
       }),
     );
     await shown();
+    await user.type(screen.getByRole("textbox", { name: "Text" }), "Title of 4");
     await pickFromMenu(user, "Actions of acme/demo#4", "Add child ticket", article("4"));
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "Related");
     await user.click(within(dialog).getByRole("button", { name: "Create ticket" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Refused.");
     expect(await screen.findByRole("article", { name: /^acme\/demo#9 / })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Text" })).toHaveValue("");
     // Nothing is moved after the refused relation.
     expect(fake.requests.some((r) => r.method === "PUT")).toBe(false);
   });

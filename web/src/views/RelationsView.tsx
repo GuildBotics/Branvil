@@ -139,6 +139,9 @@ export function RelationsView({ workspace }: { workspace: string }) {
     if (closed.length > 0) keepOpened(JSON.stringify([...open, ...closed]));
   }, [reveal, cards, open, keepOpened]);
   const onCreated = (ticket: Ticket) => {
+    // Creation leaves filtering so the new card can be revealed, even if it
+    // does not match. All creation paths share this successful callback.
+    onFilter({ assignee: "", label: "", text: "" });
     const made = ticketRef(ticket);
     const to = adding?.to;
     if (!to) {
