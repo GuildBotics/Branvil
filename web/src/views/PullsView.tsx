@@ -10,8 +10,7 @@ import { usePullList } from "../query/pullList";
 import { Link, navigate } from "../router/Router";
 import { href } from "../router/routes";
 import { rollup, type CiRollup } from "./board/ordering";
-import { LandingBadge } from "./pull/LandingStatus";
-import { LandingQueue } from "./pulls/LandingQueue";
+import { JourneyBadge } from "./pull/LandingStatus";
 import { TipChecks } from "./pulls/TipChecks";
 import { ReviewersCell } from "./pulls/ReviewersCell";
 
@@ -32,8 +31,9 @@ function CiCell({ pull, load }: { pull: PullRequest; load: boolean }) {
 
 /**
  * The pull requests of a workspace's repositories; a repository's page
- * (`/{repo}`) is the checks of its default branch and this list for that
- * repository.
+ * (`/{repo}`) is this list for that repository. Each open pull request says
+ * where it is on its way into its base; the default branches' CI opens from
+ * the header.
  */
 export function PullsView({ workspace, repo }: { workspace: string; repo: string | null }) {
   const t = useT();
@@ -53,6 +53,8 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
   const needle = text.trim().toLowerCase();
   const pulls = (list.data?.pages.flatMap((p) => p.items) ?? [])
     .filter((p) => !needle || `${p.repository} ${p.label} ${p.title}`.toLowerCase().includes(needle));
+  // Checks are read for the first open rows only (closed rows show no checks).
+  let opened = 0;
   const emptyMessage = needle
     ? list.hasNextPage ? t("pulls.noLoadedMatches") : t("pulls.noMatches")
     : state === "open" ? t("pulls.noneOpen") : t("pulls.none");
@@ -66,8 +68,8 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
             {repo ?? t("pulls.ofWorkspace", { workspace })}
           </Text>
         }
+        right={<TipChecks key={repo ?? ALL_REPOS} workspace={workspace} paths={paths} repo={repo} />}
       />
-      {repo && <LandingQueue repo={repo} />}
       <Card p="lg">
         <Group gap="sm" mb={14} role="search" aria-label={t("pulls.filters")}>
           <TextInput
@@ -118,25 +120,25 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
             {pulls.length === 0 ? (
               <div className="empty-row">{emptyMessage}</div>
             ) : (
-              pulls.map((p, i) => {
+              pulls.map((p) => {
                 const s = p.merged ? "merged" : p.state;
+                const load = s === "open" && opened++ < CI_BUDGET;
+                const repository = repoOf(p.repository);
                 return (
                   <Link key={p.url} to={href.pull(p.repository, p.number)} className="list-row pull-cols" role="row" aria-label={`${p.repository} ${p.label} ${p.title}`}>
-                    <Text span size="sm" c="dimmed" role="cell">
-                      {p.repository}
+                    <Text span size="sm" c="dimmed" role="cell" truncate title={p.repository}>
+                      {p.repository.slice(workspace.length + 1)}
                     </Text>
                     <span className="mono" role="cell">
                       {p.label}
                     </span>
                     <span role="cell">{p.title}</span>
-                    <Group gap={4} role="cell" wrap="nowrap">
-                      <StateBadge tone={s === "closed" ? "neutral" : "success"}>{t(`pull.state.${s}`)}</StateBadge>
-                      {p.draft && <StateBadge tone="warning">{t("pull.draft")}</StateBadge>}
-                      {p.state === "open" && p.landing && <LandingBadge landing={p.landing} host={repoOf(p.repository)?.upstream?.host} />}
-                    </Group>
-                    <span role="cell">{p.state === "open" && <CiCell pull={p} load={i < CI_BUDGET} />}</span>
+                    <span role="cell">
+                      {s !== "open" ? <StateBadge tone={s === "closed" ? "neutral" : "success"}>{t(`pull.state.${s}`)}</StateBadge> : repository && <JourneyBadge pull={p} repo={repository} load={load} />}
+                    </span>
+                    <span role="cell">{p.state === "open" && <CiCell pull={p} load={load} />}</span>
                     <Group gap={6} role="cell" wrap="nowrap">
-                      <MemberAvatar name={p.author} kind={kindOf(p.author)} size={20} />
+                      <MemberAvatar name={p.author} kind={kindOf(p.author)} size={24} />
                       <Text span size="sm" truncate style={{ minWidth: 0 }} title={p.author}>
                         {p.author}
                       </Text>
@@ -159,7 +161,6 @@ export function PullsView({ workspace, repo }: { workspace: string; repo: string
             {t("pulls.loadMore")}
           </Button>
         )}
-        <TipChecks key={repo ?? ALL_REPOS} workspace={workspace} paths={paths} repo={repo} />
       </Card>
     </Stack>
   );

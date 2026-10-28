@@ -1,14 +1,11 @@
-import { MantineProvider } from "@mantine/core";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Landing, LandingNext, Repository } from "../api/types";
-import { dictionaries, I18nProvider } from "../i18n";
+import { dictionaries } from "../i18n";
 import { applyChange } from "../query/events";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
 import { BASE, HEAD, landing, pull } from "./fixtures";
-import { theme } from "../theme";
-import { LandingBadge, LandingReason } from "../views/pull/LandingStatus";
 
 const P = "/api/v1/repos/acme/demo/pulls/3";
 const REPO: Repository = {
@@ -53,81 +50,85 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
   const words = dictionaries[lang];
   const journeyName = () => words["landing.journey"].replace("{base}", "main");
   const label = (next: LandingNext, base = "main") => words[`landing.next.${next}`].replaceAll("{host}", "GitHub").replaceAll("{base}", base);
-  it.each(NEXT)("places the leader for %s and links only human actions", async (next) => {
+  const listBadge = async () => {
+    const list = await screen.findByRole("table", { name: words["pulls.title"] });
+    await waitFor(() => expect(list.querySelector("[data-state]")).toBeInTheDocument());
+    return list.querySelector("[data-state]") as HTMLElement;
+  };
+  const tone = (badge: HTMLElement, color: string) => expect(badge).toHaveStyle(`--badge-color: var(--mantine-color-${color}-light-color)`);
+  it.each(NEXT)("says %s in the list, with the next step in its title", async (next) => {
     fakeApi(routes(entry(next)));
     renderApp("/acme/demo", lang);
-    const queue = await screen.findByRole("region", { name: words["landing.queue"] });
-    expect(await within(queue).findByText(label(next))).toBeInTheDocument();
-    expect(within(queue).getByText("Diagnostic detail")).toBeInTheDocument();
-    const slot = next === "gate" ? "gate" : ["publishing", "owner_publish"].includes(next) ? "transit" : "host";
-    expect(queue.querySelector(`[data-stage=${slot}] [data-pr="3"]`)).toBeInTheDocument();
-    expect(within(queue).getByText("Fix login")).toBeInTheDocument();
-    const list = await screen.findByRole("table", { name: words["pulls.title"] });
-    expect(await within(list).findByText(words[`landing.badge.${next}`].replaceAll("{host}", "GitHub").replaceAll("{base}", "main"))).toBeInTheDocument();
-    const human = next.startsWith("owner_") || next === "host_closed";
-    const links = within(queue).queryAllByRole("link");
-    expect(links).toHaveLength(human ? 1 : 0);
-    if (human) expect(links[0]).toHaveAttribute("href", ["owner_merge_host", "host_closed"].includes(next) ? "https://example.test/pulls/3" : "/acme/demo/-/pulls/3");
+    const badge = await listBadge();
+    await waitFor(() => expect(badge).toHaveTextContent(words[`landing.badge.${next}`].replaceAll("{host}", "GitHub").replaceAll("{base}", "main")));
+    expect(badge).toHaveAttribute("title", label(next));
+    expect(badge).toHaveAttribute("data-stop", STOP[next]);
+    tone(badge, next.startsWith("owner_") || next === "host_closed" ? "warning" : "neutral");
   });
-  it.each(["auto_merge", "owner_merge"] as const)("draws a local path to the named base (%s)", async (next) => {
-    fakeApi(routes(entry(next, { base: "release" }), { "GET /api/v1/repos/acme/demo": json(200, { ...REPO, upstream: null }) }));
-    renderApp("/acme/demo", lang);
-    const queue = await screen.findByRole("region", { name: words["landing.queue"] });
-    expect(await within(queue).findByText(label(next, "release"))).toBeInTheDocument();
-    expect(queue.querySelector('[data-stage="host"]')).not.toBeInTheDocument();
-    expect(queue.querySelector('[data-stage="transit"] [data-pr="3"]')).toBeInTheDocument();
-    expect(queue.querySelector('[data-stage="base"]')).toHaveTextContent("release");
-  });
-  it.each([true, false])("keeps the base name outside its marker (upstream=%s)", async (host) => {
-    const base = "release/next";
-    const l = entry(host ? "owner_merge_host" : "owner_merge", {base});
-    fakeApi(routes(l, {"GET /api/v1/repos/acme/demo": json(200, {...REPO, upstream:host ? REPO.upstream : null})}));
-    renderApp("/acme/demo", lang);
-    const region = await screen.findByRole("region", {name:words["landing.queue"]});
-    await waitFor(() => expect(region.querySelector('[data-stage="base"]')).toBeInTheDocument());
-    const stop = region.querySelector('[data-stage="base"]') as HTMLElement;
-    expect(stop.querySelector(".landing-marker")).not.toHaveTextContent(base);
-    expect(within(stop).getByText(base).closest(".landing-marker")).toBeNull();
-  });
-  it("draws nearest three waiters in reverse order and groups the remainder", async () => {
-    const leader = entry("host_checks");
-    const items = [leader, ...[4,5,6,7,8].map((n) => landing({ number: n, title: `Waiting ${n}`, state: "waiting", position: n-2, first: leader.first }))];
-    fakeApi(routes(leader, { "GET /api/v1/repos/acme/demo/landing": json(200, { items: items.reverse() }) }));
-    renderApp("/acme/demo", lang);
-    const queue = await screen.findByRole("region", { name: words["landing.queue"] });
-    expect(await within(queue).findByText(words["landing.others"].replace("{count}", "2"))).toBeInTheDocument();
-    expect([...queue.querySelectorAll('[data-stage="waiting"] [data-pr]')].map((e) => e.getAttribute("data-pr"))).toEqual(["6", "5", "4"]);
-    expect(within(queue).getByText(words["landing.waitFor"].replace("{first}", "3"))).toBeInTheDocument();
-  });
-  it("counts only completed required gate jobs", async () => {
-    fakeApi(routes(entry("gate", { state: "gating" }), {
-      "GET /api/v1/repos/acme/demo": json(200, { ...REPO, required_checks: ["test", "lint", "build"] }),
-      [`GET ${P}/checks`]: json(200, { head_sha: HEAD, checks: [{ name: "gate/test", status: "completed", conclusion: "failure" }, { name: "gate/lint", status: "in_progress" }, { name: "gate/optional", status: "completed", conclusion: "success" }] }),
+  it("names a base other than the default branch", async () => {
+    const l = entry("owner_merge", { base: "release" });
+    fakeApi(routes(l, {
+      "GET /api/v1/repos": json(200, { items: [{ ...REPO, upstream: null }], next_cursor: null }),
+      "GET /api/v1/repos/acme/demo": json(200, { ...REPO, upstream: null }),
+      "GET /api/v1/repos/acme/demo/pulls": json(200, { items: [pull({ base: "release", landing: l, approvals: 1 })], next_cursor: null }),
     }));
     renderApp("/acme/demo", lang);
-    const queue = await screen.findByRole("region", { name: words["landing.queue"] });
-    expect(await within(queue).findByText("1/3")).toBeInTheDocument();
+    expect(await listBadge()).toHaveTextContent(`release · ${words["landing.badge.owner_merge"].replace("{base}", "release")}`);
   });
-  it("filters departures and sorts recent merges by state_at rather than sequence", async () => {
-    const left = (n: number, code: string, extra: Partial<Landing> = {}) => landing({ number: n, title: `Title ${n}`, state: "left", first: null, position: null, reason: { code, message: "Service English", jobs: [], files: [] }, ...extra });
-    const items = [left(1,"conflict"),left(2,"head_moved"),left(3,"draft",{draft:true}),left(4,"conflict",{pull_state:"closed"}), ...[5,6,7,8].map(n=>left(n,"merged",{pull_state:"closed",state_at:`2026-10-${30-n}T00:00:00Z`}))];
-    fakeApi(routes(null, { "GET /api/v1/repos/acme/demo/landing": json(200, { items }) }));
+  it("says a waiting pull request's place and who goes first", async () => {
+    fakeApi(routes(landing({ state: "waiting", position: 3, first: { ...landing().first!, number: 1 } })));
     renderApp("/acme/demo", lang);
-    const queue = await screen.findByRole("region", { name: words["landing.queue"] });
-    const departures = await within(queue).findByRole("region", {name:words["landing.left"]});
-    expect(within(departures).getAllByRole("link").map(e=>e.textContent)).toEqual(["!1 Title 1","!2 Title 2"]);
-    expect(within(departures).getByText(words["landing.waitRejoin"])).toBeInTheDocument();
-    const recent = within(queue).getByRole("region", {name:words["landing.recent"].replace("{base}","main")});
-    expect(within(recent).getAllByRole("link").map(e=>e.textContent)).toEqual(["!5 Title 5","!6 Title 6","!7 Title 7"]);
-    expect(within(queue).queryByText("Service English")).not.toBeInTheDocument();
+    const badge = await listBadge();
+    expect(badge).toHaveTextContent(words["landing.position"].replace("{position}", "3"));
+    expect(badge).toHaveAttribute("title", words["landing.waitFor"].replace("{first}", "1"));
   });
-  it.each(["conflict","gate_failed","host_failed","publish_stopped","already_in_base","head_moved","base_moved","empty_head","publish_requirements","head_checks","approvals"] as const)("localizes %s", async (code) => {
-    fakeApi(routes(landing({state:"left",first:null,reason:{code,message:"Service English",jobs:["build"],files:["src/main.rs"]}})));
-    renderApp("/acme/demo",lang);
-    const queue = await screen.findByRole("region",{name:words["landing.queue"]});
-    expect(await within(queue).findByText(words[`landing.reason.${code}`])).toBeInTheDocument();
-    expect(within(queue).queryByText("Service English")!==null).toBe(code==="publish_stopped");
-    if(code==="already_in_base") expect(within(queue).getByText(words["landing.closePull"])).toBeInTheDocument();
+  it("names what keeps a pull request out of the queue", async () => {
+    const p = pull({ landing: null, approvals: 0, draft: true });
+    fakeApi(routes(null, { "GET /api/v1/repos/acme/demo/pulls": json(200, { items: [p], next_cursor: null }), [`GET ${P}`]: json(200, p) }));
+    renderApp("/acme/demo", lang);
+    const badge = await listBadge();
+    const approvals = words["merge.approvals"].replace("{count}", "0").replace("{required}", "1");
+    await waitFor(() => expect(badge).toHaveAttribute("title", `${words["pull.draft"]} / ${approvals}`));
+    expect(badge).toHaveTextContent(words["landing.blockedBy"].replace("{what}", `${words["pull.draft"]} +1`));
+    tone(badge, "warning");
+  });
+  it("is plainly not queued when nothing visible is missing", async () => {
+    fakeApi(routes(null));
+    renderApp("/acme/demo", lang);
+    const badge = await listBadge();
+    await waitFor(() => expect(badge).toHaveTextContent(words["landing.notInQueue"]));
+    expect(badge).toHaveAttribute("title", words["landing.headReady"]);
+    tone(badge, "neutral");
+  });
+  it.each([["host_failed", "GitHub"], ["gate_failed", words["landing.checkpoint"]], ["approvals", words["landing.stop.conditions"]]] as const)("says where it left the queue (%s)", async (code, stop) => {
+    fakeApi(routes(landing({ state: "left", first: null, position: null, reason: { code, message: "Service English", jobs: [], files: [] } })));
+    renderApp("/acme/demo", lang);
+    const badge = await listBadge();
+    expect(badge).toHaveTextContent(words["landing.leftAt"].replace("{stop}", stop));
+    expect(badge).toHaveAttribute("title", words[`landing.reason.${code}`]);
+    tone(badge, "danger");
+  });
+  it("reads no checks for an open row past the budget, and names only what it knows", async () => {
+    const rows = Array.from({ length: 31 }, (_, i) => pull({ number: 31 - i, label: `!${31 - i}`, url: `${window.location.origin}/acme/demo/-/pulls/${31 - i}`, landing: null, approvals: 1 }));
+    const fake = fakeApi(routes(null, {
+      "GET /api/v1/repos/acme/demo/pulls": json(200, { items: rows, next_cursor: null }),
+      ...Object.fromEntries(rows.map((p) => [`GET /api/v1/repos/acme/demo/pulls/${p.number}/checks`, json(200, { head_sha: HEAD, checks: [{ name: "test", status: "completed", conclusion: "failure" }] })])),
+    }));
+    renderApp("/acme/demo", lang);
+    const list = await screen.findByRole("table", { name: words["pulls.title"] });
+    await userEvent.setup().click(await screen.findByRole("button", { name: words["pulls.loadMore"] }));
+    const last = await within(list).findByRole("row", { name: /acme\/demo !1 Fix login$/ });
+    await waitFor(() => expect(fake.calls("GET", "/api/v1/repos/acme/demo/pulls/2/checks")).toHaveLength(1));
+    expect(last.querySelector("[data-state]")).toHaveTextContent(words["landing.notInQueue"]);
+    expect(fake.calls("GET", "/api/v1/repos/acme/demo/pulls/1/checks")).toHaveLength(0);
+  });
+  it("shows a closed pull request's state instead of its way", async () => {
+    const p = pull({ state: "closed", landing: landing({ state: "left", first: null, position: null, reason: { code: "closed", message: "", jobs: [], files: [] } }) });
+    fakeApi(routes(null, { "GET /api/v1/repos/acme/demo/pulls": json(200, { items: [p], next_cursor: null }) }));
+    renderApp("/acme/demo", lang);
+    const list = await screen.findByRole("table", { name: words["pulls.title"] });
+    await within(list).findByRole("row", { name: /Fix login/ });
+    expect(list.querySelector("[data-state]")).not.toBeInTheDocument();
   });
   it.each(NEXT)("places this pull request at the stop %s names and links only host actions", async (next) => {
     fakeApi(routes(entry(next)));
@@ -204,9 +205,9 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
     vi.useFakeTimers({toFake:["Date","setInterval","clearInterval"]});
     vi.setSystemTime(new Date("2026-10-25T10:01:00Z"));
     let l=entry("owner_merge_host",{first:{...entry("owner_merge_host").first!,state_at:"2026-10-25T10:00:00Z"}});
-    fakeApi(routes(l, {"GET /api/v1/repos/acme/demo/landing": () => json(200, {items: [l]})}));
-    const {client} = renderApp("/acme/demo",lang);
-    const queue=await screen.findByRole("region",{name:words["landing.queue"]});
+    fakeApi(routes(l, {[`GET ${P}`]: () => json(200, pull({ landing: l, author: "agent", approvals: 1 }))}));
+    const {client} = renderApp("/acme/demo/-/pulls/3",lang);
+    const queue=await screen.findByRole("region",{name:journeyName()});
     const recorded = lang === "ja" ? "検問・公開状態の記録から" : "Since the recorded gate/publishing update:";
     expect(await within(queue).findByText(recorded, {exact:false})).toBeInTheDocument();
     expect(within(queue).getByText(lang==="ja"?"1分0秒":"1m 0s")).toBeInTheDocument();
@@ -218,20 +219,6 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
       expect(within(queue).getByText(recorded, {exact:false})).toBeInTheDocument();
       expect(within(queue).getByText(lang==="ja"?"1分2秒":"1m 2s")).toBeInTheDocument();
     }
-  });
-  it.each([
-    ["conflict", "warning"], ["gate_failed", "warning"], ["host_failed", "warning"],
-    ["publish_stopped", "warning"], ["already_in_base", "warning"], ["empty_head", "warning"],
-    ["publish_requirements", "warning"], ["head_checks", "warning"], ["approvals", "warning"],
-    ["head_moved", "neutral"], ["base_moved", "neutral"], ["closed", "neutral"],
-    ["draft", "neutral"], ["merged", "success"],
-  ] as const)("uses the departure reason for both the badge and detail tone (%s)", (code, tone) => {
-    const l = landing({state:"left", position:null, first:null, reason:{code,message:"Service English",files:[],jobs:[]}});
-    render(<MantineProvider theme={theme} env="test"><I18nProvider initial={lang}><LandingBadge landing={l} /><LandingReason landing={l} /></I18nProvider></MantineProvider>);
-    const badge = screen.getByText(words["landing.left"]);
-    expect(badge.closest(".mantine-Badge-root")).toHaveStyle(`--badge-color: var(--mantine-color-${tone}-light-color)`);
-    const reason = screen.getByText(words[`landing.reason.${code}`]);
-    expect(reason).toHaveStyle(tone === "neutral" ? "color: var(--mantine-color-dimmed)" : `color: var(--color-${tone}-text)`);
   });
   it("uses Branvil's icon for service comments",async()=>{
     fakeApi(routes(null,{[`GET ${P}/activity`]:json(200,{comments:[{id:"gate_failure",author:"branvil",body:"Gate failed",created_at:"2026-10-25T10:00:00Z",reactions:[],meta:null,url:""}],reviews:[],threads:[]})}));
@@ -283,6 +270,17 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
     renderApp("/acme/demo/-/pulls/3", lang);
     const journey = await screen.findByRole("region", {name:journeyName()});
     expect(await within(journey).findByText("1/3")).toBeInTheDocument();
+  });
+  it.each([
+    ["already_in_base", "landing.closePull"], ["empty_head", "landing.closePull"], ["gate_failed", "landing.retryGate"],
+    ["host_failed", "landing.retryHost"], ["publish_stopped", "landing.publishAgain"], ["conflict", "landing.rejoin"],
+  ] as const)("says how to rejoin after leaving for %s", async (code, recovery) => {
+    fakeApi(routes(landing({state:"left",first:null,position:null,reason:{code,message:"Service English",jobs:[],files:["src/main.rs"]}})));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const journey = await screen.findByRole("region", {name:journeyName()});
+    expect(await within(journey).findByText(words[recovery])).toBeInTheDocument();
+    expect(within(journey).getByText(words["landing.conflicts"].replace("{files}", "src/main.rs"))).toBeInTheDocument();
+    expect(within(journey).queryByText("Service English") !== null).toBe(code === "publish_stopped");
   });
   it.each(["draft", "base_moved"] as const)("collects requirements again after leaving for %s", async (code) => {
     fakeApi(routes(landing({state:"left",first:null,position:null,reason:{code,message:"",jobs:[],files:[]}})));
