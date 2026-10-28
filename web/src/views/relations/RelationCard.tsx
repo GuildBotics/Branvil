@@ -4,7 +4,7 @@ import { memo, type PointerEvent } from "react";
 import { ticketRef, type Card, type Lane } from "../../api/types";
 import type { Person } from "../../components/PeoplePicker";
 import { useT } from "../../i18n";
-import { CardView, ChildrenToggle, CopyUrlItem, DeleteCardItem, LaneButton, LazyMenu } from "../board/CardView";
+import { CardView, ChildrenToggle, CopyUrlItem, DeleteCardItem, InteractiveItem, LaneButton, LazyMenu } from "../board/CardView";
 
 /** A ticket made from a card's menu: its parent, a child of it, or the next one, which waits for it. */
 export type Addition = "parent" | "child" | "next";
@@ -50,8 +50,8 @@ export const RelationCard = memo(function RelationCard({
       people={people}
       loadChecks={loadChecks}
       busy={busy}
-      // A parent has the colour of the header it becomes once opened.
-      className={[open !== undefined && "parent", dim && "dim"].filter(Boolean).join(" ")}
+      // A parent has the colour of the header it becomes once opened, also while none of its children is shown.
+      className={[card.children.length > 0 && "parent", dim && "dim"].filter(Boolean).join(" ")}
       lane={<LaneButton card={card} lanes={lanes} onLane={onLane} disabled={busy} />}
       lead={open === undefined ? undefined : <ChildrenToggle open={open} onToggle={() => onToggle(ticketRef(card), !open)} />}
     >
@@ -83,6 +83,7 @@ export const RelationCard = memo(function RelationCard({
             {t("relations.addNext")}
           </Menu.Item>
           <Menu.Divider />
+          <InteractiveItem card={card} />
           <CopyUrlItem url={card.url} />
           <DeleteCardItem card={card} />
         </LazyMenu>

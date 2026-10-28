@@ -158,6 +158,7 @@ describe("relations", () => {
       "Add parent ticket",
       "Add child ticket",
       "Add next ticket",
+      "Interactive",
       "Copy URL",
       "Delete",
     ]);
@@ -244,6 +245,16 @@ describe("relations", () => {
       ["PATCH", "2", { parent: url("1") }],
       ["PUT", "2/board", { lane: "new" }],
     ]);
+  });
+
+  it("colours a parent as one while none of its children is shown, with nothing to open", async () => {
+    // #7's only child #6 is closed and closed tickets are not shown.
+    fakeApi(routes({ open: [card("7", "ready", { children: [ref("6", "closed")] }), card("5", "ready")] }));
+    renderApp("/acme/-/relations");
+    await screen.findByText("Title of 7");
+    expect(article("7")).toHaveClass("parent");
+    expect(within(article("7")).queryByRole("button", { name: "Open child tickets" })).not.toBeInTheDocument();
+    expect(article("5")).not.toHaveClass("parent");
   });
 
   it("counts relations to tickets it does not show: such a ticket is not in the frame of new tickets, nor can it be dropped there", async () => {
