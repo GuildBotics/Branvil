@@ -1082,7 +1082,7 @@ mod tests {
         serde_json::from_value(json!({
             "provider":"test-host", "repository":"remote/demo", "account":"test-agent", "number":2,
             "url":"https://host.test/pulls/2", "state":"open", "pushed":"head", "sent_title":"Feature", "sent_body":"",
-            "sent_state":"open", "checks":[], "checks_registered_by":null, "published_at":"now", "error":null, "stopped":null, "auto":true
+            "sent_state":"open", "checks":[], "checks_registered_by":null, "checks_settled":true, "published_at":"now", "error":null, "stopped":null, "auto":true
         })).unwrap()
     }
 
@@ -1245,16 +1245,30 @@ mod tests {
         e.error = None;
         p.upstream = Some(publication());
         assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host"); // the host has none
-        let x = p.upstream.as_mut().unwrap();
-        x.await_checks(0);
-        assert_eq!(next(&repo, &p, &e, &following), "host_checks"); // not read yet
-        let x = p.upstream.as_mut().unwrap();
-        x.record_checks(Vec::new()); // read as none after the time given
-        assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host");
+        let done = HostCheck {
+            id: "1".into(),
+            name: "host/push".into(),
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            url: None,
+            summary: None,
+        };
         let x = p.upstream.as_mut().unwrap();
         x.await_checks(60);
-        x.record_checks(Vec::new());
-        assert_eq!(next(&repo, &p, &e, &following), "host_checks"); // may still come
+        x.record_checks((vec![done.clone()], true));
+        // Some checks are not all there are while more may be registered.
+        assert_eq!(next(&repo, &p, &e, &following), "host_checks");
+        let x = p.upstream.as_mut().unwrap();
+        x.await_checks(0);
+        x.record_checks((vec![done.clone()], false)); // a job still to start
+        assert_eq!(next(&repo, &p, &e, &following), "host_checks");
+        let x = p.upstream.as_mut().unwrap();
+        x.record_checks((vec![done], true));
+        assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host");
+        let x = p.upstream.as_mut().unwrap();
+        x.await_checks(0);
+        x.record_checks((Vec::new(), true)); // none, after the time given
+        assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host");
         assert_eq!(
             first(&repo, &p, &e, &following, "head").host_url.as_deref(),
             Some("https://host.test/pulls/2")
@@ -1264,14 +1278,17 @@ mod tests {
             "publishing"
         );
         for conclusion in ["success", "neutral", "skipped"] {
-            p.upstream.as_mut().unwrap().record_checks(vec![HostCheck {
-                id: "1".into(),
-                name: "host/test".into(),
-                status: "completed".into(),
-                conclusion: Some(conclusion.into()),
-                url: None,
-                summary: None,
-            }]);
+            p.upstream.as_mut().unwrap().record_checks((
+                vec![HostCheck {
+                    id: "1".into(),
+                    name: "host/test".into(),
+                    status: "completed".into(),
+                    conclusion: Some(conclusion.into()),
+                    url: None,
+                    summary: None,
+                }],
+                true,
+            ));
             assert_eq!(next(&repo, &p, &e, &following), "owner_merge_host");
         }
         p.upstream.as_mut().unwrap().checks[0].status = "queued".into();

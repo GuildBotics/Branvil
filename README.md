@@ -394,9 +394,9 @@ scope (classic).
 Branvil polls GitHub with conditional requests (an unchanged answer is a free
 `304`): every 60 s while a published pull request is open, every 15 min
 otherwise, and at once after publishing or "Check now". GitHub registers the
-checks of a pushed head a little later: until `checks_registration_secs` after
-the push (or the pull request's creation there), a head without checks waits
-for them rather than having none.
+checks of a pushed head a little later, so a head waits for more checks until
+`checks_registration_secs` after the push (or the pull request's creation,
+edit, or reopening there) and while a workflow run of it still has jobs to start.
 Settings in `branvil.toml`:
 
 ```toml

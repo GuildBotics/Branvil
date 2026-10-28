@@ -335,9 +335,9 @@ as a Bearer header. Backups do not carry it.
   setting, changed by the owner (`PUT/DELETE /api/v1/repos/{repo}/upstream`).
 - `Pull.upstream` (`{provider, repository, number, url, state, author account,
   pushed, sent_title, sent_body, sent_state, checks, checks_registered_by,
-  error, stopped}`): where it was published, the host's pull request, what
-  Branvil last sent to it, and the check runs of the pushed head with until
-  when the host may still register them. It stays tied to the host repository it was
+  checks_settled, error, stopped}`): where it was published, the host's pull
+  request, what Branvil last sent to it, and the check runs of the pushed head
+  with whether the host may still add some. It stays tied to the host repository it was
   published to: changing or removing the repository's upstream is always
   allowed, a pull request published before keeps talking to its own place, and
   publishing it to the new upstream makes a new record.
@@ -527,11 +527,15 @@ Once the queue's next action is `owner_merge_host` (`landing::first`, the same
 rule the GUI shows: the head is on the host, sending is not stopped, and every
 host check of it succeeded), the owner's webhook receives `{"text": …}` saying
 the gate passed and the pull request is ready to merge there. The host
-registers its checks some time after a push or the pull request's creation, so
-until `[upstream] checks_registration_secs` after either (recorded as
-`Published.checks_registered_by`) a head without host checks waits for them.
-The poller's first read that finds some, or none after that time, clears it:
-a read that failed, or none yet, decides nothing. This includes a
+registers its checks some time after a push or an event of the pull request
+(its creation, an edit Branvil sends, its reopening), and
+a workflow run creates a job's check run only once the jobs it needs are done,
+so the checks read are all there are only when both hold: the poller has read
+the host after `[upstream] checks_registration_secs` passed since the last of
+them
+(`Published.checks_registered_by`, cleared by that read; a failed read clears
+nothing), and every check suite of the head that has check runs had finished
+at that read (`Published.checks_settled`). This includes a
 new gate for an already published head. `Landing.notified_at` records a `2xx`
 answer for that gate; a later pass has its own notification. Pending notices
 are retried even if automatic landing is later turned off. The URL is kept in

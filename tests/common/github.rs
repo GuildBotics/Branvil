@@ -106,6 +106,8 @@ pub struct State_ {
     pub pulls: Vec<FakePull>,
     /// commit → check runs (GitHub's JSON)
     pub checks: HashMap<String, Vec<Value>>,
+    /// commit → check suites (GitHub's JSON)
+    pub suites: HashMap<String, Vec<Value>>,
     /// check run id → log text
     pub logs: HashMap<u64, String>,
     /// (method, path, login) of every request
@@ -546,6 +548,24 @@ async fn check_runs(
     )
 }
 
+async fn check_suites(
+    State((state, _)): State<S>,
+    UrlPath((owner, name, sha)): UrlPath<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut st = state.lock().unwrap();
+    let path = format!("/repos/{owner}/{name}/commits/{sha}/check-suites");
+    if let Some(refused) = refused_read(&mut st, &path, &headers) {
+        return refused;
+    }
+    let suites = st.suites.get(&sha).cloned().unwrap_or_default();
+    conditional(
+        &mut st,
+        &headers,
+        json!({"total_count": suites.len(), "check_suites": suites}),
+    )
+}
+
 async fn job_log(
     State((state, _)): State<S>,
     UrlPath((owner, name, id)): UrlPath<(String, String, u64)>,
@@ -700,6 +720,10 @@ impl FakeGitHub {
             .route(
                 "/repos/{owner}/{name}/commits/{sha}/check-runs",
                 get(check_runs),
+            )
+            .route(
+                "/repos/{owner}/{name}/commits/{sha}/check-suites",
+                get(check_suites),
             )
             .route("/repos/{owner}/{name}/actions/jobs/{id}/logs", get(job_log))
             .route("/repos/{owner}/{name}/dependabot/alerts", get(alerts_list))
@@ -966,6 +990,15 @@ impl FakeGitHub {
     pub fn check(&self, sha: &str, id: u64, name: &str, conclusion: &str, log: &str) {
         self.check_run(sha, id, name, "completed", Some(conclusion));
         self.state.lock().unwrap().logs.insert(id, log.into());
+    }
+
+    /// Sets check suite `id` of `sha` (a workflow run, say): its status and
+    /// how many check runs it has so far.
+    pub fn suite(&self, sha: &str, id: u64, status: &str, runs: u64) {
+        let mut st = self.state.lock().unwrap();
+        let suites = st.suites.entry(sha.into()).or_default();
+        suites.retain(|s| s["id"] != id);
+        suites.push(json!({"id": id, "status": status, "latest_check_runs_count": runs}));
     }
 
     /// Starts check run `id` of `sha`, which has not finished yet.

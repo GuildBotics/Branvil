@@ -620,6 +620,7 @@ pub fn as_schema_24(db: &Path) {
     edit_records(db, "pulls", |v| {
         if let Some(x) = v["upstream"].as_object_mut() {
             x.remove("checks_registered_by");
+            x.remove("checks_settled");
         }
     });
     edit_records(db, "meta", |v| {

@@ -728,7 +728,8 @@ pub async fn open_on_host(at: Place<'_>, writer: As<'_>, login: &str, p: &Pull, 
             x.sent_title = title;
             x.sent_body = body;
             x.error = None;
-            // The host checks pull requests only once they are there.
+            // The host runs the checks of pull requests only once they are
+            // there; so does every event of one (an edit, a reopening).
             x.await_checks(at.app.upstream.config.checks_registration_secs);
         }
         Err(e) => x.error = Some(e.message),
@@ -862,6 +863,9 @@ async fn sync_pull(
                         // The host closed or reopened it: so does Branvil.
                         x.sent_state = x.state.clone();
                         open = Some(x.state == "open");
+                        if x.state == "open" {
+                            x.await_checks(app.upstream.config.checks_registration_secs);
+                        }
                     } else if here != x.sent_state {
                         // Branvil closed or reopened it: so does the host.
                         match writer {
@@ -874,6 +878,11 @@ async fn sync_pull(
                                     Ok(hp) => {
                                         x.state = hp.state.as_str().into();
                                         x.sent_state = here.into();
+                                        if here == "open" {
+                                            x.await_checks(
+                                                app.upstream.config.checks_registration_secs,
+                                            );
+                                        }
                                     }
                                     Err(e) => x.error = Some(e.message),
                                 }
@@ -968,6 +977,8 @@ async fn send_changes(
                     Ok(_) => {
                         x.sent_title = title;
                         x.sent_body = body;
+                        // An edit runs the host's checks of edits.
+                        x.await_checks(at.app.upstream.config.checks_registration_secs);
                     }
                     Err(e) => x.error = Some(e.message),
                 }

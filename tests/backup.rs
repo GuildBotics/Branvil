@@ -316,7 +316,7 @@ async fn a_backup_restores_into_another_directory_with_everything_linked() {
         text(&out)
     );
     assert!(
-        text(&out).contains("pull request(s) upgraded past the registration of their host checks"),
+        text(&out).contains("pull request(s) upgraded to have their host checks read again"),
         "{}",
         text(&out)
     );

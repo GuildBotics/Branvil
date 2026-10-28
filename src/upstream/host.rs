@@ -303,12 +303,14 @@ impl Host {
         each!(self, h => h.change_pull(who, repository, number, change).await)
     }
 
+    /// The check runs of `sha`, and whether every run of them (a suite: a
+    /// workflow run, say) that has checks finished.
     pub async fn checks(
         &self,
         who: As<'_>,
         repository: &str,
         sha: &str,
-    ) -> HostResult<Vec<crate::model::HostCheck>> {
+    ) -> HostResult<(Vec<crate::model::HostCheck>, bool)> {
         each!(self, h => h.checks(who, repository, sha).await)
     }
 

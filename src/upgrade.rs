@@ -1,6 +1,6 @@
-//! 24 → 25: a pull request's publication records until when the host may
-//! register checks of its pushed head; those pushed before are past it. Only
-//! the immediately preceding format is read here.
+//! 24 → 25: a pull request's publication records whether the host may still
+//! add checks of its pushed head; for those published before, the poller's
+//! next read says. Only the immediately preceding format is read here.
 
 use crate::config::Layout;
 use crate::model::Pull;
@@ -20,6 +20,7 @@ pub fn upgrade(layout: &Layout) -> anyhow::Result<Option<Upgraded>> {
             let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
             if let Some(x) = value["upstream"].as_object_mut() {
                 x.insert("checks_registered_by".into(), serde_json::Value::Null);
+                x.insert("checks_settled".into(), false.into());
             }
             Ok((key, serde_json::from_value::<Pull>(value)?))
         })
@@ -30,7 +31,7 @@ pub fn upgrade(layout: &Layout) -> anyhow::Result<Option<Upgraded>> {
                 .map_err(|e| anyhow::anyhow!(e.message))?;
         }
         Ok(format!(
-            "{} pull request(s) upgraded past the registration of their host checks",
+            "{} pull request(s) upgraded to have their host checks read again",
             pulls.len()
         ))
     })?))

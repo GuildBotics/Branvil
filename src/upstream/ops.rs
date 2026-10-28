@@ -493,6 +493,7 @@ async fn publish_op(
         sent_state: "open".into(),
         checks: Vec::new(),
         checks_registered_by: None,
+        checks_settled: false,
         published_at: util::now(),
         error: None,
         stopped: None,

@@ -1294,6 +1294,7 @@ async fn the_upgrade_puts_publications_past_the_registration_of_their_host_check
         String::from_utf8_lossy(&out.stderr)
     );
     pulls[0]["upstream"]["checks_registered_by"] = Value::Null;
+    pulls[0]["upstream"]["checks_settled"] = json!(false);
     assert_eq!(records(&db, "pulls"), pulls);
     let out = std::process::Command::new(BIN)
         .args(["admin", "check", "--data-dir"])

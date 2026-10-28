@@ -621,22 +621,27 @@ impl GitHub {
         Self::pull(&v)
     }
 
+    /// The check runs of `sha`, and whether every check suite that has some
+    /// finished: a workflow run creates the check run of a job only once the
+    /// jobs it needs are done. A suite without check runs (an app that never
+    /// reports) has nothing to wait for.
     pub async fn checks(
         &self,
         who: As<'_>,
         repository: &str,
         sha: &str,
-    ) -> HostResult<Vec<HostCheck>> {
-        let v = self
-            .get_found(
-                who,
-                &format!("/repos/{repository}/commits/{sha}/check-runs?per_page=100"),
-            )
+    ) -> HostResult<(Vec<HostCheck>, bool)> {
+        // Suites first: a run that a suite finished after it was read is
+        // among the runs read next.
+        let at = format!("/repos/{repository}/commits/{sha}");
+        let suites = self
+            .get_found(who, &format!("{at}/check-suites?per_page=100"))
             .await?;
-        Ok(v["check_runs"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+        let runs = self
+            .get_found(who, &format!("{at}/check-runs?per_page=100"))
+            .await?;
+        let all = |v: &Value, key: &str| v[key].as_array().cloned().unwrap_or_default();
+        let checks = all(&runs, "check_runs")
             .iter()
             .filter_map(|c| {
                 let text = |k: &str| c[k].as_str().map(str::to_string);
@@ -649,7 +654,11 @@ impl GitHub {
                     summary: c["output"]["title"].as_str().map(str::to_string),
                 })
             })
-            .collect())
+            .collect();
+        let settled = all(&suites, "check_suites").iter().all(|s| {
+            s["status"] == "completed" || s["latest_check_runs_count"].as_u64().unwrap_or(0) == 0
+        });
+        Ok((checks, settled))
     }
 
     /// The log of a check run that is a GitHub Actions job (their ids are the

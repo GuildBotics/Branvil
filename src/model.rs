@@ -425,10 +425,14 @@ pub struct Published {
     pub sent_state: String,
     /// The host's check runs of `pushed`.
     pub checks: Vec<HostCheck>,
-    /// Until when the host may register checks of `pushed`: while set, none
-    /// is "not registered yet", not "no checks". Cleared by the first read
-    /// that finds some, or none after that time.
+    /// Until when the host may still register checks of `pushed` (after a
+    /// push or the pull request's creation there). Cleared by the first read
+    /// after that time: the checks that read finds are all there are.
     pub checks_registered_by: Option<String>,
+    /// Whether every check suite of `pushed` (a workflow run, say) that has
+    /// check runs had finished at the last read: one with jobs still to start
+    /// has more to come.
+    pub checks_settled: bool,
     pub published_at: String,
     /// The last failure; the next poll retries.
     pub error: Option<String>,
@@ -475,34 +479,37 @@ impl Published {
     pub fn record_push(&mut self, head: String, registration_secs: u64) {
         if self.pushed.as_ref() != Some(&head) {
             self.checks.clear();
+            self.checks_settled = false;
             self.await_checks(registration_secs);
         }
         self.pushed = Some(head);
     }
 
-    /// Records the host's checks of `pushed`, just read: once there are some,
-    /// or none after the time the host was given, no more are to come.
-    pub fn record_checks(&mut self, checks: Vec<HostCheck>) {
-        if !checks.is_empty()
-            || self
-                .checks_registered_by
-                .as_ref()
-                .is_some_and(|by| *by <= crate::util::now())
+    /// Records the host's checks of `pushed` and whether the runs that have
+    /// them all finished, just read. The time given to register them is over
+    /// once a read comes after it.
+    pub fn record_checks(&mut self, (checks, settled): (Vec<HostCheck>, bool)) {
+        if self
+            .checks_registered_by
+            .as_ref()
+            .is_some_and(|by| *by <= crate::util::now())
         {
             self.checks_registered_by = None;
         }
         self.checks = checks;
+        self.checks_settled = settled;
     }
 
-    /// Whether the host may still register checks of `pushed`.
-    pub fn checks_registering(&self) -> bool {
-        self.checks_registered_by.is_some()
+    /// Whether the host may still add checks of `pushed`: it may still
+    /// register them, or a run of them has jobs still to start.
+    pub fn checks_to_come(&self) -> bool {
+        self.checks_registered_by.is_some() || !self.checks_settled
     }
 
     /// Whether every check of `pushed` on the host succeeded, none being
-    /// still to register.
+    /// still to come.
     pub fn checks_passed(&self) -> bool {
-        !self.checks_registering() && self.checks.iter().all(HostCheck::succeeded)
+        !self.checks_to_come() && self.checks.iter().all(HostCheck::succeeded)
     }
 }
 
