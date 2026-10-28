@@ -116,7 +116,7 @@ fn descendants(r: &impl Rd, id: &TicketId) -> AppResult<Vec<TicketId>> {
 }
 
 /// The nearest of `t`'s ancestors a person works on interactively.
-fn interactive_ancestor(r: &impl Rd, t: &Ticket) -> AppResult<Option<TicketId>> {
+pub(crate) fn interactive_ancestor(r: &impl Rd, t: &Ticket) -> AppResult<Option<TicketId>> {
     let mut next = t.parent.clone();
     while let Some(id) = next {
         let ancestor = ticket_by_id(r, &id)?;

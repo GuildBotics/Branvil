@@ -331,6 +331,7 @@ async fn a_failed_gate_reports_its_jobs_and_main_adopts_its_successful_run_with_
     assert_eq!(retry["attempt_id"], result["id"]);
     assert_eq!(retry["sha"], gate);
     assert_eq!(runner.finish(&retry, "success").await.0, 200);
+    w.acknowledge(3).await;
     let passed = landing(&w, 3, "passed").await;
     assert_eq!(passed["landing"]["gate"], gate);
     let merged = merge(&w, 3).await;

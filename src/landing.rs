@@ -317,13 +317,7 @@ async fn eligibility(
             )));
         }
     }
-    let checks = app.ci.head_checks(repo, head).await?;
-    if !repo.required_checks.iter().all(|name| {
-        checks
-            .checks
-            .iter()
-            .any(|c| c.name == *name && c.head_satisfied())
-    }) {
+    if head_checks(repo, &app.ci.head_checks(repo, head).await?.checks) != HeadChecks::Passed {
         return Ok(Some(reason(
             "head_checks",
             "Required head checks have not succeeded.",
@@ -332,7 +326,23 @@ async fn eligibility(
     if pulls::approvals(&pulls::read_review_states(app, p, head).await?) < repo.required_approvals {
         return Ok(Some(reason("approvals", "The head needs more approvals.")));
     }
+    if awaits_answer(app, repo, p).await? {
+        return Ok(Some(reason(
+            "unanswered",
+            "A statement awaits the author's answer.",
+        )));
+    }
     Ok(None)
+}
+
+/// Whether a statement on `p` awaits its author's answer (`pulls::unanswered`).
+pub(crate) async fn awaits_answer(app: &App, repo: &Repo, p: &Pull) -> AppResult<bool> {
+    let (p, url) = (p.clone(), app.pull_url(&repo.path, p.number));
+    Ok(!app
+        .store
+        .read(move |r| pulls::unanswered(r, &p, &url))
+        .await?
+        .is_empty())
 }
 
 pub(crate) fn published<'a>(repo: &Repo, p: &'a Pull) -> Option<&'a Published> {
@@ -362,6 +372,73 @@ fn published_problem(repo: &Repo, p: &Pull, head: &str, resume: bool) -> Option<
         }
     }
     None
+}
+
+/// Where the repository's required checks on a head stand.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum HeadChecks {
+    /// Every one succeeded, or was skipped by its paths.
+    Passed,
+    /// None failed, and one is not registered yet or still runs.
+    Running,
+    /// One completed without succeeding.
+    Failed,
+}
+
+pub(crate) fn head_checks(repo: &Repo, checks: &[Check]) -> HeadChecks {
+    let required = || {
+        repo.required_checks
+            .iter()
+            .map(|name| checks.iter().find(|c| c.name == *name))
+    };
+    if required().any(|c| c.is_some_and(|c| c.status == "completed" && !c.head_satisfied())) {
+        HeadChecks::Failed
+    } else if required().any(|c| c.is_none_or(|c| c.status != "completed")) {
+        HeadChecks::Running
+    } else {
+        HeadChecks::Passed
+    }
+}
+
+/// Whether `e` left the queue for a failure that still stands at `p`'s head
+/// and base: a conflict, required gate jobs not retried to success, or host
+/// checks not re-run to success. Until it is cleared the pull request does not
+/// rejoin.
+pub(crate) async fn failure_stands(
+    app: &App,
+    repo: &Repo,
+    p: &Pull,
+    e: &Landing,
+    head: &str,
+    base: &str,
+) -> AppResult<bool> {
+    if e.state != "left" || e.head_sha != head || e.base != p.base || e.base_sha != base {
+        return Ok(false);
+    }
+    let Some(why) = &e.reason else {
+        return Ok(false);
+    };
+    Ok(match why.code.as_str() {
+        "conflict" => true,
+        "gate_failed" => match &e.gate {
+            None => true,
+            Some(gate) => {
+                let checks = app.ci.head_checks(repo, gate).await?;
+                !repo
+                    .required_checks
+                    .iter()
+                    .all(|n| checks.checks.iter().any(|c| c.name == *n && c.succeeded()))
+            }
+        },
+        "host_failed" => published(repo, p).is_some_and(|x| {
+            x.pushed.as_deref() != Some(head)
+                || !why
+                    .jobs
+                    .iter()
+                    .all(|name| x.checks.iter().any(|c| &c.name == name && c.succeeded()))
+        }),
+        _ => false,
+    })
 }
 
 async fn save(app: &App, repo: &Repo, e: Landing, comment: Option<String>) -> AppResult<()> {
@@ -476,13 +553,13 @@ async fn leave(
                 failed()
             },
             if why.code == "gate_failed" {
-                "\n\nRetry the failed and cancelled required gate jobs. Once all required jobs succeed, this pull request rejoins the end of the landing queue."
+                "\n\nRetry the failed and cancelled required gate jobs. Once all required jobs succeed and no statement awaits the author's answer, this pull request rejoins the end of the landing queue."
             } else {
                 ""
             }
         )),
         "host_failed" => Some(format!(
-            "Checks on {host} failed.\n\nHead: `{}`\n\n{}\n{}\n\nPush a head that fixes them. If a failure was intermittent, the owner can re-run it on {host}: once the failed checks succeed, this pull request rejoins the end of the landing queue.",
+            "Checks on {host} failed.\n\nHead: `{}`\n\n{}\n{}\n\nPush a head that fixes them. If a failure was intermittent, the owner can re-run it on {host}: once the failed checks succeed and no statement awaits the author's answer, this pull request rejoins the end of the landing queue.",
             e.head_sha,
             why.message,
             failed(),
@@ -779,39 +856,9 @@ pub async fn reconcile_locked(app: &App, repo: &Repo) -> AppResult<()> {
             continue;
         }
         if let Some(e) = &old
-            && e.state == "left"
-            && !changed
-            && let Some(why) = e.reason.as_ref().filter(|r| r.code == "host_failed")
-            && let Some(x) = published(repo, p)
+            && failure_stands(app, repo, p, e, &head, &base).await?
         {
-            let succeeded = x.pushed.as_deref() == Some(head.as_str())
-                && why
-                    .jobs
-                    .iter()
-                    .all(|name| x.checks.iter().any(|c| &c.name == name && c.succeeded()));
-            if !succeeded {
-                continue;
-            }
-        }
-        if let Some(e) = &old
-            && e.state == "left"
-            && !changed
-            && e.reason
-                .as_ref()
-                .is_some_and(|r| ["gate_failed", "conflict"].contains(&r.code.as_str()))
-        {
-            if e.reason.as_ref().is_some_and(|r| r.code == "conflict") {
-                continue;
-            }
-            let Some(gate) = &e.gate else { continue };
-            let checks = app.ci.head_checks(repo, gate).await?;
-            if !repo
-                .required_checks
-                .iter()
-                .all(|n| checks.checks.iter().any(|c| c.name == *n && c.succeeded()))
-            {
-                continue;
-            }
+            continue;
         }
         let now = util::now();
         let id = repo.id.clone();

@@ -6,6 +6,7 @@ use crate::common;
 
 use common::*;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 fn pulls(w: &World) -> String {
     format!("{}/pulls", w.repo_path())
@@ -1060,6 +1061,15 @@ async fn reviewer_states_decide_the_approvals_a_merge_needs() {
         .await;
     assert_eq!(st, 201, "{v}");
     assert_eq!(review_states(&w, &pull).await.1, 1);
+    // The author answers the reply, which the last merge below needs.
+    let (st, _) = s
+        .post(
+            &format!("{pull}/reactions"),
+            &w.aiko,
+            json!({"target_id": v["id"], "reaction": "ack"}),
+        )
+        .await;
+    assert_eq!(st, 200);
     let (st, v) = merge_at(&w, &pull, &head).await;
     assert_eq!(st, 409, "{v}");
     assert_eq!(v["error"]["code"], "not_mergeable");
@@ -1183,4 +1193,149 @@ async fn a_pull_request_asks_the_reviewers_its_author_names() {
     let (st, v) = open("second").await;
     assert_eq!(st, 201, "{v}");
     assert_eq!(v["pull"]["reviewers"], json!([]));
+}
+
+/// The labels of pull requests `ns`, least recently updated first.
+async fn by_update(w: &World, ns: [u64; 2]) -> [String; 2] {
+    let mut found = Vec::new();
+    for n in ns {
+        let p = w
+            .server
+            .ok(&format!("{}/pulls/{n}", w.repo_path()), &w.owner)
+            .await;
+        found.push((
+            p["updated_at"].as_str().unwrap().to_string(),
+            format!("!{n}"),
+        ));
+    }
+    found.sort();
+    [found[0].1.clone(), found[1].1.clone()]
+}
+
+/// The labels of the patrol's items for `token`, page by page `limit` at a
+/// time.
+pub(crate) async fn patrol_walk(w: &World, token: &str, limit: usize) -> Vec<String> {
+    let mut walked = Vec::new();
+    let mut cursor = String::new();
+    loop {
+        let page = w
+            .server
+            .ok(
+                &format!("/pulls?involves=me&state=open&draft=false&limit={limit}{cursor}"),
+                token,
+            )
+            .await;
+        walked.extend(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["label"].as_str().unwrap().to_string()),
+        );
+        match page["next_cursor"].as_str() {
+            Some(c) => cursor = format!("&cursor={c}"),
+            None => return walked,
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_patrol_puts_first_what_waits_for_least_once_the_work_is_done() {
+    use crate::ci::{Runner, eventually, pipeline, sync_main};
+    let w = World::new().await;
+    let s = &w.server;
+    let runner = Runner::new(&w, "patrol-runner").await;
+    let land = |n: u64| {
+        let w = &w;
+        async move {
+            let at = format!("{}/pulls/{n}", w.repo_path());
+            eventually(&format!("!{n} passed"), || async {
+                s.ok(&at, &w.owner).await["landing"]["state"] == "passed"
+            })
+            .await;
+            let p = s.ok(&at, &w.owner).await;
+            let (st, v) = merge_at(w, &at, p["head_sha"].as_str().unwrap()).await;
+            assert_eq!(st, 200, "{v}");
+        }
+    };
+    std::fs::create_dir_all(w.work.join(".branvil")).unwrap();
+    w.push_change("pipeline", ".branvil/ci.toml", &pipeline(&["test"]));
+    w.open_pull("pipeline", json!([])).await;
+    runner.drain("success").await;
+    land(1).await;
+    // !3 changes the README the base changes after it (!2).
+    sync_main(&w);
+    w.push_change("conflict", "README.md", "mine\n");
+    sync_main(&w);
+    w.push_change("advance", "README.md", "theirs\n");
+    w.open_pull("advance", json!([])).await;
+    runner.drain("success").await;
+    land(2).await;
+    let repo = s.ok(&w.repo_path(), &w.owner).await;
+    let (st, v) = s
+        .patch(
+            &w.repo_path(),
+            &w.owner,
+            json!({"revision": repo["revision"], "required_checks": ["test"], "required_approvals": 1}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    w.open_pull("conflict", json!([])).await;
+    sync_main(&w);
+    let mut heads = BTreeMap::new();
+    for (n, branch) in [(4, "approved"), (5, "ready"), (6, "running"), (7, "failed")] {
+        git_ok(&w.work, &["checkout", "-q", "main"]);
+        heads.insert(
+            w.push_change(branch, &format!("{branch}.txt"), "x\n"),
+            branch,
+        );
+        assert_eq!(w.open_pull(branch, json!([])).await["number"], n);
+    }
+    let mut running = Vec::new();
+    while let Some(c) = runner.claim().await {
+        match heads.get(c["sha"].as_str().unwrap()).copied() {
+            Some("running") => running.push(c),
+            Some("failed") => assert_eq!(runner.finish(&c, "failure").await.0, 200),
+            _ => assert_eq!(runner.finish(&c, "success").await.0, 200),
+        }
+    }
+    assert_eq!(running.len(), 1);
+    for n in 3..=7 {
+        let at = format!("{}/pulls/{n}", w.repo_path());
+        let (st, v) = s
+            .put(&format!("{at}/reviewers/ken"), &w.owner, json!({}))
+            .await;
+        assert_eq!(st, 200, "{v}");
+    }
+    // ken approves !3, which leaves the queue in conflict, then !4, which
+    // passes its gate.
+    for n in [3, 4] {
+        let at = format!("{}/pulls/{n}", w.repo_path());
+        let head = s.ok(&at, &w.owner).await["head_sha"].clone();
+        assert_eq!(
+            review(&w, &at, &w.ken, "approve", head.as_str().unwrap()).await,
+            201
+        );
+        let state = if n == 3 { "left" } else { "passed" };
+        eventually(&format!("!{n} {state}"), || async {
+            s.ok(&at, &w.owner).await["landing"]["state"] == state
+        })
+        .await;
+    }
+    assert_eq!(
+        s.ok(&format!("{}/pulls/3", w.repo_path()), &w.owner).await["landing"]["reason"]["code"],
+        "conflict"
+    );
+    let fives = by_update(&w, [5, 6]).await;
+    let eights = by_update(&w, [3, 4]).await;
+    // aiko wrote them all: approved and passed (2), approved but in conflict
+    // (4), unapproved with checks passed or running (5), failed (6).
+    let author = ["!4", "!3", &fives[0], &fives[1], "!7"];
+    // ken reviews them: passed (1), running (3), failed (7), approved (8).
+    let reviewer = ["!5", "!6", "!7", &eights[0], &eights[1]];
+    for (token, expected) in [(&w.aiko, author), (&w.ken, reviewer)] {
+        assert_eq!(patrol_walk(&w, token, 100).await, expected);
+        assert_eq!(patrol_walk(&w, token, 1).await, expected, "page by page");
+    }
+    drop(running);
 }

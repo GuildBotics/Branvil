@@ -68,6 +68,7 @@ export function pull(extra: Partial<PullRequest> = {}): PullRequest {
     reviewers: ["owner"],
     review_states: [{ member: "owner", requested: true, verdict: null, outdated: false }],
     approvals: 0,
+    unanswered: [],
     tickets: [],
     labels: [],
     changed_files: 1,

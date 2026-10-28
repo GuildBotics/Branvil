@@ -673,6 +673,7 @@ and comments do not keep an attachment.
     {"member": "mia", "requested": false, "verdict": "approve", "outdated": false}
   ],
   "approvals": 1,
+  "unanswered": [{"kind": "review", "id": "rev_...", "author": "ken", "url": "...#rev_..."}],
   "tickets": [{"url": "...", "closes": true}],
   "labels": [],
   "changed_files": 2,
@@ -701,7 +702,21 @@ order of their first review, then those asked who have not reviewed:
 `comment` while they only commented (`null` before any review), and `outdated`
 whether that review is on a commit other than `head_sha`. The author is never in it. `approvals` counts the states not
 `requested` whose verdict is `approve` and not `outdated`; a merge and a
-publish need the repository's `required_approvals` of them. `ready_at` is the last time
+publish need the repository's `required_approvals` of them. `unanswered` lists
+the statements that wait on the author's answer, which keep the pull request
+out of the landing queue: an unresolved thread whose last comment is someone
+else's, a review with a body (an approval too), or a conversation comment
+without `meta` (a comment with `meta` is a machine's notice; Branvil's own notes
+of a failed gate or host check have none, so they count). `kind` is `thread`,
+`review`, or `comment`; `id` and `url` name the entry the author answers: the
+thread's last comment, the review, or the comment. The author answers a thread
+by replying in it or reacting to its last comment, and a review or comment by
+reacting to it or by writing anything after it (a comment without `meta`, a
+review, or an inline comment). It is always empty for a pull request whose
+author is the owner or which links a ticket of this Branvil that is
+`interactive` or has an `interactive_ancestor`, and for a closed one. GuildBotics' patrol gives the
+author work on the same statements, so the two agree on when it answered.
+`ready_at` is the last time
 the pull request was marked ready for review. `upstream` is set once the pull
 request was published (see "Upstream"). `landing` is its current queue entry
 or last departure, or `null` before it first joins (see "Landing queue").
@@ -729,8 +744,24 @@ or last departure, or `null` before it first joins (see "Landing queue").
   open pull request the member authored, is a requested reviewer of, has
   reviewed, or wrote an inline comment or thread reply on. The owner reviews and
   merges every pull request, so for the owner it is every open pull request of
-  every repository. Ordered by `updated_at` ascending (a push to the head counts as
-  activity). Only `state=open` is offered; `draft` is `true` or `false` (omitted: both).
+  every repository. Ordered so that what waits for least once the member's work is
+  done comes first: the member is the author or, otherwise, a reviewer; the head
+  is approved (its approvals reach `required_approvals`) or not; its required
+  checks failed (one completed without succeeding, or its queue entry left for
+  `conflict`, `gate_failed`, or `host_failed` and that failure still stands),
+  run (none failed and one is not registered yet or still runs), or passed.
+  1. reviewer, not approved, checks passed;
+  2. author, approved, checks passed or running;
+  3. reviewer, not approved, checks running;
+  4. author, approved, checks failed;
+  5. author, not approved, checks passed or running;
+  6. author, not approved, checks failed;
+  7. reviewer, not approved, checks failed;
+  8. reviewer, approved.
+  Equal ranks follow `updated_at` ascending (a push to the head counts as
+  activity). The cursor locates a rank, update, and number: a pull request
+  whose rank changes between pages may move past the cursor or be seen twice.
+  Only `state=open` is offered; `draft` is `true` or `false` (omitted: both).
 - `GET /api/v1/repos/{repo}/pulls/{number}` → pull request.
 - `GET /api/v1/repos/{repo}/pulls/{number}/activity` → activity:
 
@@ -884,14 +915,17 @@ base preserves active entries' admission times, sequences, and order.
   `conflict`, `host_failed`, `publish_stopped`, `head_moved`, `base_moved`,
   `closed`, `draft`, `empty_head` (head adds no changes), `publish_requirements`
   (default base/author host account missing), `head_checks` (required head checks
-  not successful), `approvals` (not enough head approvals), `already_in_base`,
+  not successful), `approvals` (not enough head approvals), `unanswered` (a
+  statement awaits the author's answer; see `unanswered` of the pull request),
+  `already_in_base`,
   and `merged`. `ineligible` is no longer returned. Clients translate codes
   rather than displaying `message`; `publish_stopped` may show its message as
   additional detail.
 
 Admission requires an open, ready pull request whose head adds changes to
-base, whose required head checks passed, and whose head has enough approvals.
-With an upstream it also requires the default base and an author account on
+base, whose required head checks passed, whose head has enough approvals, and
+on which no statement awaits the author's answer (`unanswered`); a statement
+takes a queued entry out, and the answer puts it at the end again. With an upstream it also requires the default base and an author account on
 the host. The queue runs with `auto_land` off too. Only the first gets a gate:
 `gate` equals `head_sha` when head contains base, otherwise it is a new merge
 commit with parents `[base_sha, head_sha]`. It is `null` before gate creation

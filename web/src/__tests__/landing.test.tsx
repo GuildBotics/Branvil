@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { Landing, LandingNext, Repository } from "../api/types";
+import type { Landing, LandingNext, PullRequest, Repository } from "../api/types";
 import { dictionaries } from "../i18n";
 import { applyChange } from "../query/events";
 import { apiError, fakeApi, json, renderApp, SESSION } from "../test/fakeApi";
@@ -288,6 +288,47 @@ describe.each(["en", "ja"] as const)("queue path (%s)", (lang) => {
     const journey = await screen.findByRole("region", {name:journeyName()});
     expect(await within(journey).findByText(words["landing.notInQueue"])).toBeInTheDocument();
     expect(journey.querySelector('[aria-current="step"]')).toHaveAttribute("data-stop", "conditions");
+  });
+  const UNANSWERED: PullRequest["unanswered"] = [
+    { kind: "review", id: "rev_1", author: "owner", url: "http://branvil.test/acme/demo/-/pulls/3#rev_1" },
+    { kind: "thread", id: "cmt_2", author: "ken", url: "http://branvil.test/acme/demo/-/pulls/3#cmt_2" },
+  ];
+  const left = (code: string) => landing({ state: "left", first: null, position: null, reason: { code, message: "", jobs: [], files: [] } });
+  const statementLinks = (journey: HTMLElement) =>
+    within(journey).getAllByRole("link").map((a) => [a.textContent, a.getAttribute("href")]);
+  it.each([null, "unanswered"])("waits for the author's answer at the requirements (left for %s), linking each statement", async (code) => {
+    const l = code ? left(code) : null;
+    fakeApi(routes(l, { [`GET ${P}`]: json(200, pull({ landing: l, author: "agent", approvals: 1, unanswered: UNANSWERED })) }));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const journey = await screen.findByRole("region", { name: journeyName() });
+    expect(await within(journey).findByText(words["landing.unanswered"])).toBeInTheDocument();
+    const current = journey.querySelector('[aria-current="step"]') as HTMLElement;
+    expect(current).toHaveAttribute("data-stop", "conditions");
+    expect(current).toHaveAttribute("data-state", "turn");
+    expect(within(journey).getByText(words["landing.unansweredHint"])).toBeInTheDocument();
+    expect(statementLinks(journey)).toEqual([
+      [words["landing.statement.review"].replace("{author}", "owner"), "#rev_1"],
+      [words["landing.statement.thread"].replace("{author}", "ken"), "#cmt_2"],
+    ]);
+  });
+  it("still links the statements after leaving the gate for a failure", async () => {
+    const l = left("gate_failed");
+    fakeApi(routes(l, { [`GET ${P}`]: json(200, pull({ landing: l, author: "agent", approvals: 1, unanswered: UNANSWERED.slice(0, 1) })) }));
+    renderApp("/acme/demo/-/pulls/3", lang);
+    const journey = await screen.findByRole("region", { name: journeyName() });
+    expect(await within(journey).findByText(words["landing.retryGate"])).toBeInTheDocument();
+    expect(journey.querySelector('[aria-current="step"]')).toHaveAttribute("data-state", "failed");
+    expect(statementLinks(journey)).toEqual([[words["landing.statement.review"].replace("{author}", "owner"), "#rev_1"]]);
+  });
+  it("says in the list that the author's answer is awaited", async () => {
+    const p = pull({ landing: left("unanswered"), approvals: 1, unanswered: UNANSWERED });
+    fakeApi(routes(null, { "GET /api/v1/repos/acme/demo/pulls": json(200, { items: [p], next_cursor: null }), [`GET ${P}`]: json(200, p) }));
+    renderApp("/acme/demo", lang);
+    const badge = await listBadge();
+    await waitFor(() => expect(badge).toHaveTextContent(words["landing.blockedBy"].replace("{what}", words["landing.unanswered"])));
+    expect(badge).toHaveAttribute("title", words["landing.unanswered"]);
+    expect(badge).toHaveAttribute("data-stop", "conditions");
+    tone(badge, "warning");
   });
 });
 

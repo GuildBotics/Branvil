@@ -225,6 +225,14 @@ export interface TicketLink {
   closes: boolean;
 }
 
+/** A statement on a pull request that waits on its author's answer: the entry the author answers. */
+export interface Unanswered {
+  kind: "comment" | "review" | "thread";
+  id: string;
+  author: string;
+  url: string;
+}
+
 export interface PullRequest {
   url: string;
   repository: string;
@@ -246,6 +254,8 @@ export interface PullRequest {
   review_states: ReviewState[];
   /** The members whose state approves: not requested again, `approve` on the current head. */
   approvals: number;
+  /** The statements that wait on the author's answer; none while the pull request awaits none (its author is the owner, or it links an interactive ticket). */
+  unanswered: Unanswered[];
   tickets: TicketLink[];
   labels: string[];
   changed_files: number;

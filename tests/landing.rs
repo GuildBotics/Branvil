@@ -389,6 +389,8 @@ async fn retry_requires_cancelled_siblings_and_retains_the_gate_while_waiting_ag
         );
         tokio::time::sleep(Duration::from_millis(30)).await;
     };
+    // Answered, it still waits for the retry of every failed job.
+    w.acknowledge(3).await;
     retry(&w, &failed).await;
     let retried = runner.next_claim().await;
     assert_eq!(runner.finish(&retried, "success").await.0, 200);
@@ -759,4 +761,259 @@ async fn queue_api_exposes_titles() {
         .ok(&format!("{}/landing", w.repo_path()), &w.owner)
         .await;
     assert_eq!(queue["items"][0], p["landing"]);
+}
+
+/// Pull request `n` of `acme/demo`, as the owner reads it.
+async fn pull_n(w: &World, n: u64) -> Value {
+    w.server
+        .ok(&format!("{}/pulls/{n}", w.repo_path()), &w.owner)
+        .await
+}
+
+/// `token` says something of `kind` (`comment`, `review` with a body, or
+/// `thread`) on pull request `n`; returns the entry an answer reacts to.
+async fn say(w: &World, n: u64, token: &str, kind: &str) -> String {
+    let at = format!("{}/pulls/{n}", w.repo_path());
+    let head = pull_n(w, n).await["head_sha"].clone();
+    let (path, body) = match kind {
+        "comment" => ("comments", json!({"body": "Why this way?"})),
+        "review" => (
+            "reviews",
+            json!({"verdict": "approve", "body": "A nit, if you like.", "commit": head}),
+        ),
+        "thread" => (
+            "inline-comments",
+            json!({"body": "Here?", "commit": head, "path": format!("{n}.txt"), "line": 1, "side": "RIGHT"}),
+        ),
+        _ => unreachable!(),
+    };
+    let (st, v) = w.server.post(&format!("{at}/{path}"), token, body).await;
+    assert_eq!(st, 201, "{kind}: {v}");
+    v["id"].as_str().unwrap().to_string()
+}
+
+/// aiko, the author of pull request `n`, answers the entry `said` `how`:
+/// with a reaction, a comment, a review, a new inline comment, or a reply in
+/// the thread of `said`.
+async fn answer(w: &World, n: u64, said: &str, how: &str) {
+    let at = format!("{}/pulls/{n}", w.repo_path());
+    let head = pull_n(w, n).await["head_sha"].clone();
+    let (path, body) = match how {
+        "reaction" => (
+            "reactions".to_string(),
+            json!({"target_id": said, "reaction": "ack"}),
+        ),
+        "comment" => ("comments".into(), json!({"body": "Because."})),
+        "review" => (
+            "reviews".into(),
+            json!({"verdict": "comment", "body": "", "commit": head}),
+        ),
+        "inline" => (
+            "inline-comments".into(),
+            json!({"body": "Note.", "commit": head, "path": format!("{n}.txt"), "line": 1, "side": "RIGHT"}),
+        ),
+        "reply" => {
+            let activity = w.server.ok(&format!("{at}/activity"), &w.aiko).await;
+            let thread = activity["threads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["comments"][0]["id"] == said)
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            (
+                format!("threads/{thread}/replies"),
+                json!({"body": "Done."}),
+            )
+        }
+        _ => unreachable!(),
+    };
+    let (st, v) = w.server.post(&format!("{at}/{path}"), &w.aiko, body).await;
+    assert!(st == 200 || st == 201, "{how}: {st} {v}");
+}
+
+/// Opens the next pull request of aiko from `main`, a file of its own.
+async fn next_pull(w: &World, n: u64) -> u64 {
+    git_ok(&w.work, &["checkout", "-q", "main"]);
+    w.push_change(&format!("topic-{n}"), &format!("{n}.txt"), "change\n");
+    let p = w.open_pull(&format!("topic-{n}"), json!([])).await;
+    assert_eq!(p["number"], n);
+    n
+}
+
+#[tokio::test]
+async fn a_statement_takes_a_queued_pull_request_out_until_its_author_answers() {
+    let w = World::new().await;
+    let cases = [
+        ("comment", "reaction"),
+        ("comment", "comment"),
+        ("comment", "review"),
+        ("comment", "inline"),
+        ("review", "reaction"),
+        ("review", "comment"),
+        ("review", "review"),
+        ("review", "inline"),
+        ("thread", "reaction"),
+        ("thread", "reply"),
+    ];
+    for (i, (kind, how)) in cases.into_iter().enumerate() {
+        let n = next_pull(&w, i as u64 + 1).await;
+        let queued = landing(&w, n, "passed").await;
+        assert_eq!(queued["unanswered"], json!([]));
+        let said = say(&w, n, &w.ken, kind).await;
+        let left = landing(&w, n, "left").await;
+        assert_eq!(left["landing"]["reason"]["code"], "unanswered", "{kind}");
+        assert_eq!(
+            left["unanswered"],
+            json!([{"kind": kind, "id": said, "author": "ken",
+                    "url": format!("{}#{said}", left["url"].as_str().unwrap())}])
+        );
+        answer(&w, n, &said, how).await;
+        let back = landing(&w, n, "passed").await;
+        assert_eq!(back["unanswered"], json!([]), "{kind} answered by {how}");
+        assert!(
+            back["landing"]["sequence"].as_u64() > left["landing"]["sequence"].as_u64(),
+            "it rejoins at the end"
+        );
+        merge(&w, n, &back).await;
+    }
+}
+
+#[tokio::test]
+async fn a_pull_request_with_a_statement_joins_only_once_answered() {
+    let w = World::new().await;
+    w.push_change("topic", "1.txt", "change\n");
+    let (st, v) = w
+        .server
+        .post(
+            &format!("{}/pulls", w.repo_path()),
+            &w.aiko,
+            json!({"head": "topic", "title": "t", "body": "", "draft": true}),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    let said = say(&w, 1, &w.owner, "comment").await;
+    let p = pull_n(&w, 1).await;
+    let (st, v) = w
+        .server
+        .patch(
+            &format!("{}/pulls/1", w.repo_path()),
+            &w.owner,
+            json!({"draft": false, "revision": p["revision"]}),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    // A merge reconciles the queue first: the pull request is not in it.
+    let p = pull_n(&w, 1).await;
+    let (st, refused) = w
+        .server
+        .post(
+            &format!("{}/pulls/1/merge", w.repo_path()),
+            &w.owner,
+            json!({"expected_head": p["head_sha"], "expected_base": p["base_sha"]}),
+        )
+        .await;
+    assert_eq!(st, 409, "{refused}");
+    let p = pull_n(&w, 1).await;
+    assert!(p["landing"].is_null(), "{p}");
+    assert_eq!(p["unanswered"][0]["id"], said);
+    answer(&w, 1, &said, "reaction").await;
+    merge(&w, 1, &landing(&w, 1, "passed").await).await;
+}
+
+#[tokio::test]
+async fn notices_owners_and_interactive_tickets_await_no_answer() {
+    let w = World::new().await;
+    let s = &w.server;
+    let tickets = format!("{}/tickets", w.repo_path());
+    let parent = w.ticket("parent").await;
+    let child = w.ticket("child").await;
+    let direct = w.ticket("direct").await;
+    for (t, patch) in [
+        (&parent, json!({"interactive": true})),
+        (&direct, json!({"interactive": true})),
+        (&child, json!({"parent": parent["url"]})),
+    ] {
+        let (st, v) = s
+            .patch(
+                &format!("{tickets}/{}", t["key"].as_str().unwrap()),
+                &w.ken,
+                patch,
+            )
+            .await;
+        assert_eq!(st, 200, "{v}");
+    }
+    // A notice is no statement.
+    let n = next_pull(&w, 1).await;
+    let (st, v) = s
+        .post(
+            &format!("{}/pulls/{n}/comments", w.repo_path()),
+            &w.ken,
+            json!({"body": "Checks failed.", "meta": {"kind": "notice"}}),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    merge(&w, n, &landing(&w, n, "passed").await).await;
+    // Pull requests of interactive tickets, directly or through an ancestor.
+    for (n, t) in [(2, &direct), (3, &child)] {
+        git_ok(&w.work, &["checkout", "-q", "main"]);
+        w.push_change(&format!("topic-{n}"), &format!("{n}.txt"), "change\n");
+        w.open_pull(&format!("topic-{n}"), json!([{"url": t["url"]}]))
+            .await;
+        say(&w, n, &w.ken, "comment").await;
+        let p = landing(&w, n, "passed").await;
+        assert_eq!(p["unanswered"], json!([]));
+        merge(&w, n, &p).await;
+    }
+    // The owner's pull request.
+    git_ok(&w.work, &["checkout", "-q", "main"]);
+    w.push_change("topic-4", "4.txt", "change\n");
+    let (st, v) = s
+        .post(
+            &format!("{}/pulls", w.repo_path()),
+            &w.owner,
+            json!({"head": "topic-4", "title": "t", "body": ""}),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    say(&w, 4, &w.ken, "review").await;
+    let p = landing(&w, 4, "passed").await;
+    assert_eq!(p["unanswered"], json!([]));
+    merge(&w, 4, &p).await;
+}
+
+#[tokio::test]
+async fn a_statement_takes_a_gating_pull_request_out() {
+    let (w, _runner, gating) = divergent_gate(&["test"]).await;
+    say(&w, 3, &w.ken, "comment").await;
+    let left = landing(&w, 3, "left").await;
+    assert_eq!(left["landing"]["reason"]["code"], "unanswered");
+    assert_eq!(left["landing"]["gate"], gating["landing"]["gate"]);
+}
+
+#[tokio::test]
+async fn a_failed_gate_ranks_its_pull_request_as_failing_until_retried() {
+    use crate::pulls::patrol_walk;
+    let (w, runner, _) = divergent_gate(&["test"]).await;
+    let failed = runner.next_claim().await;
+    assert_eq!(runner.finish(&failed, "failure").await.0, 200);
+    landing(&w, 3, "left").await;
+    crate::ci::sync_main(&w);
+    let next = w.push_change("next", "next.txt", "next\n");
+    w.open_pull("next", json!([])).await;
+    let claim = runner.next_claim().await;
+    assert_eq!(claim["sha"], next);
+    assert_eq!(runner.finish(&claim, "success").await.0, 200);
+    landing(&w, 4, "passed").await;
+    // Both approved (none is needed) with passed head checks: the failed
+    // gate puts !3 after !4, though !3 was updated first.
+    assert_eq!(patrol_walk(&w, &w.aiko, 100).await, ["!4", "!3"]);
+    w.acknowledge(3).await;
+    retry(&w, &failed).await;
+    let retried = runner.next_claim().await;
+    assert_eq!(runner.finish(&retried, "success").await.0, 200);
+    landing(&w, 3, "waiting").await;
+    assert_eq!(patrol_walk(&w, &w.aiko, 100).await, ["!3", "!4"]);
 }

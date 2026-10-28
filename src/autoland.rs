@@ -249,6 +249,11 @@ async fn notify(app: &App, repo: &Repo, number: u64) -> AppResult<bool> {
     let Some(landing) = landing.filter(awaits_notice) else {
         return Ok(true);
     };
+    // A statement written since the sweep's reconcile takes it out of the
+    // queue at the next sweep: it is not ready to merge.
+    if crate::landing::awaits_answer(app, &repo, &p).await? {
+        return Ok(true);
+    }
     // Only once it is the owner's turn: the head is on the host and the
     // host's checks of it have finished.
     let tips = pulls::tips(app, &repo).await?;
