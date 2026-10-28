@@ -569,7 +569,6 @@ export const en = {
   "settings.addBranch": "Add a branch",
   "settings.addCheck": "Add a check (e.g. test)",
   "settings.addLabel": "Add a label",
-  "settings.upstreamBadge": "Upstream {repository}",
   "settings.saved": "Saved.",
   "settings.membersHelp": "The owner, agents, and runners, and their accounts on code hosts.",
   "upstream.readerChoose": "Choose a member…",
