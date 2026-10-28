@@ -372,6 +372,36 @@ async def _push(world: World, code: CodeHostingService, start: str, branch: str)
     return sha
 
 
+def test_initial_ticket_state_and_interactive_patrol_exclusion(world: World) -> None:
+    async def scenario(_: CodeHostingService, tickets: TicketService) -> None:
+        parent = await _create(tickets, "Parent")
+        blocker = await _create(tickets, "Blocker")
+        await _change(tickets, blocker, state="closed", state_reason="completed")
+        for interactive in (False, True):
+            created = await tickets.create_ticket(
+                REPO, "Assigned at creation", "", [], assignee=MEMBER,
+                interactive=interactive, lane="in_progress", parent=parent,
+                blocked_by=[blocker],
+            )
+            ticket = await _read(tickets, created.target.url)
+            assert ticket["assignees"] == [MEMBER]
+            assert ticket["lane"] == "in_progress"
+            assert ticket["parent"]["url"] == parent
+            assert [b["url"] for b in ticket["blocked_by"]] == [blocker]
+            candidate_urls = [t.url for t in await tickets.candidates()]
+            assert (created.target.url in candidate_urls) is not interactive
+            task = Task(id=created.target.url, url=created.target.url,
+                        title="Assigned at creation", description="", status=Task.IN_PROGRESS)
+            assert (await tickets.refresh(task) is None) is interactive
+            child = await tickets.create_ticket(
+                REPO, "Child", "", [], assignee=MEMBER, parent=created.target.url,
+            )
+            assert (await _read(tickets, child.target.url))["lane"] == "ready"
+            assert (child.target.url in [t.url for t in await tickets.candidates()]) is not interactive
+
+    world.run(scenario)
+
+
 def test_tickets_and_their_relations(world: World) -> None:
     async def scenario(_: CodeHostingService, tickets: TicketService) -> None:
         created = await tickets.create_ticket(REPO, "Fix login", "It fails.", [])
