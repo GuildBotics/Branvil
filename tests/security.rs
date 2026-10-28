@@ -276,10 +276,11 @@ async fn cookie_writes_need_the_sessions_own_csrf() {
         if !sent.is_empty() {
             req = req.header("x-branvil-csrf", sent);
         }
+        let response = req.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(
-            req.send().await.unwrap().status(),
-            StatusCode::FORBIDDEN,
-            "{sent}"
+            response.json::<Value>().await.unwrap()["error"]["code"],
+            "csrf_mismatch"
         );
     }
     // The right CSRF value from another origin is still refused.
@@ -298,6 +299,53 @@ async fn cookie_writes_need_the_sessions_own_csrf() {
         .ok(&format!("/repos/{}/tickets", encode(REPO)), &w.ken)
         .await;
     assert!(tickets["items"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_old_tab_can_refresh_csrf_after_another_entry_replaces_the_cookie() {
+    let w = World::new().await;
+    let s = &w.server;
+    let (_, old_csrf) = s.session(&w.owner).await;
+    let (cookie, _) = s.session(&w.owner).await;
+    let url = format!("{}/api/v1/repos/{}/tickets", s.url, encode(REPO));
+    let refused = s
+        .http
+        .post(&url)
+        .header("cookie", &cookie)
+        .header("x-branvil-csrf", old_csrf)
+        .json(&json!({"title": "from the old tab"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        refused.json::<Value>().await.unwrap()["error"]["code"],
+        "csrf_mismatch"
+    );
+    let session: Value = s
+        .http
+        .get(format!("{}/api/v1/session", s.url))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let saved = s
+        .http
+        .post(&url)
+        .header("cookie", &cookie)
+        .header("x-branvil-csrf", session["csrf"].as_str().unwrap())
+        .json(&json!({"title": "from the old tab"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::CREATED);
+    let tickets = s
+        .ok(&format!("/repos/{}/tickets", encode(REPO)), &w.ken)
+        .await;
+    assert_eq!(tickets["items"].as_array().unwrap().len(), 1);
 }
 
 /// Without a sign-out, the owner's token file is the way to end every GUI

@@ -286,8 +286,10 @@ pub async fn authenticate(app: &App, method: &Method, headers: &HeaderMap) -> Ap
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if !bool::from(sent.as_bytes().ct_eq(session.csrf.as_bytes())) {
-            return Err(AppError::forbidden(
-                "A request made with the session cookie needs the X-Branvil-CSRF header.",
+            return Err(AppError::new(
+                axum::http::StatusCode::FORBIDDEN,
+                "csrf_mismatch",
+                "The X-Branvil-CSRF header does not match the current session.",
             ));
         }
     }
@@ -297,6 +299,83 @@ pub async fn authenticate(app: &App, method: &Method, headers: &HeaderMap) -> Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn csrf_refusal_is_distinct_from_permissions_and_expired_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::Config::load(None, Some(dir.path()), None, None).unwrap();
+        config.layout().create().unwrap();
+        let store = store::Store::open(&config.layout().db(), 1 << 20, 1).unwrap();
+        store
+            .write_sync(|w| {
+                w.put(
+                    store::MEMBERS,
+                    &Member::key("test-agent"),
+                    &Member {
+                        name: "test-agent".into(),
+                        display_name: "Test Agent".into(),
+                        kind: MemberKind::Agent,
+                        accounts: Vec::new(),
+                        reviewers: Vec::new(),
+                        created_at: util::now(),
+                        avatar: None,
+                    },
+                )?;
+                w.put(
+                    store::SESSIONS,
+                    &session_key("test-session"),
+                    &Session {
+                        member: "test-agent".into(),
+                        csrf: "test-csrf".into(),
+                        created_at: util::now(),
+                        expires_at: util::format_time(
+                            chrono::Utc::now() + chrono::Duration::minutes(1),
+                        ),
+                    },
+                )
+            })
+            .unwrap();
+        let app = App::new(
+            config,
+            "http://127.0.0.1:7878".into(),
+            store,
+            vec![],
+            "http://127.0.0.1:7878".into(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("cookie", "branvil_session=test-session".parse().unwrap());
+        for method in [Method::POST, Method::PATCH, Method::PUT, Method::DELETE] {
+            for sent in [None, Some("wrong"), Some("test-csrf")] {
+                headers.remove(CSRF_HEADER);
+                if let Some(value) = sent {
+                    headers.insert(CSRF_HEADER, value.parse().unwrap());
+                }
+                let result = authenticate(&app, &method, &headers).await;
+                if sent == Some("test-csrf") {
+                    assert_eq!(
+                        result.unwrap().require_owner().unwrap_err().code,
+                        "forbidden"
+                    );
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.status, axum::http::StatusCode::FORBIDDEN);
+                    assert_eq!(error.code, "csrf_mismatch");
+                }
+            }
+        }
+        headers.remove(CSRF_HEADER);
+        for method in [Method::GET, Method::HEAD] {
+            assert!(authenticate(&app, &method, &headers).await.is_ok());
+        }
+        headers.insert("cookie", "branvil_session=expired".parse().unwrap());
+        assert_eq!(
+            authenticate(&app, &Method::POST, &headers)
+                .await
+                .unwrap_err()
+                .code,
+            "unauthorized"
+        );
+    }
 
     #[test]
     fn tokens_parse_and_verify() {

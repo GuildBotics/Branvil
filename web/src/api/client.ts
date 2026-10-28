@@ -4,7 +4,7 @@
 // the session is kept only in this module's memory (never in storage) and is
 // sent on every non-GET request.
 
-import type { Page } from "./types";
+import type { Page, Session } from "./types";
 
 export const API_PREFIX = "/api/v1";
 
@@ -66,6 +66,29 @@ function buildUrl(path: string, query?: Query): string {
 }
 
 export async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+  try {
+    return await send<T>(method, path, opts);
+  } catch (err) {
+    if (method === "GET" || method === "HEAD" || !isApiError(err, "csrf_mismatch", 403)) throw err;
+  }
+
+  // Another tab may have replaced the shared cookie. Authentication refused
+  // the write before its handler ran, so only this refusal is safe to retry.
+  try {
+    const session = await send<Session>("GET", "/session", { signal: opts.signal });
+    setCsrfToken(session.csrf);
+    return await send<T>(method, path, opts);
+  } catch (err) {
+    if (isApiError(err, "csrf_mismatch", 403) || isApiError(err, undefined, 401)) {
+      setCsrfToken(null);
+      throw new ApiError(err.status, "session_changed", "The session could not be refreshed. Reload the page and try again.");
+    }
+    throw err;
+  }
+}
+
+/** One attempt; recovery calls this directly so a retry cannot retry itself. */
+async function send<T>(method: string, path: string, opts: RequestOptions): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   // A file (a member's picture) goes as it is; everything else as JSON.
   const file = opts.body instanceof Blob ? opts.body : null;
