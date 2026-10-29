@@ -28,7 +28,7 @@ const pageOf = (items: unknown[]) => ({ items, next_cursor: null });
 for (const locale of ["en-US", "ja-JP"]) {
   test.describe(locale, () => {
     test.use({ locale });
-    for (const path of ["/GuildBotics", "/GuildBotics/-/relations"]) {
+    for (const path of ["/GuildBotics/-/board", "/GuildBotics"]) {
       test(`keeps every card's contents inside it and clear of its menu on ${path}`, async ({ page }, info) => {
         await page.setViewportSize({ width: 1280, height: 1000 });
         await page.route("**/api/v1/**", async (route) => {

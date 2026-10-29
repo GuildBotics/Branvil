@@ -7,29 +7,26 @@ import { useState, type ReactNode } from "react";
 import { useI18n, type Language } from "../i18n";
 import { Link, navigate } from "../router/Router";
 import { href, type Route } from "../router/routes";
-import { workspaceStart } from "../workspace";
 import { NewWorkspaceModal } from "./NewWorkspace";
 
 const NEW_WORKSPACE = "\u0000new";
 
-type Page = "board" | "relations" | "pulls" | "settings" | null;
+type Page = "board" | "workspace" | "pulls" | "settings" | null;
 
-function pageOf(route: Route, showBoard: boolean): Page {
+function pageOf(route: Route): Page {
   switch (route.name) {
-    case "workspace":
-      return "board";
     case "ticket":
-      return showBoard ? "board" : "relations";
-    case "relations":
-      return "relations";
-    case "pulls":
+      return "workspace";
     case "repo":
     case "pull":
     case "commit":
     case "job":
       return "pulls";
+    case "workspace":
+    case "board":
+    case "pulls":
     case "settings":
-      return "settings";
+      return route.name;
     default:
       return null;
   }
@@ -48,25 +45,29 @@ export function Sidebar({
   route,
   workspace,
   workspaces,
+  onWorkspaceChange,
   showBoard,
 }: {
   route: Route;
   workspace: string | null;
   workspaces: string[] | null;
+  onWorkspaceChange: (name: string) => void;
   showBoard: boolean;
 }) {
   const { t, lang, setLang } = useI18n();
   const [creating, setCreating] = useState(false);
-  const page = pageOf(route, showBoard);
+  const page = pageOf(route);
   const choose = (name: string | null) => {
     if (name === NEW_WORKSPACE) {
       setCreating(true);
       return;
     }
     if (!name || name === workspace) return;
-    // Stay on the same kind of page in the other workspace.
+    onWorkspaceChange(name);
+    // Preserve top-level pages; detail pages return to the task flow,
+    // independently of the sidebar's current-location highlight.
     navigate(
-      page === "pulls" ? href.pulls(name) : page === "relations" ? href.relations(name) : page === "settings" ? href.settings() : workspaceStart(name, showBoard),
+      route.name === "pulls" ? href.pulls(name) : route.name === "board" && showBoard ? href.board(name) : route.name === "settings" ? href.settings() : href.workspace(name),
     );
   };
   return (
@@ -90,11 +91,11 @@ export function Sidebar({
       <nav className="nav" aria-label={t("nav.main")}>
         {workspace && (
           <>
-            <NavItem to={href.relations(workspace)} active={page === "relations"} icon={<Workflow size={18} />}>
+            <NavItem to={href.workspace(workspace)} active={page === "workspace"} icon={<Workflow size={18} />}>
               {t("nav.relations")}
             </NavItem>
             {showBoard && (
-              <NavItem to={href.workspace(workspace)} active={page === "board"} icon={<SquareKanban size={18} />}>
+              <NavItem to={href.board(workspace)} active={page === "board"} icon={<SquareKanban size={18} />}>
                 {t("nav.board")}
               </NavItem>
             )}
@@ -124,7 +125,7 @@ export function Sidebar({
           allowDeselect={false}
         />
       </Stack>
-      <NewWorkspaceModal opened={creating} onClose={() => setCreating(false)} showBoard={showBoard} />
+      <NewWorkspaceModal opened={creating} onClose={() => setCreating(false)} />
     </aside>
   );
 }

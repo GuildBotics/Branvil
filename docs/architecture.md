@@ -627,11 +627,19 @@ from a cross-site frame.
 
 ## GUI files
 
+A workspace's task flow is at `/{workspace}`, its task board at
+`/{workspace}/-/board`, and its pull requests at `/{workspace}/-/pulls`.
+`/` and workspace creation always open the task flow. The display preference
+only hides the board's sidebar link; direct board URLs remain usable. Switching
+workspaces keeps the task flow, pull requests, or settings, and the board when
+its sidebar link is shown; other pages lead to the task flow. The removed
+`/{workspace}/-/relations` path is not redirected.
+
 The GUI is built with Mantine and looks like GuildBotics Desktop: the same
 Mantine version and theme (`web/src/theme.ts`), and GuildBotics' design tokens
 and component overrides copied into `web/src/styles.css` (kept identical), so
 it can sit beside or inside Desktop. Its pages: a sidebar (the workspace, its
-task board, task flow and pull requests, settings), the task board (lanes as tall as the window, a
+task flow, task board and pull requests, settings), the task board (lanes as tall as the window, a
 ticket added at the foot of a lane, a card marked when a blocker is open,
 its lane and assignee changed from the card, the ticket made interactive or
 not and its URL copied from the card's menu, which says that it copied and

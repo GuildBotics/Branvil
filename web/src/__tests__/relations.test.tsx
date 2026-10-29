@@ -64,7 +64,7 @@ const inFront = (from: string, to: string) => document.querySelector(`.rel-front
 const dataTransfer = () => ({ setData: () => {}, getData: () => "", effectAllowed: "" });
 
 async function shown() {
-  renderApp("/acme/-/relations");
+  renderApp("/acme");
   return screen.findByRole("article", { name: /^acme\/demo#1 / });
 }
 
@@ -78,10 +78,10 @@ describe("relations", () => {
   it("is reached from the sidebar and lays out parents, their collapsed dependencies, and tickets without relations", async () => {
     const user = userEvent.setup();
     const fake = fakeApi(routes());
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await user.click(await screen.findByRole("link", { name: "Task flow" }));
     await screen.findByRole("article", { name: /^acme\/demo#1 / });
-    expect(window.location.pathname).toBe("/acme/-/relations");
+    expect(window.location.pathname).toBe("/acme");
     expect(screen.getByRole("link", { name: "Task flow" })).toHaveAttribute("aria-current", "page");
 
     // #2 and #3 are inside the collapsed #1; #4's dependency of #2 is drawn to #1, dotted.
@@ -106,11 +106,11 @@ describe("relations", () => {
       }),
     );
     const user = userEvent.setup();
-    renderApp("/acme/-/relations");
+    renderApp("/acme");
     await user.click(await screen.findByRole("link", { name: "Title of 5" }));
     const drawer = await screen.findByRole("dialog", { name: "Ticket" });
     expect(await within(drawer).findByRole("heading", { level: 2 })).toHaveTextContent("#5 Title of 5");
-    expect(window.location.pathname).toBe("/acme/-/relations");
+    expect(window.location.pathname).toBe("/acme");
   });
 
   it("opens a parent into a frame with a toggle that says so, and remembers it", async () => {
@@ -250,7 +250,7 @@ describe("relations", () => {
   it("colours a parent as one while none of its children is shown, with nothing to open", async () => {
     // #7's only child #6 is closed and closed tickets are not shown.
     fakeApi(routes({ open: [card("7", "ready", { children: [ref("6", "closed")] }), card("5", "ready")] }));
-    renderApp("/acme/-/relations");
+    renderApp("/acme");
     await screen.findByText("Title of 7");
     expect(article("7")).toHaveClass("parent");
     expect(within(article("7")).queryByRole("button", { name: "Open child tickets" })).not.toBeInTheDocument();
@@ -262,7 +262,7 @@ describe("relations", () => {
     // #8 (new) waits for the closed #9 and #7 (ready) has the closed child #6, neither shown; #5 has no relation.
     const open = [card("7", "ready", { children: [ref("6", "closed")] }), card("8", "new", { blocked_by: [ref("9", "closed")] }), card("5", "new")];
     fakeApi(routes({ open }));
-    renderApp("/acme/-/relations");
+    renderApp("/acme");
     const frame = await screen.findByRole("group", { name: "New tickets (1)" });
     await user.click(within(frame).getByRole("button", { name: "Open child tickets" }));
     expect(within(frame).getAllByRole("article").map((a) => a.getAttribute("aria-label")?.split(" ")[0])).toEqual(["acme/demo#5"]);
@@ -532,7 +532,7 @@ describe("relations", () => {
               : json(200, { items: all, next_cursor: null }),
       }),
     );
-    renderApp("/acme/-/relations");
+    renderApp("/acme");
     // Meanwhile the open tickets are shown (#8 without its parent, so without relations), and nothing can be dragged.
     await screen.findByRole("article", { name: /^acme\/demo#8 / });
     expect(draggable("8")).toHaveAttribute("draggable", "false");
@@ -561,7 +561,7 @@ describe("relations", () => {
       ...open,
     ];
     const fake = fakeApi(routes({ open, all }));
-    renderApp("/acme/-/relations");
+    renderApp("/acme");
     expect(await screen.findByRole("article", { name: /^acme\/demo#7 / })).toBeInTheDocument();
     expect(fake.calls("GET", "/api/v1/workspaces/acme/board/cards").some((r) => r.search.includes("state=all"))).toBe(true);
     expect(screen.queryByRole("article", { name: /^acme\/demo#9 / })).not.toBeInTheDocument();

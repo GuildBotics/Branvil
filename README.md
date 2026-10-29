@@ -132,10 +132,13 @@ related tickets section only when links exist.
 
 The sidebar lists the task flow before the task board. **Settings → Display**
 (under **All of Branvil**) can hide or show the task board's sidebar link (shown
-by default). This
-preference is saved in the current browser and leaves direct board URLs usable.
-When the board is hidden, opening `/`, switching from a board or ticket to
-another workspace, or creating a workspace opens its task flow instead.
+by default). This preference is saved in the current browser and leaves direct
+board URLs usable.
+A workspace's page (`/{workspace}`) is its task flow; its board is at
+`/{workspace}/-/board`. Opening `/` or creating a workspace always opens the
+task flow. Switching workspaces keeps the task flow, pull requests, or settings
+page, and keeps the board only when its sidebar link is shown. Switching from
+a ticket or another page opens the task flow.
 
 What a member may do follows from its kind. The owner may do everything. An
 agent reads everything and works in every repository: tickets, comments,

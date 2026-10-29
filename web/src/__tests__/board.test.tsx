@@ -86,7 +86,7 @@ function cardRenders() {
 describe("kanban board", () => {
   it("renders lanes, cards from every page, PR/CI summary, and empty lanes", async () => {
     const fake = fakeApi(boardRoutes());
-    renderApp("/acme");
+    renderApp("/acme/-/board");
 
     expect(await within(await screen.findByRole("region", { name: /^New/ })).findByText("Title of 1")).toBeInTheDocument();
     expect(within(lane(/^Ready/)).getByText("Title of 2")).toBeInTheDocument();
@@ -111,7 +111,7 @@ describe("kanban board", () => {
     const blocker = { url: three.url, repository: "acme/demo", key: "3", title: three.title, state: "open" as const, state_reason: null };
     fakeApi(boardRoutes({ "GET /api/v1/repos/acme/demo": json(200, repo("acme/demo", ["bug"])), ...ticket("1", { blocked_by: [blocker] }), ...ticket("3") }));
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
 
     // A click with a modifier opens the ticket's page as a link does, not the drawer.
     fireEvent.click(await screen.findByRole("link", { name: "Title of 1" }), { ctrlKey: true });
@@ -120,7 +120,7 @@ describe("kanban board", () => {
     await user.click(screen.getByRole("link", { name: "Title of 1" }));
     const drawer = await screen.findByRole("dialog", { name: "Ticket" });
     expect(await within(drawer).findByRole("heading", { level: 2 })).toHaveTextContent("#1 Title of 1");
-    expect(window.location.pathname).toBe("/acme");
+    expect(window.location.pathname).toBe("/acme/-/board");
     // The ticket's page, not the board, has no link back to the board.
     expect(within(drawer).queryByRole("link", { name: "Task board" })).not.toBeInTheDocument();
     await user.click(within(drawer).getByRole("button", { name: "Copy the ticket's URL" }));
@@ -131,7 +131,7 @@ describe("kanban board", () => {
 
     await user.click(within(drawer).getByRole("link", { name: /Title of 3/ }));
     expect(await within(drawer).findByRole("heading", { level: 2, name: /#3 Title of 3/ })).toBeInTheDocument();
-    expect(window.location.pathname).toBe("/acme");
+    expect(window.location.pathname).toBe("/acme/-/board");
     // The link that opened it is gone: the focus stays in the drawer.
     expect(drawer).toHaveFocus();
 
@@ -165,7 +165,7 @@ describe("kanban board", () => {
       }),
     );
     const renders = cardRenders();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 3");
     // The members (for avatars) arrive once; after that nothing re-renders the cards.
     await waitFor(() => expect(screen.getByRole("article", { name: /^acme\/demo#1 / })).toHaveTextContent("aiko"));
@@ -185,7 +185,7 @@ describe("kanban board", () => {
   it("mounts a card's assignee menu only once asked for, and assigns from it", async () => {
     const fake = fakeApi(boardRoutes({ "PUT /api/v1/repos/acme/web/tickets/2/assignee": json(200, {}) }));
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 2");
     expect(screen.queryAllByRole("menu")).toHaveLength(0);
 
@@ -202,7 +202,7 @@ describe("kanban board", () => {
   it("shows a card's one assignee and clears it", async () => {
     const fake = fakeApi(boardRoutes({ "DELETE /api/v1/repos/acme/demo/tickets/1/assignee": json(200, {}) }));
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     const card1 = await screen.findByRole("article", { name: "acme/demo#1 Title of 1" });
     expect(within(card1).getAllByText("aiko", { selector: ".assignee" })).toHaveLength(1);
 
@@ -214,7 +214,7 @@ describe("kanban board", () => {
   it("offers a card's lanes and its place in the lane in its menu, not its assignee", async () => {
     fakeApi(boardRoutes());
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 1");
 
     await user.click(screen.getByRole("button", { name: "Actions of acme/demo#1" }));
@@ -232,7 +232,7 @@ describe("kanban board", () => {
   it("leaves the copy item unchanged when the clipboard refuses", async () => {
     fakeApi(boardRoutes());
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 1");
     vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("denied"));
 
@@ -252,7 +252,7 @@ describe("kanban board", () => {
   it("moves a card to another lane from its menu (no drag needed)", async () => {
     const fake = fakeApi(boardRoutes({ "PUT /api/v1/repos/acme/demo/tickets/1/board": json(200, {}) }));
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 1");
 
     await pickFromMenu(user, "Actions of acme/demo#1", "Ready");
@@ -269,7 +269,7 @@ describe("kanban board", () => {
   it("asks for closed tickets too when the user includes them, and remembers that on this browser", async () => {
     const fake = fakeApi(boardRoutes());
     const user = userEvent.setup();
-    const { unmount } = renderApp("/acme");
+    const { unmount } = renderApp("/acme/-/board");
     await screen.findByText("Title of 1");
     expect(screen.getByLabelText("Include closed tickets")).not.toBeChecked();
     await user.click(screen.getByLabelText("Include closed tickets"));
@@ -277,18 +277,18 @@ describe("kanban board", () => {
 
     // Shown again (a reload, another workspace), the board keeps the choice.
     unmount();
-    const again = renderApp("/acme");
+    const again = renderApp("/acme/-/board");
     expect(await screen.findByLabelText("Include closed tickets")).toBeChecked();
     await user.click(screen.getByLabelText("Include closed tickets"));
     again.unmount();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     expect(await screen.findByLabelText("Include closed tickets")).not.toBeChecked();
   });
 
   it("filters loaded cards by assignee, label, and text", async () => {
     fakeApi(boardRoutes());
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 1");
 
     await choose(user, "Assignee", "aiko");
@@ -310,7 +310,7 @@ describe("kanban board", () => {
   it("reverts a failed move and says so", async () => {
     fakeApi(boardRoutes({ "PUT /api/v1/repos/acme/demo/tickets/1/board": apiError(503, "unavailable", "Storage busy.") }));
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 1");
 
     await pickFromMenu(user, "Actions of acme/demo#1", "Done");
@@ -335,7 +335,7 @@ describe("kanban board", () => {
       }),
     );
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     const one = await screen.findByRole("article", { name: "acme/demo#1 Title of 1" });
     expect(within(one).getByText("Blocked")).toBeInTheDocument();
     expect(within(one).queryByText(/Children/)).not.toBeInTheDocument();
@@ -354,7 +354,7 @@ describe("kanban board", () => {
         "GET /api/v1/workspaces/acme/board/cards": json(200, { items: [card("1", "ready", { interactive: true }), card("2", "ready")], next_cursor: null }),
       }),
     );
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     const one = await screen.findByRole("article", { name: "acme/demo#1 Title of 1" });
     expect(within(one).getByText("Interactive")).toBeInTheDocument();
     const two = screen.getByRole("article", { name: "acme/demo#2 Title of 2" });
@@ -371,7 +371,7 @@ describe("kanban board", () => {
         }),
       }),
     );
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     for (const name of ["acme/demo#2 Title of 2", "acme/demo#3 Title of 3"]) {
       const inherited = await screen.findByRole("article", { name });
       expect(within(inherited).getByText("Interactive via acme/demo#1")).toBeInTheDocument();
@@ -382,7 +382,7 @@ describe("kanban board", () => {
   it("refetches the board after a concurrent change (409)", async () => {
     const fake = fakeApi(boardRoutes({ "PUT /api/v1/repos/acme/web/tickets/2/board": apiError(409, "conflict", "Changed.") }));
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 2");
     const before = fake.calls("GET", "/api/v1/workspaces/acme/board/cards").length;
 
@@ -399,7 +399,7 @@ describe("kanban board", () => {
       }),
     );
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 1");
 
     await user.click(screen.getByRole("button", { name: "Add a ticket to Ready" }));
@@ -437,7 +437,7 @@ describe("kanban board", () => {
       }),
     );
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 1");
     await user.click(screen.getByRole("button", { name: "Add a ticket to New" }));
     await user.type(screen.getByRole("textbox", { name: "Title" }), "Broken button");
@@ -468,7 +468,7 @@ describe("kanban board", () => {
       }),
     );
     const user = userEvent.setup();
-    renderApp("/acme");
+    renderApp("/acme/-/board");
     await screen.findByText("Title of 1");
 
     await user.click(screen.getByRole("button", { name: "Add a ticket to In progress" }));
