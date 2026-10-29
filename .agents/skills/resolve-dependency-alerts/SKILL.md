@@ -132,9 +132,16 @@ locks; the PR reports the checks of what it pushes. A Rust build that cannot
 finish in the environment's resources is recorded as an unperformed check
 (below), not as a failure of the package.
 
-Follow `AGENTS.md` when diagnosing a failure that the change did not cause:
-put its complete Issue draft in the PR or final report, without publishing an
-Issue or waiting for a reply. If checks cannot run in the available
+When diagnosing a failure that the change did not cause, search the same
+tracker before writing an Issue draft: use
+`member ticket read --resource tracker_tickets` with `state: all` and follow
+every continuation. A failed or incomplete search is not no matches. If an
+open ticket already covers the issue, comment there with the new findings
+and report its URL instead of a draft. If only a closed ticket matches, do
+not reopen it or comment on it; reference it in the Related section of a new
+complete draft. If there is no match, write the draft as before. Put a needed
+draft in the PR or final report, without publishing an Issue or waiting for a
+reply. If checks cannot run in the available
 environment, preserve the patch and record the exact unperformed checks and
 reason in the PR.
 
