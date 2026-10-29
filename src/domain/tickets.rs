@@ -510,6 +510,7 @@ fn check_lane(lane: &str) -> AppResult<()> {
 
 #[derive(Deserialize, Debug, Default)]
 pub struct TicketQuery {
+    pub q: Option<String>,
     pub state: Option<String>,
     pub lane: Option<String>,
     pub assignee: Option<String>,
@@ -528,7 +529,15 @@ fn matches(t: &Ticket, q: &TicketQuery, me: &str) -> bool {
             .as_ref()
             .is_some_and(|x| fold(&x.name) == fold(a))
     });
-    state_ok && lane_ok && assignee_ok
+    let text_ok = q.q.as_ref().is_none_or(|text| {
+        let title = t.title.to_lowercase();
+        let body = t.body.to_lowercase();
+        text.split_whitespace().all(|word| {
+            let word = word.to_lowercase();
+            title.contains(&word) || body.contains(&word)
+        })
+    });
+    state_ok && lane_ok && assignee_ok && text_ok
 }
 
 pub async fn list_tickets(
@@ -1603,6 +1612,7 @@ pub async fn cards(
     app.store
         .read(move |r| {
             let filter = TicketQuery {
+                q: None,
                 state: Some(q.state.clone().unwrap_or_else(|| "open".into())),
                 lane: None,
                 assignee: q.assignee.clone(),

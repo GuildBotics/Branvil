@@ -407,6 +407,7 @@ async fn tickets_create(
 async fn tickets_list(State(app): State<Shared>, c: Caller, P(repo): P<String>, q: Q) -> R {
     let page = q.page(&app, &c, &format!("tickets\n{}", util::fold(&repo)))?;
     let query = tickets::TicketQuery {
+        q: q.get("q"),
         state: q.get("state"),
         lane: q.get("lane"),
         assignee: q.get("assignee"),
