@@ -58,22 +58,24 @@ describe.each([true, false])("workspace navigation (showBoard=%s)", (showBoard) 
   });
 
   it.each([
-    ["task flow", "/acme", "/beta", "Task flow"],
-    ["task board", "/acme/-/board", showBoard ? "/beta/-/board" : "/beta", showBoard ? "Task board" : "Task flow"],
-    ["pull requests", "/acme/-/pulls", "/beta/-/pulls", "Pull requests"],
-    ["settings", "/-/settings/members", "/-/settings", "Settings"],
-    ["repository settings", "/-/settings/repos/acme/demo", "/-/settings", "Settings"],
-    ["ticket", "/acme/demo/-/tickets/1", "/beta", "Task flow"],
-    ["repository", "/acme/demo", "/beta", "Task flow"],
-    ["pull request", "/acme/demo/-/pulls/1", "/beta", "Task flow"],
-    ["commit", "/acme/demo/-/commits/abc123", "/beta", "Task flow"],
-    ["job", "/acme/demo/-/jobs/att_1", "/beta", "Task flow"],
-  ])("switches from %s to the expected page", async (_, from, to, active) => {
+    ["task flow", "/acme", "/beta", "Task flow", "Task flow"],
+    ["task board", "/acme/-/board", showBoard ? "/beta/-/board" : "/beta", showBoard ? "Task board" : "Task flow", showBoard ? "Task board" : null],
+    ["pull requests", "/acme/-/pulls", "/beta/-/pulls", "Pull requests", "Pull requests"],
+    ["settings", "/-/settings/members", "/-/settings", "Settings", "Settings"],
+    ["repository settings", "/-/settings/repos/acme/demo", "/-/settings", "Settings", "Settings"],
+    ["ticket", "/acme/demo/-/tickets/1", "/beta", "Task flow", "Task flow"],
+    ["repository", "/acme/demo", "/beta", "Task flow", "Pull requests"],
+    ["pull request", "/acme/demo/-/pulls/1", "/beta", "Task flow", "Pull requests"],
+    ["commit", "/acme/demo/-/commits/abc123", "/beta", "Task flow", "Pull requests"],
+    ["job", "/acme/demo/-/jobs/att_1", "/beta", "Task flow", "Pull requests"],
+  ])("shows the current location and switches from %s to the expected page", async (_, from, to, active, current) => {
     setup();
     window.localStorage.setItem("branvil.sidebar.showBoard", String(showBoard));
     // Global settings use the remembered workspace.
     window.localStorage.setItem("branvil.workspace", "acme");
     renderApp(from);
+    const before = await screen.findByRole("navigation", { name: "Main" });
+    expect(within(before).queryAllByRole("link", { current: "page" }).map((link) => link.textContent)).toEqual(current ? [current] : []);
     await choose(userEvent.setup(), "Workspace", "beta");
     await waitFor(() => expect(window.location.pathname).toBe(to));
     const nav = screen.getByRole("navigation", { name: "Main" });

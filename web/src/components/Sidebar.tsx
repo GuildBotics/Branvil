@@ -15,6 +15,13 @@ type Page = "board" | "workspace" | "pulls" | "settings" | null;
 
 function pageOf(route: Route): Page {
   switch (route.name) {
+    case "ticket":
+      return "workspace";
+    case "repo":
+    case "pull":
+    case "commit":
+    case "job":
+      return "pulls";
     case "workspace":
     case "board":
     case "pulls":
@@ -57,9 +64,10 @@ export function Sidebar({
     }
     if (!name || name === workspace) return;
     onWorkspaceChange(name);
-    // Stay on the same kind of page in the other workspace.
+    // Preserve top-level pages; detail pages return to the task flow,
+    // independently of the sidebar's current-location highlight.
     navigate(
-      page === "pulls" ? href.pulls(name) : page === "board" && showBoard ? href.board(name) : page === "settings" ? href.settings() : href.workspace(name),
+      route.name === "pulls" ? href.pulls(name) : route.name === "board" && showBoard ? href.board(name) : route.name === "settings" ? href.settings() : href.workspace(name),
     );
   };
   return (
