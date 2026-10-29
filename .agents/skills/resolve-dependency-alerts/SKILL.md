@@ -134,16 +134,24 @@ finish in the environment's resources is recorded as an unperformed check
 
 When diagnosing a failure that the change did not cause, search the same
 tracker before writing an Issue draft: use
-`member ticket read --resource tracker_tickets` with `state: all` and follow
-every continuation. A failed or incomplete search is not no matches. If an
-open ticket already covers the issue, comment there with the new findings
+`member ticket read --resource tracker_tickets --subject <tracker>
+--params '{"text":"<terms>","state":"all"}'`. Search with a few short term
+sets (component or command plus symptom), including synonyms and
+English/Japanese variants, rather than one long phrase: `text` requires all
+terms to match. Follow every continuation with identical conditions for each
+term set. A failed or incomplete search is not no matches. If an open ticket
+already covers the issue, comment there with the new findings
 and report its URL instead of a draft. If only a closed ticket matches, do
 not reopen it or comment on it; reference it in the Related section of a new
-complete draft. If there is no match, write the draft as before. Put a needed
-draft in the PR or final report, without publishing an Issue or waiting for a
-reply. If checks cannot run in the available
-environment, preserve the patch and record the exact unperformed checks and
-reason in the PR.
+complete draft. If no open match was found and the search fails or is
+incomplete, still present the complete draft, stating the conditions tried
+and that duplicates could not be ruled out; reference any closed match in
+Related. If a completed search finds no match, present the draft as usual.
+A complete draft includes a title, reproduction conditions, behavior in each
+environment, impact, proposed work, completion criteria, and Related. Put it
+in the PR or final report, without publishing an Issue or waiting for a reply.
+If checks cannot run in the available environment, preserve the patch and
+record the exact unperformed checks and reason in the PR.
 
 ## 5. Create the PR and report
 
