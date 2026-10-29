@@ -11,6 +11,93 @@ fn tickets_path() -> String {
 }
 
 #[tokio::test]
+async fn text_search_combines_words_filters_and_pagination() {
+    let w = World::new().await;
+    let s = &w.server;
+    for (title, body, label, assignee, lane) in [
+        ("unrelated", "", "bug", "aiko", "ready"),
+        ("検索 Alpha ÄPFEL", "本文 BETA ÜBER", "bug", "aiko", "ready"),
+        ("検索 alpha", "本文 beta", "docs", "aiko", "ready"),
+        ("検索 alpha", "本文 beta", "bug", "ken", "ready"),
+        ("検索 alpha", "本文 beta", "bug", "aiko", "new"),
+        ("検索 ALPHA", "本文 beta", "bug", "aiko", "ready"),
+        ("検索 alpha", "本文 beta", "bug", "aiko", "ready"),
+        ("検索 alpha", "本文 only", "bug", "aiko", "ready"),
+    ] {
+        let (status, _) = s
+            .post(
+                &tickets_path(),
+                &w.aiko,
+                json!({
+                    "title": title, "body": body, "labels": [label],
+                    "assignee": assignee, "lane": lane
+                }),
+            )
+            .await;
+        assert_eq!(status, 201);
+    }
+    assert_eq!(
+        s.patch(
+            &format!("{}/7", tickets_path()),
+            &w.aiko,
+            json!({"state": "closed", "state_reason": "completed"})
+        )
+        .await
+        .0,
+        200
+    );
+    for (query, expected) in [
+        (
+            "q=検索%20bEtA&state=all",
+            vec!["2", "3", "4", "5", "6", "7"],
+        ),
+        ("q=検索%20bEtA", vec!["2", "3", "4", "5", "6"]),
+        ("q=検索%20bEtA&state=closed", vec!["7"]),
+        ("q=ALPHA%20BETA&label=docs", vec!["3"]),
+        ("q=äpfel%20über", vec!["2"]),
+        ("q=missing", vec![]),
+        ("q=\"", vec![]),
+        ("q=", vec!["1", "2", "3", "4", "5", "6", "8"]),
+        ("q=%20%09%E3%80%80", vec!["1", "2", "3", "4", "5", "6", "8"]),
+    ] {
+        let page = s.ok(&format!("{}?{query}", tickets_path()), &w.aiko).await;
+        let keys: Vec<_> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|ticket| ticket["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys, expected, "{query}");
+    }
+    // Both the primary scan and label-index scan must filter before paging.
+    for label in ["", "&label=bug"] {
+        let query = format!("q=検索%20ALPHA%20本文%20beta&lane=ready&assignee=me{label}&limit=1");
+        let first = s.ok(&format!("{}?{query}", tickets_path()), &w.aiko).await;
+        assert_eq!(first["items"][0]["key"], "2");
+        let cursor = first["next_cursor"].as_str().unwrap();
+        let second = s
+            .ok(
+                &format!("{}?{query}&cursor={cursor}", tickets_path()),
+                &w.aiko,
+            )
+            .await;
+        assert_eq!(
+            second["items"][0]["key"],
+            if label.is_empty() { "3" } else { "6" }
+        );
+        let changed = query.replace("beta", "only");
+        let (status, answer) = s
+            .get(
+                &format!("{}?{changed}&cursor={cursor}", tickets_path()),
+                &w.aiko,
+            )
+            .await;
+        assert_eq!(status, 400);
+        assert_eq!(answer["error"]["code"], "invalid_cursor");
+    }
+}
+
+#[tokio::test]
 async fn creation_commits_assignment_mode_relations_and_lane_together() {
     let w = World::new().await;
     let parent = w.ticket("Parent").await;

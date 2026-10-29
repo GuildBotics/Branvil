@@ -497,8 +497,12 @@ blockers, …) is refused with `400 invalid`, as is one to a ticket of another
 workspace.
 
 - `POST /api/v1/repos/{repo}/tickets` `{"title","body","labels","lane"?,"interactive"?,"assignee"?,"parent"?,"blocked_by"?,"upstream_issue"?}` → `201` ticket with the repository's next number, at the end of `lane` of the workspace's board (when `lane` is omitted: `ready` with a parent or blockers, `new` otherwise) in the same transaction. Optional `interactive` (default false), `assignee` (member name, including the owner), `parent` (ticket URL), and `blocked_by` (ticket URLs) are committed with the new ticket and its indexes before any event is published. Relations must name tickets of the same workspace and must not create a wait cycle. `in_progress` is refused while a blocker is open (`409 blocked`), as when moving an existing ticket. Invalid assignment or relations roll back the entire creation, including its number. Labels must be defined by the repository (`400 label_undefined`).
-- `GET /api/v1/repos/{repo}/tickets?state=open|closed|all&lane=...&assignee=...&label=...` → items in number order
+- `GET /api/v1/repos/{repo}/tickets?state=open|closed|all&lane=...&assignee=...&label=...&q=...` → items in number order
   (`state` defaults to `open`; `assignee=me` is the requesting member).
+  `q` splits on whitespace and requires every word to occur in the title or
+  body, ignoring case (including Unicode). An omitted, empty, or whitespace-only
+  `q` does not filter. It combines with all other conditions and pagination;
+  cursors belong to the original query, including `q`.
 - `GET /api/v1/repos/{repo}/tickets/{number}` → ticket.
 - `DELETE /api/v1/repos/{repo}/tickets/{number}` (owner only; agents and runners receive `403 forbidden`) → `204`. Permanently removes the ticket, all its comments and reactions, its own parent/blocker links, and their derived indexes in one transaction. Refused with `409` and a specific reason (above) if it has any child, is named as another ticket's blocker, is linked from any PR, or has an `upstream_issue`; a refusal changes nothing. Missing tickets return `404`. Numbers are never reused. Attachment references are removed with each body/comment; repository attachments still referenced elsewhere remain, and unreferenced ones follow the usual attachment sweep. Emits `ticket` events for the deleted ticket and its former parent/blockers, plus a `board` event for the workspace. The GUI offers Delete last in the owner’s card menus on the task board and task flow, asks for irreversible-deletion confirmation, and shows a refusal's reason.
 - `PATCH /api/v1/repos/{repo}/tickets/{number}` — every field optional:
