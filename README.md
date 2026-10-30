@@ -200,21 +200,123 @@ less time than an author's, which may need a fix.
 Clone URL: `<base URL>/git/<repo>.git`, for example
 `http://127.0.0.1:7878/git/acme/demo.git`. Fetch and push both use HTTP Basic:
 the username is the member name, the password is one of the member's tokens.
-Give them to Git through a credential helper or `GIT_ASKPASS` rather than in
-the URL (a URL with credentials ends up in shell history and may be stored by
-the system credential helper). The tests in `tests/` use an askpass script that
-reads the name and token from environment variables.
+There is no anonymous fetch. The owner uses their own member name and an owner
+token, too. Keep tokens out of URLs, Git configuration, command arguments, and
+shell history. On a machine other than the Hub, first keep a connection to the
+Hub running as described in [Several machines](#several-machines).
 
 The default branch is protected: it changes only through a merged pull
 request. The first push of the default branch into an empty repository is
 allowed for the owner.
 
+### Your own checkout with GuildBotics
+
+Connect GuildBotics to Branvil on the Hub and fetch that connection and its
+credentials on the other machine. With GuildBotics running there:
+
+1. Open **Setup → Integrations → Branvil → Your own git on this machine** in
+   GuildBotics Desktop and copy the configuration it shows.
+2. Run `git config --global --edit` and paste those lines **at the end**. For
+   example, on Windows:
+
+   ```ini
+   [credential "http://127.0.0.1:7878"]
+       helper =
+       helper = "!guildbotics git-credential"
+   ```
+
+   Use the lines from Desktop for this machine's CLI path and Branvil base
+   URL. The empty `helper =` resets earlier helpers for that URL; keep these
+   lines last so another helper does not store the token.
+3. In your existing checkout, set the remote and fetch (replace `acme/demo`
+   with your repository; use `git remote add` if `origin` does not exist):
+
+   ```sh
+   git remote set-url origin http://127.0.0.1:7878/git/acme/demo.git
+   git fetch origin
+   ```
+
+   After committing work on a feature branch, `git push origin <branch>`
+   authenticates the same way, without asking for a username or password.
+
+GuildBotics issues a separate owner token per machine on first use, labelled
+`git:<device name> (<device ID suffix>)`, and keeps it only in that machine's
+OS keychain. For connection setup, platform details, and troubleshooting, see
+GuildBotics' [Use Branvil from your own checkouts](https://github.com/GuildBotics/GuildBotics/blob/main/docs/branvil_integration.en.md#use-branvil-from-your-own-checkouts)
+([日本語](https://github.com/GuildBotics/GuildBotics/blob/main/docs/branvil_integration.ja.md)).
+
+### Your own checkout without GuildBotics
+
+Use an OS credential store and a separate token for each machine:
+
+1. On the client machine, install or enable a Git helper backed by the OS
+   credential store. Windows Git Credential Manager uses `manager`; macOS
+   Keychain uses `osxkeychain`. On Linux, install a Secret Service helper such
+   as `git-credential-libsecret` and have its keyring unlocked in your login
+   session. Do not use `store`, which writes passwords in plaintext.
+2. Run `git config --global --edit` on that machine and add this at the end
+   (use your base URL). Choose the helper installed on that machine:
+
+   ```ini
+   [credential "http://127.0.0.1:7878"]
+       helper =
+       helper = manager
+   ```
+
+   Replace `manager` with `osxkeychain` on macOS, or with the installed
+   `libsecret` helper's name or executable path on Linux. Keep these lines
+   last so only this helper saves Branvil's credentials.
+3. On the Hub, with Branvil running, issue a token for this machine:
+
+   ```sh
+   branvil member token alice --label mini-win-git --data-dir /path/to/branvil-data
+   ```
+
+   Replace `alice` with the owner's member name, the label with a unique
+   `<machine-name>-git`, and the data directory with the service's directory.
+   The CLI reads the Hub's owner credential itself and prints the new token
+   once. Run this in a private terminal without session recording; transfer
+   it to the client through a trusted private channel, not a command line,
+   file, or shared message.
+4. Set `origin` and run `git fetch origin` as above. At Git's credential
+   prompt, enter the owner's member name as the username and paste the newly
+   issued token as the password. Enter it only in the password field, never
+   at a shell prompt. After a successful fetch, the helper saves it in the OS
+   credential store; clear the clipboard and the issuing terminal's
+   scrollback. A second fetch and `git push origin <branch>` should use the
+   saved credential without prompting. Push a feature branch with a commit
+   when checking write access.
+
+### Retiring a machine
+
+Under Branvil's **Settings → Members → owner → Tokens**, revoke that machine's
+`<machine-name>-git` token (or its `git:` token when using GuildBotics), leaving
+the other machines' tokens in place. Remove the saved credential from the
+retired machine's OS credential store as well, if you still have access.
+
+A connected GuildBotics can issue a new token after revocation. To cut that
+machine off, first remove it from the GuildBotics Hub, revoke `app:GuildBotics`
+and reconnect GuildBotics on a retained machine, let the retained machines
+fetch the new connection, then revoke the retired machine's `git:` token.
+The linked GuildBotics guide describes this procedure too.
+
+For automation, give Git credentials through a helper or `GIT_ASKPASS`. The
+tests in `tests/` use an askpass script that reads the name and token from
+environment variables.
+
 ## Several machines
 
 Branvil runs once, on the GuildBotics Hub machine, listening on loopback. Every
 machine uses the same base URL (`http://127.0.0.1:7878`), so URLs recorded in
-GuildBotics work everywhere. On every other machine, `branvil tunnel` forwards
-that local port to the Hub over the SSH connection you already use for the Hub:
+GuildBotics work everywhere. On other machines, GuildBotics Desktop (or the
+service of `guildbotics start`) forwards that port while running; no Branvil
+binary is needed there. Configure Git authentication separately using
+[Your own checkout with GuildBotics](#your-own-checkout-with-guildbotics).
+
+Without GuildBotics running, install Branvil on the client and keep
+`branvil tunnel` running to forward that local port over the SSH connection
+you already use for the Hub. Authenticate Git using the
+[OS credential store procedure](#your-own-checkout-without-guildbotics) above:
 
 ```sh
 branvil tunnel --via hub            # a Host from ~/.ssh/config, or user@host
