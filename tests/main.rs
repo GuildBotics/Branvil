@@ -22,5 +22,4 @@ mod real_executor;
 mod recovery;
 mod security;
 mod tickets;
-mod tunnel;
 mod upstream;

@@ -15,7 +15,7 @@ covers it is named in brackets.
 ```
 other machine                                 Hub machine (Branvil's OS user)
 browser / GuildBotics / git ─ 127.0.0.1:7878 ─ ssh -L ═══ sshd ─ 127.0.0.1:7878 ─ branvil serve
-                              (branvil tunnel)                                    ├─ <data>/ (0700)
+                              (OS service)                                        ├─ <data>/ (0700)
                                                                                   └─ git children
 ```
 
@@ -36,14 +36,12 @@ itself speaks plain HTTP on loopback only).
 
 - `branvil serve` refuses a non-loopback listen address (`src/config.rs`,
   `Config::load`) [unit `non_loopback_listen_is_refused`].
-- Other machines reach it only through `branvil tunnel`, which runs
-  `ssh -N -L 127.0.0.1:<port>:127.0.0.1:<remote-port> -- <destination>` with
-  `ExitOnForwardFailure=yes` and `BatchMode=yes` (`src/tunnel.rs`). The forward
-  binds the client's loopback only, never `GatewayPorts`. The destination is
-  refused when it starts with `-` or has whitespace or control characters, so
-  it cannot become an ssh option; `--` ends ssh's options anyway. Keys, host
-  keys, and host names come from the user's OpenSSH configuration; Branvil
-  stores none of them [`tests/tunnel.rs`].
+- Other machines reach it through OpenSSH port forwarding managed by an OS
+  service, outside Branvil. The setup in `README.md`, "Several machines", uses
+  `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o BatchMode=yes
+  -L 127.0.0.1:7878:127.0.0.1:7878 -- <hub>`. Both ends use loopback and the
+  base URL's port. Keys, host keys, and host names belong to the user's OpenSSH
+  configuration; Branvil neither stores them nor supervises the connection.
 - Every response carries `Content-Security-Policy` (`default-src 'self';
   script-src 'self'`, no inline scripts, `frame-ancestors 'none'`; inline
   styles are allowed because the GUI's components set their look through

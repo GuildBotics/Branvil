@@ -10,7 +10,8 @@ listens on loopback only; CI jobs run in a separate `branvil runner` process.
 Status: the service core (Git hosting, workspaces, tickets and boards, pull requests,
 reviews, merge, recovery), CI (pipelines, queue, runner, microVM executor),
 following an upstream on GitHub and publishing pull requests to it,
-`branvil tunnel`, and backup/restore are implemented and tested. The GuildBotics `branvil` provider lives in GuildBotics
+and backup/restore are implemented and tested. The GuildBotics `branvil`
+provider lives in GuildBotics
 (`guildbotics/integrations/branvil/`); this repository checks it against a
 real service (see "Checking with GuildBotics"). See
 [`docs/architecture.md`](docs/architecture.md) for what exists.
@@ -314,93 +315,164 @@ environment variables.
 
 Branvil runs once, on the GuildBotics Hub machine, listening on loopback. Every
 machine uses the same base URL (`http://127.0.0.1:7878`), so URLs recorded in
-GuildBotics work everywhere. On other machines, GuildBotics Desktop (or the
-service of `guildbotics start`) forwards that port while running; no Branvil
-binary is needed there. Configure Git authentication separately using
-[Your own checkout with GuildBotics](#your-own-checkout-with-guildbotics).
-
-Without GuildBotics running, install Branvil on the client and keep
-`branvil tunnel` running to forward that local port over the SSH connection
-you already use for the Hub:
+GuildBotics work everywhere. On each other machine, use OpenSSH to forward
+that loopback port over the SSH connection you already use for the Hub; no
+Branvil binary is needed there:
 
 ```sh
-branvil tunnel --via hub            # a Host from ~/.ssh/config, or user@host
-branvil tunnel --via hub --port 7878 --remote-port 7878
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o BatchMode=yes -L 127.0.0.1:7878:127.0.0.1:7878 -- hub
 ```
 
-Authenticate Git using the
-[OS credential store procedure](#your-own-checkout-without-guildbotics) above.
+Replace `hub` with a Host from `~/.ssh/config` or `[user@]host`. Connect once
+with `ssh hub` and accept the verified host key before setting up the service.
+`BatchMode=yes` means ssh never prompts: use an unencrypted key or an unlocked
+key in `ssh-agent` available to the service. Keys, host keys, and host names
+belong to OpenSSH; Branvil stores none of them. Keep both ports equal to the
+base URL's port: Branvil refuses other `Host` ports. Do not add `LocalForward`
+for these ports to the host entry: ordinary SSH sessions would compete for
+them. To forward another Hub service, add another `-L` to this same connection.
 
-It runs `ssh -N -L 127.0.0.1:7878:127.0.0.1:7878 -o ExitOnForwardFailure=yes
--o ServerAliveInterval=15 -o BatchMode=yes -- hub` with the system OpenSSH
-client, prints `connecting` / `up` / `down … reconnecting in …`, and starts ssh
-again with a growing delay (1 s doubling to 60 s) whenever it exits. Keys, host
-keys, and host names come from your OpenSSH configuration; Branvil stores none
-of them. `BatchMode=yes` means ssh never prompts: use a key without a
-passphrase or one loaded in `ssh-agent`, and accept the Hub's host key once
-with a plain `ssh hub` first. Keep `--port` equal to the base URL's port:
-Branvil refuses other `Host` ports. When the tunnel is down, clients get a
-connection error; nothing else changes.
+Authenticate Git separately using
+[Your own checkout with GuildBotics](#your-own-checkout-with-guildbotics) or the
+[OS credential store procedure](#your-own-checkout-without-guildbotics).
+
+The `branvil tunnel` command has been removed. Before updating an older client
+CLI, stop and disable that command or its service, then replace it with the
+service below. Run only one forwarding service for the ports on each client.
+When forwarding is down,
+clients get a connection error; the Hub service and its data are unaffected.
 
 ### Keeping the tunnel running
 
-The following were written for this build but **not executed** on these
-systems; adjust paths (`which branvil`) and the destination.
+OpenSSH maintains the connection; the OS service starts it at login and
+restarts it when it exits. This works independently of Branvil's CLI and
+GuildBotics Desktop.
 
-macOS (launchd), `~/Library/LaunchAgents/com.guildbotics.branvil-tunnel.plist`,
-then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.guildbotics.branvil-tunnel.plist`:
+With GuildBotics, its bundled scripts register this OS service. From a
+GuildBotics checkout on the client:
+
+```sh
+# macOS / Linux
+sh scripts/hub-forward.sh install --hub hub --port 7878
+sh scripts/hub-forward.sh status
+```
+
+```powershell
+# Windows (Task Scheduler)
+powershell -ExecutionPolicy Bypass -File scripts\hub-forward.ps1 -Action install -Hub hub -Port 7878
+powershell -ExecutionPolicy Bypass -File scripts\hub-forward.ps1 -Action status
+```
+
+These scripts need only OpenSSH and the OS service manager. For multiple Hub
+services, supply the complete port list in one install: repeat `--port` on
+macOS/Linux, or use `-Port "7878,12345"` on Windows (replace 12345 with the
+other service's actual port). On Linux, an agent needs a stable absolute
+socket path passed with `--agent-socket`; without it the script disables agent
+use and requires an unencrypted key. See GuildBotics'
+[SSH forwarding setup](https://github.com/GuildBotics/GuildBotics/blob/main/docs/branvil_integration.en.md#set-up-ssh-forwarding-on-another-machine)
+([日本語](https://github.com/GuildBotics/GuildBotics/blob/main/docs/branvil_integration.ja.md)).
+
+Without those scripts, use the following manual setups instead. These examples
+have **not been executed** on the target systems; adjust the SSH executable
+path and destination. They run while the user is logged in.
+
+macOS (launchd): create `~/Library/LaunchAgents` if needed and save
+`~/Library/LaunchAgents/local.hub-forward.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.guildbotics.branvil-tunnel</string>
+  <key>Label</key><string>local.hub-forward</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/branvil</string>
-    <string>tunnel</string>
-    <string>--via</string>
+    <string>/usr/bin/ssh</string>
+    <string>-N</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>ServerAliveInterval=15</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-L</string><string>127.0.0.1:7878:127.0.0.1:7878</string>
+    <string>--</string>
     <string>hub</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/tmp/branvil-tunnel.log</string>
+  <key>ThrottleInterval</key><integer>15</integer>
 </dict>
 </plist>
 ```
 
-Linux (systemd user unit), `~/.config/systemd/user/branvil-tunnel.service`,
-then `systemctl --user daemon-reload && systemctl --user enable --now branvil-tunnel`
-(and `loginctl enable-linger $USER` to run it without a login session):
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hub-forward.plist
+launchctl print gui/$(id -u)/local.hub-forward
+# Stop and unregister:
+# launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/local.hub-forward.plist
+```
+
+Linux (systemd user unit): create `~/.config/systemd/user` if needed and save
+`~/.config/systemd/user/hub-forward.service`:
 
 ```ini
 [Unit]
-Description=Branvil SSH tunnel to the Hub
+Description=OpenSSH forwarding to the Hub
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
-ExecStart=%h/.cargo/bin/branvil tunnel --via hub
+ExecStart=/usr/bin/ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o BatchMode=yes -L 127.0.0.1:7878:127.0.0.1:7878 -- hub
 Restart=always
-RestartSec=5
+RestartSec=15
 
 [Install]
 WantedBy=default.target
 ```
 
-The unit needs `ssh-agent` or a key without a passphrase; a user unit does not
-see the `SSH_AUTH_SOCK` of a desktop session unless you import it
-(`systemctl --user import-environment SSH_AUTH_SOCK`).
-
-Windows (Task Scheduler), in PowerShell, using the OpenSSH client that ships
-with Windows:
-
-```powershell
-$action  = New-ScheduledTaskAction -Execute "$env:USERPROFILE\.cargo\bin\branvil.exe" -Argument "tunnel --via hub"
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-$settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit 0
-Register-ScheduledTask -TaskName "Branvil tunnel" -Action $action -Trigger $trigger -Settings $settings
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now hub-forward.service
+systemctl --user status hub-forward.service
+journalctl --user -u hub-forward.service
+# Stop and unregister:
+# systemctl --user disable --now hub-forward.service
 ```
+
+The unit needs an unencrypted key or an agent. A user unit does not inherit
+the login shell's `SSH_AUTH_SOCK`: for an agent, add
+`Environment=SSH_AUTH_SOCK=/absolute/stable/agent.sock` under `[Service]`, using
+your agent's actual stable socket path, then reload and restart the unit.
+macOS uses the agent available to launchd. If forwarding must continue without
+a login session on Linux, enable lingering with `loginctl enable-linger "$USER"`.
+
+Windows (Task Scheduler): enable the Windows OpenSSH Client, then create a
+task named **Hub forwarding** under your own user account:
+
+1. **General:** run only when this user is logged on; no elevated privileges.
+2. **Triggers:** at logon of this user. Under advanced settings, repeat every
+   **1 minute**, indefinitely, with the trigger enabled.
+3. **Actions:** start `C:\Windows\System32\OpenSSH\ssh.exe`, with arguments
+   `-N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o BatchMode=yes -L 127.0.0.1:7878:127.0.0.1:7878 -- hub`.
+4. **Conditions:** clear the AC-power-only and stop-on-battery conditions if
+   forwarding should work on battery too.
+5. **Settings:** clear the execution time limit; for an already running task,
+   choose **Do not start a new instance**. The repeated trigger retries after
+   any exit, including a successful exit, without opening a second connection.
+6. Sign out and back in to activate the repeating logon trigger. **Run** can
+   test the connection immediately, but does not activate the trigger's repeat
+   schedule. Inspect **Status**, **Last Run Result**, and task history in Task
+   Scheduler. To stop forwarding, disable the task and end its running instance;
+   delete it to unregister it.
+
+Use an unencrypted key, or enable the OpenSSH Authentication Agent service
+and load the key before starting the task. This manual task may show a console;
+GuildBotics' script installs a task that runs without one.
+
+Service status shows the SSH process, not Branvil's health. After setup, open
+`http://127.0.0.1:7878` in a browser and run `git fetch origin` in your own
+checkout with the authentication above. If the port is already occupied, stop
+the other forward before retrying. Inspect the OS service's status when the
+connection drops; SSH keepalives detect a lost connection and the service
+starts another one.
 
 ## CI
 

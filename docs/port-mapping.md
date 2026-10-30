@@ -21,7 +21,8 @@ to GitHub's.
 error response, a connection failure, or a timeout → `ServiceError` with a
 message that names Branvil and the operation (never the response body verbatim
 beyond the service's own `message`, which carries no secrets). A connection
-failure says Branvil is not reachable at the base URL (the SSH tunnel may be down).
+failure says Branvil is not reachable at the base URL (the OpenSSH forwarding
+service may be down; see `README.md`, "Several machines").
 
 "contract" means GuildBotics' port contract tests
 (`tests/guildbotics/integrations/contracts/`) for `branvil`, which run against

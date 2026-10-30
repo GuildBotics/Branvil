@@ -341,7 +341,7 @@ impl Config {
             .with_context(|| format!("listen address '{listen_text}' is not host:port"))?;
         if !listen.ip().is_loopback() {
             bail!(
-                "Branvil listens on loopback only ({listen} is not); other machines reach it through `branvil tunnel`"
+                "Branvil listens on loopback only ({listen} is not); other machines reach it through OpenSSH port forwarding"
             );
         }
         let base_url = match base_url.map(str::to_string).or(file.base_url.clone()) {
