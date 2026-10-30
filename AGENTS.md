@@ -53,9 +53,9 @@ hold across modules:
   knows no code host; everything host-specific goes in the provider's
   implementation of `Host` (`src/upstream/host.rs`), today only
   `src/upstream/github.rs`.
-- **Branvil listens on loopback only.** Other machines reach it through the SSH
-  port forward of `branvil tunnel` (`src/config.rs` refuses any other listen
-  address).
+- **Branvil listens on loopback only.** Other machines reach it through OpenSSH
+  port forwarding managed by the OS (`src/config.rs` refuses any other listen
+  address). SSH connections and their supervision belong outside Branvil.
 - **The HTTP API is the only way into the data.** The GUI, GuildBotics'
   provider, and the `branvil` CLI's client commands all use it. Only
   `branvil init`, `branvil admin check|reindex|upgrade`, and `branvil restore`, run

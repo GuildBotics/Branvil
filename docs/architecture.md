@@ -2,8 +2,8 @@
 
 Branvil is one Rust process (`branvil serve`) plus Git child processes, and a
 separate CI runner process (`branvil runner`) that executes jobs in microVMs. It
-listens on loopback only; other machines reach it through an SSH port forward
-(`branvil tunnel`, see `README.md`). The HTTP API is the only way into the
+listens on loopback only; other machines reach it through OpenSSH port forwarding
+managed by an OS service (see `README.md`). The HTTP API is the only way into the
 data: the GUI, the GuildBotics `branvil` provider, and the `branvil` CLI's
 admin commands all use it.
 
@@ -39,7 +39,6 @@ branvil runner ── runner API (HTTP) ─ ci ─ redb queue · ci/ files      
 | `webhook.rs` | bounded webhook delivery shared by the service and offline CLI; never exposes the URL in errors |
 | `autoland.rs` | the task that advances every repository's landing queues, automatically merges or publishes with `auto_land`, and tells the webhook when automatic landing gates pass; independently sweeps CI failure notifications (`ci/notify.rs`) |
 | `backup.rs` | `POST /admin/backup` (online, consistent) and the offline `branvil restore` (`docs/backup-restore.md`) |
-| `tunnel.rs` | `branvil tunnel`: the system `ssh -N -L` forward to the Hub machine, restarted with backoff |
 | `events.rs` | bounded broadcast for SSE and the landing task |
 | `http.rs` | router, Host/Origin guard, security headers, idempotency middleware, extractors, SSE, GUI files |
 | `references.rs` | Markdown reference syntax and prose ranges, shared by display and upstream rewriting |
@@ -597,7 +596,7 @@ Agents never enter the GUI; they use their own tokens with the API and Git.
 
 ### Local apps: an owner token through a consent screen
 
-Other machines reach Branvil at the same base URL through `branvil tunnel` but
+Other machines reach Branvil at the same base URL through OpenSSH forwarding but
 cannot read `owner.token`. A local app there (for example GuildBotics Desktop,
 which sets Branvil up for its members and opens the GUI) gets an owner token of
 its own instead, through the consent screen (`docs/api.md`, "Local apps"):

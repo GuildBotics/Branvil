@@ -22,7 +22,7 @@ export const ja: Record<MessageKey, string> = {
   "common.notAvailableYet": "このBranvilではまだ利用できません。",
   "common.forbidden": "権限がありません。",
   "common.sessionChanged": "今回の書き込みは保存されていません。入力した内容を控えてから、ページを再読み込みしてもう一度お試しください。",
-  "common.networkError": "Branvilに届きません。サービス（またはSSHトンネル）が動いているか確認してください。",
+  "common.networkError": "Branvilに届きません。HubでBranvilが動いているか確認してください。Hub以外のマシンから開いている場合は、OpenSSHの転送サービスが動いているかも確認してください。",
 
   "nav.main": "メイン",
   "nav.home": "ホーム",

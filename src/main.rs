@@ -22,7 +22,6 @@ mod refs;
 mod runner;
 mod smart_http;
 mod store;
-mod tunnel;
 mod upgrade;
 mod upstream;
 mod util;
@@ -154,29 +153,6 @@ enum Command {
         command: cli::AdminCommand,
         #[command(flatten)]
         data: DataArgs,
-    },
-    /// Forward a local port to the Branvil of the Hub machine over SSH, reconnecting when it drops
-    #[command(
-        long_about = "Forward a local port to the Branvil of the Hub machine over SSH.\n\n\
-Runs `ssh -N -L 127.0.0.1:<port>:127.0.0.1:<remote-port> <via>` with the system OpenSSH client and starts it again \
-(with a growing delay) whenever it exits. Keys, host keys, and host names come from your OpenSSH configuration; \
-Branvil stores none of them. Keep --port equal to the port of the base URL so every machine uses the same URLs."
-    )]
-    Tunnel {
-        /// SSH destination of the Hub machine (a host from ~/.ssh/config, or user@host)
-        #[arg(long)]
-        via: String,
-        /// Local loopback port to listen on
-        #[arg(long, default_value_t = 7878)]
-        port: u16,
-        /// Port Branvil listens on at the Hub machine
-        #[arg(long, default_value_t = 7878)]
-        remote_port: u16,
-        /// First reconnect delay in milliseconds (doubles up to --backoff-max-ms)
-        #[arg(long, default_value_t = 1000, hide = true)]
-        backoff_min_ms: u64,
-        #[arg(long, default_value_t = 60_000, hide = true)]
-        backoff_max_ms: u64,
     },
     /// Write a consistent backup of the running service into a new directory on its machine
     Backup {
@@ -326,23 +302,6 @@ async fn run(cli: Cli) -> anyhow::Result<u8> {
         Command::Admin { command, data } => {
             cli::admin(command, data.config.as_deref(), data.data_dir.as_deref()).await
         }
-        Command::Tunnel {
-            via,
-            port,
-            remote_port,
-            backoff_min_ms,
-            backoff_max_ms,
-        } => tunnel::run(tunnel::Options {
-            via,
-            port,
-            remote_port,
-            backoff_min: std::time::Duration::from_millis(backoff_min_ms.max(1)),
-            backoff_max: std::time::Duration::from_millis(
-                backoff_max_ms.max(backoff_min_ms.max(1)),
-            ),
-        })
-        .await
-        .map(|_| 0),
         Command::Backup { to, client, data } => cli::backup(&to, &client, &data_config(&data))
             .await
             .map(|_| 0),
