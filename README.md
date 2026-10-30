@@ -366,6 +366,31 @@ Stop-ScheduledTask -TaskName "Branvil tunnel"
 Unregister-ScheduledTask -TaskName "Branvil tunnel" -Confirm:$false
 ```
 
+On Windows, stopping the old task may leave its child `ssh.exe` running.
+Before starting the replacement service, inspect the SSH processes and the
+port's listeners (use your base URL's port if it is not 7878):
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'" |
+    Format-List ProcessId, ParentProcessId, CommandLine
+netstat -ano | findstr "127.0.0.1:7878"
+```
+
+Check the command line's Hub destination and `-L` ports to identify the old
+forward; leave unrelated SSH processes running. Include an old SSH process
+still connecting, even if it has no `LISTENING` row yet. For each verified old
+forward, stop just that process using its `ProcessId` in the same PowerShell
+window:
+
+```powershell
+$oldForwardPid = [int](Read-Host "ProcessId of the verified old SSH forward")
+Stop-Process -Id $oldForwardPid
+```
+
+Repeat the process and listener checks until no old forward remains, then
+start the replacement. Windows OpenSSH can bind the same port more than once,
+so a successful new forward alone does not show that the old one has stopped.
+
 ### Keeping forwarding running
 
 OpenSSH maintains the connection; the OS service starts it at login and
