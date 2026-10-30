@@ -22,14 +22,14 @@ browser / GuildBotics / git ─ 127.0.0.1:7878 ─ ssh -L ═══ sshd ─ 127
 | Who | Can | Branvil's defence |
 | --- | --- | --- |
 | A web page in the user's browser | Send requests to `127.0.0.1:7878` (CSRF), or to an attacker name that resolves to 127.0.0.1 (DNS rebinding) | Host check, Origin check, `SameSite=Strict` cookie, CSRF header, no CORS |
-| Another process or OS user on the Hub or a tunnel client | Connect to the loopback port | Every request authenticates (token or session); there is no anonymous access except `GET /api/v1/health`, exchanging a single-use entry code for a session, and exchanging a local app's single-use code with its PKCE verifier for its token |
+| Another process or OS user on the Hub or a forwarding client | Connect to the loopback port | Every request authenticates (token or session); there is no anonymous access except `GET /api/v1/health`, exchanging a single-use entry code for a session, and exchanging a local app's single-use code with its PKCE verifier for its token |
 | A member (an AI agent) | Use its token within what its kind may do | Fixed rights per member kind (owner-only settings, merges, and administration), protected branches, server-side hooks, path and name validation, entry ids bound to their item |
 | Repository content | Contain hooks, Markdown, odd ref names | Repository hooks never run; Markdown is sanitized by the GUI; only `refs/heads/*` and `refs/tags/*` can be pushed |
 | An external Git host | Diverge, refuse, or be unreachable | Branvil never force-pushes, never deletes there, never overwrites local refs from it |
 
 Out of scope: anyone who runs code as Branvil's OS user or as root (they can
 read the data directory and process environments), a compromised Hub machine,
-and network attackers between machines (OpenSSH protects the tunnel; Branvil
+and network attackers between machines (OpenSSH protects the connection; Branvil
 itself speaks plain HTTP on loopback only).
 
 ## Network exposure
@@ -97,7 +97,7 @@ itself speaks plain HTTP on loopback only).
   file token, the automatic runner's, or an app's through it
   [`tests/security.rs`
   `replacing_a_label_leaves_one_token_of_it_and_reserved_labels_are_refused`].
-- A local app on a machine that reaches Branvil (a tunnel client) gets an
+- A local app on a machine that reaches Branvil (a forwarding client) gets an
   owner token without `owner.token` through a consent screen (`docs/api.md`,
   "Local apps"): the owner allows it on the GUI page `/-/authorize` with the
   owner's session and CSRF header (or an owner Bearer token), and the app
@@ -369,7 +369,7 @@ service log for the tokens].
 - **No rate limit** on failed authentication. Tokens carry 256 bits of
   randomness, so guessing is not practical, but failed attempts are not
   counted or logged.
-- **Plain HTTP.** Between machines the SSH tunnel encrypts; on each machine
+- **Plain HTTP.** Between machines OpenSSH encrypts the connection; on each machine
   any local process can connect to the forwarded loopback port (it still needs
   a token). The session cookie has no `Secure` flag for the same reason.
 - **The owner is trusted**: the owner chooses which repository on the host is

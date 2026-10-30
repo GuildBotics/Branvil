@@ -20,7 +20,7 @@ export const en = {
   "common.notAvailableYet": "Not available yet on this Branvil.",
   "common.forbidden": "You do not have permission.",
   "common.sessionChanged": "This change was not saved. Copy what you entered, then reload the page and try again.",
-  "common.networkError": "Branvil is not reachable. Check that Branvil is running on the Hub and, on another machine, that the OpenSSH forwarding service is running.",
+  "common.networkError": "Branvil is not reachable. Check that Branvil is running on the Hub. If you are using a machine other than the Hub, also check that the OpenSSH forwarding service is running.",
 
   "nav.main": "Main",
   "nav.home": "Home",

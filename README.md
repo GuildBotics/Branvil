@@ -271,7 +271,7 @@ Use an OS credential store and a separate token for each machine:
    If Git Credential Manager refuses the `http://` remote as unsafe, add
    `allowUnsafeRemotes = true` inside that same URL-specific credential
    section. Use this exception only for Branvil's loopback URL, with the
-   SSH tunnel to the Hub running; do not enable it for all remotes. See
+   OpenSSH forwarding to the Hub running; do not enable it for all remotes. See
    GCM's [unsafe remote URL settings](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/netconfig.md#unsafe-remote-urls).
 3. On the Hub, with Branvil running, issue a token for this machine:
 
@@ -339,10 +339,34 @@ Authenticate Git separately using
 The `branvil tunnel` command has been removed. Before updating an older client
 CLI, stop and disable that command or its service, then replace it with the
 service below. Run only one forwarding service for the ports on each client.
-When forwarding is down,
-clients get a connection error; the Hub service and its data are unaffected.
+When forwarding is down, clients get a connection error; the Hub service and
+its data are unaffected.
 
-### Keeping the tunnel running
+If you registered the old README's examples, retire them on the client with
+the commands for your OS below. Adjust the names and paths if you customized
+them. For a command started in a terminal, stop it with Ctrl-C instead.
+
+```sh
+# macOS: unload, then remove the login definition so it stays stopped.
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.guildbotics.branvil-tunnel.plist
+rm ~/Library/LaunchAgents/com.guildbotics.branvil-tunnel.plist
+```
+
+```sh
+# Linux: stop, disable login startup, and remove the old unit.
+systemctl --user disable --now branvil-tunnel.service
+rm ~/.config/systemd/user/branvil-tunnel.service
+systemctl --user daemon-reload
+```
+
+```powershell
+# Windows: disable retries/startup, stop the running task, then unregister it.
+Disable-ScheduledTask -TaskName "Branvil tunnel"
+Stop-ScheduledTask -TaskName "Branvil tunnel"
+Unregister-ScheduledTask -TaskName "Branvil tunnel" -Confirm:$false
+```
+
+### Keeping forwarding running
 
 OpenSSH maintains the connection; the OS service starts it at login and
 restarts it when it exits. This works independently of Branvil's CLI and
@@ -376,8 +400,10 @@ Without those scripts, use the following manual setups instead. These examples
 have **not been executed** on the target systems; adjust the SSH executable
 path and destination. They run while the user is logged in.
 
-macOS (launchd): create `~/Library/LaunchAgents` if needed and save
-`~/Library/LaunchAgents/local.hub-forward.plist`:
+macOS (launchd): create `~/Library/LaunchAgents` and `~/Library/Logs` if needed
+and save `~/Library/LaunchAgents/local.hub-forward.plist`. Replace `/Users/you`
+in `StandardErrorPath` with your absolute home path; plist values do not expand
+`~` or `$HOME`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -399,6 +425,7 @@ macOS (launchd): create `~/Library/LaunchAgents` if needed and save
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>15</integer>
+  <key>StandardErrorPath</key><string>/Users/you/Library/Logs/hub-forward.log</string>
 </dict>
 </plist>
 ```
@@ -406,8 +433,10 @@ macOS (launchd): create `~/Library/LaunchAgents` if needed and save
 ```sh
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hub-forward.plist
 launchctl print gui/$(id -u)/local.hub-forward
+tail -n 50 ~/Library/Logs/hub-forward.log
 # Stop and unregister:
 # launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/local.hub-forward.plist
+# rm ~/Library/LaunchAgents/local.hub-forward.plist
 ```
 
 Linux (systemd user unit): create `~/.config/systemd/user` if needed and save
@@ -435,6 +464,8 @@ systemctl --user status hub-forward.service
 journalctl --user -u hub-forward.service
 # Stop and unregister:
 # systemctl --user disable --now hub-forward.service
+# rm ~/.config/systemd/user/hub-forward.service
+# systemctl --user daemon-reload
 ```
 
 The unit needs an unencrypted key or an agent. A user unit does not inherit
