@@ -266,6 +266,12 @@ Use an OS credential store and a separate token for each machine:
    Replace `manager` with `osxkeychain` on macOS, or with the installed
    `libsecret` helper's name or executable path on Linux. Keep these lines
    last so only this helper saves Branvil's credentials.
+
+   If Git Credential Manager refuses the `http://` remote as unsafe, add
+   `allowUnsafeRemotes = true` inside that same URL-specific credential
+   section. Use this exception only for Branvil's loopback URL, with the
+   SSH tunnel to the Hub running; do not enable it for all remotes. See
+   GCM's [unsafe remote URL settings](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/netconfig.md#unsafe-remote-urls).
 3. On the Hub, with Branvil running, issue a token for this machine:
 
    ```sh
@@ -315,13 +321,15 @@ binary is needed there. Configure Git authentication separately using
 
 Without GuildBotics running, install Branvil on the client and keep
 `branvil tunnel` running to forward that local port over the SSH connection
-you already use for the Hub. Authenticate Git using the
-[OS credential store procedure](#your-own-checkout-without-guildbotics) above:
+you already use for the Hub:
 
 ```sh
 branvil tunnel --via hub            # a Host from ~/.ssh/config, or user@host
 branvil tunnel --via hub --port 7878 --remote-port 7878
 ```
+
+Authenticate Git using the
+[OS credential store procedure](#your-own-checkout-without-guildbotics) above.
 
 It runs `ssh -N -L 127.0.0.1:7878:127.0.0.1:7878 -o ExitOnForwardFailure=yes
 -o ServerAliveInterval=15 -o BatchMode=yes -- hub` with the system OpenSSH
