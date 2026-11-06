@@ -659,7 +659,7 @@ impl Executor for Microsandbox {
             .args(["--cpus", &job.cpus.to_string()])
             .args(["--memory", &format!("{}M", job.memory_mib)])
             .args(["--user", &format!("{JOB_USER_ID}:{JOB_USER_ID}")])
-            .args(["--mount-dir", &format!("{work}:/work:{owner}")])
+            .args(["--mount-dir", &format!("{work}:/work:{owner},quota=16G")])
             .args(["--mount-dir", &format!("{log_dir}:{LOG_MOUNT}:{owner}")])
             // On a disk, not in the VM's memory (msb's default /tmp).
             .args([
@@ -1067,15 +1067,18 @@ esac
             assert!(text.contains(line), "{line} in {text}");
         }
         // The job ran as the fixed user, its directories presented as that
-        // user's, its /tmp on a disk volume of its own; the volume is removed
-        // after the sandbox.
+        // user's, its /work quota set to 16G, and its /tmp on a disk volume
+        // of its own that is removed after the sandbox.
         let args = std::fs::read_to_string(state.join("args")).unwrap();
         let args: Vec<&str> = args.lines().collect();
         for (flag, value) in [
             ("--user", "1000:1000".to_string()),
             (
                 "--mount-dir",
-                format!("{}:/work:uid=1000,gid=1000", root.join("work").display()),
+                format!(
+                    "{}:/work:uid=1000,gid=1000,quota=16G",
+                    root.join("work").display()
+                ),
             ),
             (
                 "--mount-dir",
