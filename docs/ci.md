@@ -108,11 +108,9 @@ What a job's commands find, as on common CI services:
 - **`/tmp` is on a disk, not in the VM's memory**: an ext4 disk of 4 GiB of
   the job's own (mode 1777), a named volume `bv-tmp-<runner>-<attempt id>`
   the runner removes after the job. (Without it, microsandbox puts `/tmp` in
-  a tmpfs of a quarter of the VM's memory, at most 512 MiB.) The job's disk
-  sizes are microsandbox's 4 GiB default, decided together: the VM's root
-  disk (Branvil passes no `--root-disk`), `/tmp`, and what the job may add to
-  `/work` beyond the checkout and the restored cache (the default quota of a
-  mounted directory). They are the runner's, not the pipeline's.
+  a tmpfs of a quarter of the VM's memory, at most 512 MiB.) The VM's root
+  disk uses microsandbox's 4 GiB default. The runner gives each job a
+  16 GiB write quota in `/work` beyond the checkout and restored cache.
 
 ## Trust: where the pipeline comes from
 
@@ -547,7 +545,7 @@ Per job the runner:
    runner's directory is a symbolic link. Git never runs in the work
    directory once the VM has had it;
 3. restores the cache, then runs
-   `msb run --name bv-job-<attempt> --label branvil.runner=<runner> --label branvil.job=<attempt> --pull never --cpus N --memory NM --user 1000:1000 --mount-dir <work>:/work:uid=1000,gid=1000 --mount-dir <log>:/.branvil-log:uid=1000,gid=1000 --mount-named bv-tmp-<runner>-<attempt>:/tmp:kind=disk,size=4G --workdir /work --max-duration <timeout+60>s --no-net <image> -- /bin/sh -c <script>`
+   `msb run --name bv-job-<attempt> --label branvil.runner=<runner> --label branvil.job=<attempt> --pull never --cpus N --memory NM --user 1000:1000 --mount-dir <work>:/work:uid=1000,gid=1000,quota=16G --mount-dir <log>:/.branvil-log:uid=1000,gid=1000 --mount-named bv-tmp-<runner>-<attempt>:/tmp:kind=disk,size=4G --workdir /work --max-duration <timeout+60>s --no-net <image> -- /bin/sh -c <script>`
    (`N` and `M` the runner's CPUs and memory);
    the script first sends its stdout and stderr to `/.branvil-log/out` and
    sets `HOME` ("The job's environment");
